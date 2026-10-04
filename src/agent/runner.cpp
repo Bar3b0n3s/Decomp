@@ -198,14 +198,15 @@ FunctionRunResult run_function(const Program& program, project::Project* project
     const std::string session_id = bus.run_id().empty() ? std::format("{:x}", va) : std::format("{}-{:x}", bus.run_id(), va);
     MatchSession session(program, project, setup, va, &bus, session_id, worker);
     const Symbol& sym = session.symbol();
-    bus.publish(events::SessionStarted{session_id, sym.name, sym.display.empty() ? sym.name : sym.display, va}, worker);
+    const std::string display = sym.display.empty() ? sym.name : sym.display;
+    bus.publish(events::SessionStarted{session_id, sym.name, display, va}, worker);
 
     const project::FunctionInfo before = project ? project->function_info(va) : project::FunctionInfo{};
     if (project && before.status != project::FunctionStatus::matched) {
         project::FunctionInfo info = before;
         info.status = project::FunctionStatus::in_progress;
         if (auto r = project->update_function(va, info); !r) log::warn("cannot update symbols.txt: {}", r.error().message);
-        else bus.publish(events::StatusChanged{sym.name, va, "in_progress"}, worker);
+        else bus.publish(events::StatusChanged{display, va, "in_progress"}, worker);
     }
 
     ToolRegistry tools = make_tools(session);
@@ -258,7 +259,7 @@ FunctionRunResult run_function(const Program& program, project::Project* project
         info.best_match = std::max(before.best_match, result.best_match);
         info.status = final_status(result, before);
         if (auto r = project->update_function(va, info); !r) log::warn("cannot update symbols.txt: {}", r.error().message);
-        else bus.publish(events::StatusChanged{sym.name, va, std::string(project::to_string(info.status))}, worker);
+        else bus.publish(events::StatusChanged{display, va, std::string(project::to_string(info.status))}, worker);
     }
     bus.publish(events::SessionFinished{session_id, result.outcome, result.detail, result.best_match, result.turns, result.cost_usd}, worker);
     return result;

@@ -2,6 +2,7 @@
 #include "agent/runner.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "events/bus.hpp"
 #include "events/run_state.hpp"
 #include "llvm_fixture.hpp"
 #include "test_util.hpp"
@@ -110,6 +111,8 @@ TEST_CASE("agent runner: wrong source, diff, corrected source, submit -> matched
     events::EventBus bus("run-match");
     Recorder rec;
     rec.attach(bus);
+    auto event_log = events::JsonlEventLog::open(dir.path() / "run" / "events.jsonl").value();
+    bus.subscribe([&](const events::Event& e) { event_log->write(e); });
     const auto transcript = dir.path() / "run" / "sessions" / "add.jsonl";
     const FunctionRunResult r = run_function(program, &proj, setup, va, replay_config(replay), bus, transcript);
 
@@ -168,6 +171,20 @@ TEST_CASE("agent runner: wrong source, diff, corrected source, submit -> matched
     CHECK(rec.counts["turn_finished"] == 3);
     CHECK(rec.counts["stream_delta"] > 0);
     CHECK(rec.counts["status_changed"] == 2);  // in_progress, then matched
+
+    // The event log replays into the state the live views saw.
+    const auto replayed = events::RunState::replay(events::read_event_log(dir.path() / "run" / "events.jsonl").value());
+    const auto& again = replayed.data().sessions.at("run-match-" + std::format("{:x}", va));
+    CHECK(again.outcome == session.outcome);
+    CHECK(again.turn == session.turn);
+    CHECK(again.compiles == session.compiles);
+    CHECK(again.tool_calls == session.tool_calls);
+    CHECK(again.best_match == session.best_match);
+    CHECK(again.scores == session.scores);
+    CHECK(again.cost_usd == doctest::Approx(session.cost_usd));
+    CHECK(again.usage.cache_read == session.usage.cache_read);
+    CHECK(session.usage.cache_read > 0);
+    CHECK(replayed.data().activity_total == rec.state.data().activity_total);
 }
 
 TEST_CASE("agent runner: a refusal marks the function refused") {
