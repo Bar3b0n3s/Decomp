@@ -60,7 +60,17 @@ struct Xref {
 // forgets them. Returns (instruction address, field index) pairs.
 std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, std::span<const x86::Instruction> list);
 
-// A loaded target binary: image, symbols and lazily computed analysis results.
+// What happened to the target's PDB when the program was opened.
+enum class PdbStatus : u8 {
+    matched,      // loaded; its GUID and age match the image
+    mismatch,     // found, but for a different build of the image (ignored)
+    unsupported,  // found, but unreadable (for example a PDB 2.0 file from VC6) (ignored)
+    absent,       // none found
+};
+std::string_view to_string(PdbStatus status);
+
+// A loaded target binary: image, symbols and lazily computed analysis results. Copies made with
+// with_symbols() share the image and decoder, so a new symbol generation is cheap.
 class Program {
 public:
     // Loads a PE image. The PDB is taken from `pdb_path`, or found next to the image via its CodeView
@@ -73,6 +83,11 @@ public:
     SymbolDb& symbols() { return symbols_; }
     const std::filesystem::path& path() const { return path_; }
     const std::optional<std::filesystem::path>& pdb_path() const { return pdb_path_; }
+    PdbStatus pdb_status() const { return pdb_status_; }
+    const std::string& pdb_detail() const { return pdb_detail_; }  // why a PDB was ignored
+
+    // The same image with a different symbol database (fresh analysis caches).
+    Program with_symbols(SymbolDb symbols) const;
     Arch arch() const { return image_->arch(); }
 
     // "0x401000", "401000h", a decorated name, a readable name or a PDB name -> address.
@@ -108,9 +123,11 @@ private:
 
     std::filesystem::path path_;
     std::optional<std::filesystem::path> pdb_path_;
-    std::unique_ptr<pe::Image> image_;
-    std::unique_ptr<x86::Decoder> decoder_;
+    std::shared_ptr<const pe::Image> image_;
+    std::shared_ptr<const x86::Decoder> decoder_;
     SymbolDb symbols_;
+    PdbStatus pdb_status_ = PdbStatus::absent;
+    std::string pdb_detail_;
 
     mutable std::unique_ptr<std::once_flag> xref_once_ = std::make_unique<std::once_flag>();
     mutable std::unordered_map<u64, std::vector<Xref>> xrefs_;

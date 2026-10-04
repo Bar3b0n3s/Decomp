@@ -356,7 +356,7 @@ ToolOutput MatchSession::submit_result(const Json& input) {
         best_source_ = source;
     }
     if (project_) {
-        if (auto r = project_->write_matched_source(symbol_, source); r)
+        if (auto r = project_->write_matched_source(symbol_, source, project::ChangeOrigin{SymbolSource::agent, session_id_, "verified match"}); r)
             publish(events::FileWritten{fs::to_utf8(project_->matched_source_path(symbol_)), "matched source"});
     }
     auto out = ToolOutput::ok("accepted: byte-exact match verified.");

@@ -86,6 +86,28 @@ std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, 
     return out;
 }
 
+std::string_view to_string(PdbStatus status) {
+    switch (status) {
+    case PdbStatus::matched: return "matched";
+    case PdbStatus::mismatch: return "mismatch";
+    case PdbStatus::unsupported: return "unsupported";
+    case PdbStatus::absent: return "absent";
+    }
+    return "absent";
+}
+
+Program Program::with_symbols(SymbolDb symbols) const {
+    Program p;
+    p.path_ = path_;
+    p.pdb_path_ = pdb_path_;
+    p.image_ = image_;
+    p.decoder_ = decoder_;
+    p.symbols_ = std::move(symbols);
+    p.pdb_status_ = pdb_status_;
+    p.pdb_detail_ = pdb_detail_;
+    return p;
+}
+
 Result<Program> Program::open(const std::filesystem::path& binary, const std::optional<std::filesystem::path>& pdb_path) {
     Program p;
     p.path_ = binary;
@@ -113,15 +135,21 @@ Result<Program> Program::open(const std::filesystem::path& binary, const std::op
         auto loaded = pdb::Reader::load(candidate);
         if (!loaded) {
             log::warn("ignoring PDB: {}", loaded.error().message);
+            p.pdb_status_ = PdbStatus::unsupported;
+            p.pdb_detail_ = loaded.error().message;
             continue;
         }
         const auto& cv = p.image_->codeview();
         if (cv && cv->signature == "RSDS" && !loaded->matches(cv->guid, cv->age)) {
             log::warn("ignoring PDB '{}': GUID/age does not match the image", fs::to_utf8(candidate));
+            p.pdb_status_ = PdbStatus::mismatch;
+            p.pdb_detail_ = std::format("'{}' belongs to a different build (GUID/age)", fs::to_utf8(candidate));
             continue;
         }
         reader = std::make_unique<pdb::Reader>(std::move(*loaded));
         p.pdb_path_ = candidate;
+        p.pdb_status_ = PdbStatus::matched;
+        p.pdb_detail_.clear();
         break;
     }
     if (pdb_path && !reader) return make_error(ErrorCode::not_found, "PDB '{}' could not be used", fs::to_utf8(*pdb_path));

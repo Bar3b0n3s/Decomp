@@ -257,13 +257,17 @@ FunctionRunResult run_function(const Program& program, project::Project* project
                       {"usage", result.usage.to_json()}});
 
     if (project) {
-        project::FunctionInfo info = project->function_info(va);
-        info.attempts = before.attempts + static_cast<int>(session.attempts().size());
-        info.cost_usd = before.cost_usd + result.cost_usd;
-        info.best_match = std::max(before.best_match, result.best_match);
-        info.status = final_status(result, before);
-        if (auto r = project->update_function(va, info); !r) log::warn("cannot update symbols.txt: {}", r.error().message);
-        else bus.publish(events::StatusChanged{display, va, std::string(project::to_string(info.status))}, worker);
+        // Applied to the latest state under the project lock: other sessions or processes may have
+        // changed this function meanwhile (a match recorded elsewhere stays a match).
+        const int attempts = static_cast<int>(session.attempts().size());
+        auto updated = project->modify_function(va, [&](project::FunctionInfo& info) {
+            info.attempts += attempts;
+            info.cost_usd += result.cost_usd;
+            info.best_match = std::max(info.best_match, result.best_match);
+            info.status = final_status(result, info);
+        });
+        if (!updated) log::warn("cannot update symbols.txt: {}", updated.error().message);
+        else bus.publish(events::StatusChanged{display, va, std::string(project::to_string(updated->status))}, worker);
     }
     bus.publish(events::SessionFinished{session_id, result.outcome, result.detail, result.best_match, result.turns, result.cost_usd}, worker);
     return result;

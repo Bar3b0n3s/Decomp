@@ -124,6 +124,13 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
         TRY_ASSIGN(auto p, project::Project::find(g.project));
         project = std::move(p);
     }
+    // One live run per project: a second agent or run would interleave writes to the same functions.
+    std::optional<FileLock> active_run;
+    if (project) {
+        TRY_ASSIGN(auto lock, project->try_lock_active_run());
+        if (!lock) return make_error(ErrorCode::invalid_argument, "another agent run is active in this project");
+        active_run = std::move(lock);
+    }
     std::optional<std::filesystem::path> pdb_path;
     if (!a.pdb.empty()) pdb_path = fs::from_utf8(a.pdb);
     TRY_ASSIGN(auto program, project ? project->open_program() : Program::open(fs::from_utf8(a.binary), pdb_path));

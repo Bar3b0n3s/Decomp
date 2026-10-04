@@ -1,10 +1,13 @@
 #pragma once
 
 #include "analysis/program.hpp"
+#include "core/file_lock.hpp"
 #include "core/json.hpp"
 #include "core/result.hpp"
 
 #include <filesystem>
+#include <functional>
+#include <memory>
 #include <map>
 #include <optional>
 #include <string>
@@ -47,6 +50,43 @@ struct FunctionInfo {
     double cost_usd = 0;
 };
 
+// Who changed something in the project, for the audit logs.
+struct ChangeOrigin {
+    SymbolSource source = SymbolSource::user;  // user or agent
+    std::string session;                       // agent session (or empty)
+    std::string reason;
+};
+
+// A change to one symbol. Unset fields keep their value; `remove` deletes the symbol.
+struct SymbolEdit {
+    u64 va = 0;
+    std::optional<std::string> name = std::nullopt;
+    std::optional<SymbolKind> kind = std::nullopt;
+    std::optional<u32> size = std::nullopt;
+    bool remove = false;
+};
+
+struct SymbolChange {
+    u64 va = 0;
+    std::optional<Symbol> before, after;
+};
+
+// A file the project wrote, with what it replaced (kept in .decomp/blobs/ so it can be restored).
+struct WriteReceipt {
+    std::filesystem::path path;
+    u64 size = 0;
+    std::string sha1;
+    std::optional<std::string> previous_sha1;
+};
+
+// The target binary as the project sees it.
+struct TargetStatus {
+    std::string expected_sha1, actual_sha1;
+    bool sha1_ok = true;
+    PdbStatus pdb = PdbStatus::absent;
+    std::string pdb_detail;
+};
+
 // A decomp project directory: decomp.json, symbols.txt, include/, src/functions/, .decomp/.
 class Project {
 public:
@@ -59,6 +99,7 @@ public:
     // Creates a project for `binary` in `root`, importing its symbols into symbols.txt.
     static Result<Project> init(const std::filesystem::path& root, const std::filesystem::path& binary,
                                 const std::optional<std::filesystem::path>& pdb, const std::string& toolchain);
+    Project();  // an empty project; use find/load/init
 
     const std::filesystem::path& root() const { return root_; }
     const Config& config() const { return config_; }
@@ -68,14 +109,28 @@ public:
     std::filesystem::path target_path() const { return root_ / config_.target; }
     std::vector<std::filesystem::path> include_paths() const;
 
-    // Loads the target and applies symbols.txt on top of the derived symbols.
-    Result<Program> open_program() const;
-    Result<void> save_symbols(const SymbolDb& symbols) const;
+    // Loads the target and applies symbols.txt on top of the derived symbols. With `verify_target`, a
+    // target whose SHA-1 differs from decomp.json is an error.
+    Result<Program> open_program(bool verify_target = true) const;
+    TargetStatus target_status(const Program& program) const;
+    // Replaces symbols.txt with `symbols` (and the function states the project has).
+    Result<void> save_symbols(const SymbolDb& symbols);
 
-    // Per-function state, keyed by address.
+    // Per-function state, keyed by address. function_infos() is an immutable snapshot.
     FunctionInfo function_info(u64 va) const;
-    const std::map<u64, FunctionInfo>& function_infos() const { return functions_; }
+    std::shared_ptr<const std::map<u64, FunctionInfo>> function_infos() const;
+    // Changes one function's state under the project lock (in-process mutex + .decomp/project.lock),
+    // starting from the latest state on disk, and rewrites symbols.txt. Returns the new state.
+    Result<FunctionInfo> modify_function(u64 va, const std::function<void(FunctionInfo&)>& change);
     Result<void> update_function(u64 va, const FunctionInfo& info);
+    // Renames, creates, resizes or removes a symbol; recorded in .decomp/symbols.log.jsonl.
+    Result<SymbolChange> set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin);
+    // The symbols as symbols.txt holds them.
+    std::vector<Symbol> symbols() const;
+    // Reloads symbols.txt when another process changed it. Returns true when it did.
+    Result<bool> reload_if_changed();
+    // Increases on every change to symbols or function state (in this process or picked up from disk).
+    u64 version() const;
 
     // Working data for one function (attempts, best source, notes).
     std::filesystem::path function_dir(const Symbol& fn) const;
@@ -86,18 +141,33 @@ public:
     Result<void> save_best_source(const Symbol& fn, const std::string& source) const;
     std::string notes(const Symbol& fn) const;
     Result<void> append_note(const Symbol& fn, const std::string& note) const;
-    Result<void> write_matched_source(const Symbol& fn, const std::string& source) const;
+    // Writes the verified source to src/functions/; the previous content is kept as a blob and the
+    // write is recorded in .decomp/changes.jsonl.
+    Result<WriteReceipt> write_matched_source(const Symbol& fn, const std::string& source, const ChangeOrigin& origin = {}) const;
+    // Content kept for a replaced file (see WriteReceipt::previous_sha1).
+    Result<std::string> read_blob(const std::string& sha1) const;
+    std::vector<Json> changes() const;  // .decomp/changes.jsonl, oldest first
+    std::vector<Json> symbol_log() const;  // .decomp/symbols.log.jsonl, oldest first
+
+    // One live run per project: held by the process that runs agent sessions. nullopt when another
+    // process holds it.
+    Result<std::optional<FileLock>> try_lock_active_run() const;
 
     std::filesystem::path runs_dir() const { return root_ / ".decomp" / "runs"; }
     std::filesystem::path build_dir() const { return root_ / ".decomp" / "build"; }
     std::filesystem::path cache_dir() const { return root_ / ".decomp" / "cache"; }
+    std::filesystem::path blobs_dir() const { return root_ / ".decomp" / "blobs"; }
 
 private:
-    Result<void> load_symbols_file();
+    struct State;
+    Result<void> load_symbols_file(State& state) const;
+    Result<void> reload_locked(State& state) const;
+    Result<void> write_symbols_locked(State& state) const;
+    Result<FileLock> lock_project() const;
+
     std::filesystem::path root_;
     Config config_;
-    std::vector<Symbol> symbol_overrides_;  // parsed symbols.txt
-    std::map<u64, FunctionInfo> functions_;
+    std::shared_ptr<State> state_;  // shared by copies of this Project
 };
 
 // "Player::Hit" at 0x401000 -> "Player__Hit_401000" (stable, filesystem-safe, unique per address).

@@ -2,10 +2,13 @@
 
 #include "analysis/demangle.hpp"
 #include "core/fs.hpp"
+#include "core/bytes.hpp"
 #include "core/hash.hpp"
 #include "core/log.hpp"
 #include "core/strings.hpp"
 
+#include <atomic>
+#include <mutex>
 #include <chrono>
 #include <format>
 
@@ -197,6 +200,39 @@ Result<std::pair<Symbol, std::optional<FunctionInfo>>> parse_symbol_line(std::st
     return std::pair{std::move(s), std::move(info)};
 }
 
+struct Project::State {
+    std::mutex mutex;
+    std::map<u64, Symbol> symbols;  // symbols.txt, by address
+    std::shared_ptr<const std::map<u64, FunctionInfo>> functions = std::make_shared<const std::map<u64, FunctionInfo>>();
+    std::atomic<u64> version{1};
+    std::filesystem::file_time_type mtime{};
+    std::uintmax_t size = 0;
+};
+
+Project::Project() : state_(std::make_shared<State>()) {}
+
+namespace {
+
+std::string now_iso() {
+    return std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now()));
+}
+
+Json symbol_json(const std::optional<Symbol>& s) {
+    if (!s) return nullptr;
+    return {{"name", s->name}, {"kind", std::string(to_string(s->kind))}, {"size", s->size}, {"source", std::string(to_string(s->source))}};
+}
+
+std::vector<Json> read_jsonl(const std::filesystem::path& path) {
+    std::vector<Json> out;
+    auto text = fs::read_text(path);
+    if (!text) return out;
+    for (const auto& line : split_lines(*text))
+        if (auto j = parse_json(line)) out.push_back(std::move(*j));
+    return out;
+}
+
+} // namespace
+
 Result<Project> Project::find(const std::string& start) {
     std::filesystem::path from = start.empty() ? std::filesystem::current_path() : fs::from_utf8(start);
     auto dir = fs::find_upwards(from, kConfigFile);
@@ -212,26 +248,64 @@ Result<Project> Project::load(const std::filesystem::path& root) {
     auto config = Config::from_json(json);
     if (!config) return std::unexpected(std::move(config.error()).with_context(fs::to_utf8(root / kConfigFile)));
     p.config_ = std::move(*config);
-    TRY(p.load_symbols_file());
+    std::lock_guard lock(p.state_->mutex);
+    TRY(p.load_symbols_file(*p.state_));
     return p;
 }
 
-Result<void> Project::load_symbols_file() {
+Result<void> Project::load_symbols_file(State& state) const {
+    auto path = root_ / kSymbolsFile;
+    std::map<u64, Symbol> symbols;
+    std::map<u64, FunctionInfo> functions;
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+        TRY_ASSIGN(auto text, fs::read_text(path));
+        usize line_no = 0;
+        for (const auto& raw : split_lines(text)) {
+            ++line_no;
+            auto line = trim(raw);
+            if (line.empty() || line.starts_with('#')) continue;
+            auto parsed = parse_symbol_line(line);
+            if (!parsed) return make_error(ErrorCode::parse, "{}:{}: {}", fs::to_utf8(path), line_no, parsed.error().message);
+            if (parsed->second) functions[parsed->first.va] = *parsed->second;
+            symbols[parsed->first.va] = std::move(parsed->first);
+        }
+        state.mtime = std::filesystem::last_write_time(path, ec);
+        state.size = std::filesystem::file_size(path, ec);
+    }
+    state.symbols = std::move(symbols);
+    state.functions = std::make_shared<const std::map<u64, FunctionInfo>>(std::move(functions));
+    ++state.version;
+    return {};
+}
+
+Result<void> Project::reload_locked(State& state) const {
     auto path = root_ / kSymbolsFile;
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) return {};
-    TRY_ASSIGN(auto text, fs::read_text(path));
-    usize line_no = 0;
-    for (const auto& raw : split_lines(text)) {
-        ++line_no;
-        auto line = trim(raw);
-        if (line.empty() || line.starts_with('#')) continue;
-        auto parsed = parse_symbol_line(line);
-        if (!parsed) return make_error(ErrorCode::parse, "{}:{}: {}", fs::to_utf8(path), line_no, parsed.error().message);
-        if (parsed->second) functions_[parsed->first.va] = *parsed->second;
-        symbol_overrides_.push_back(std::move(parsed->first));
+    const auto mtime = std::filesystem::last_write_time(path, ec);
+    if (ec) return {};
+    const auto size = std::filesystem::file_size(path, ec);
+    if (mtime == state.mtime && size == state.size) return {};
+    return load_symbols_file(state);
+}
+
+Result<void> Project::write_symbols_locked(State& state) const {
+    std::string out = "# decomp symbols: <address> <kind> <name> [size=] [pdb=] [static] [source=] [status=] [best=] [attempts=] [cost=]\n";
+    for (const auto& [va, s] : state.symbols) {
+        auto it = state.functions->find(va);
+        out += format_symbol_line(s, it == state.functions->end() ? nullptr : &it->second) + "\n";
     }
+    const auto path = root_ / kSymbolsFile;
+    TRY(fs::write_text(path, out));
+    std::error_code ec;
+    state.mtime = std::filesystem::last_write_time(path, ec);
+    state.size = std::filesystem::file_size(path, ec);
+    ++state.version;
     return {};
+}
+
+Result<FileLock> Project::lock_project() const {
+    return FileLock::acquire(root_ / ".decomp" / "project.lock", FileLock::Mode::exclusive);
 }
 
 Result<void> Project::save_config() const { return fs::write_text(root_ / kConfigFile, dump_pretty(config_.to_json()) + "\n"); }
@@ -242,42 +316,128 @@ std::vector<std::filesystem::path> Project::include_paths() const {
     return out;
 }
 
-Result<Program> Project::open_program() const {
+Result<Program> Project::open_program(bool verify_target) const {
     std::optional<std::filesystem::path> pdb;
     if (!config_.pdb.empty()) pdb = root_ / fs::from_utf8(config_.pdb);
     TRY_ASSIGN(auto program, Program::open(target_path(), pdb));
-    if (!config_.target_sha1.empty()) {
-        auto actual = sha1_hex(program.image().data());
-        if (actual != config_.target_sha1)
+    if (verify_target) {
+        const TargetStatus status = target_status(program);
+        if (!status.sha1_ok)
             return make_error(ErrorCode::invalid_argument,
                               "target '{}' has changed: its SHA-1 is {} but decomp.json expects {}. The project's symbols and "
                               "results describe the old binary; if the new one is intended, update target.sha1 in decomp.json",
-                              config_.target, actual, config_.target_sha1);
+                              config_.target, status.actual_sha1, status.expected_sha1);
     }
-    for (const auto& s : symbol_overrides_) program.symbols().add(s);
+    for (const auto& s : symbols()) program.symbols().add(s);
     return program;
 }
 
-Result<void> Project::save_symbols(const SymbolDb& symbols) const {
-    std::string out = "# decomp symbols: <address> <kind> <name> [size=] [pdb=] [static] [source=] [status=] [best=] [attempts=] [cost=]\n";
-    for (const auto& [va, s] : symbols) {
-        auto it = functions_.find(va);
-        out += format_symbol_line(s, it == functions_.end() ? nullptr : &it->second) + "\n";
-    }
-    return fs::write_text(root_ / kSymbolsFile, out);
+TargetStatus Project::target_status(const Program& program) const {
+    TargetStatus t;
+    t.expected_sha1 = config_.target_sha1;
+    t.actual_sha1 = sha1_hex(program.image().data());
+    t.sha1_ok = config_.target_sha1.empty() || t.actual_sha1 == config_.target_sha1;
+    t.pdb = program.pdb_status();
+    t.pdb_detail = program.pdb_detail();
+    return t;
+}
+
+Result<void> Project::save_symbols(const SymbolDb& symbols) {
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
+    state_->symbols.clear();
+    for (const auto& [va, s] : symbols) state_->symbols[va] = s;
+    return write_symbols_locked(*state_);
 }
 
 FunctionInfo Project::function_info(u64 va) const {
-    auto it = functions_.find(va);
-    return it == functions_.end() ? FunctionInfo{} : it->second;
+    std::lock_guard lock(state_->mutex);
+    auto it = state_->functions->find(va);
+    return it == state_->functions->end() ? FunctionInfo{} : it->second;
+}
+
+std::shared_ptr<const std::map<u64, FunctionInfo>> Project::function_infos() const {
+    std::lock_guard lock(state_->mutex);
+    return state_->functions;
+}
+
+Result<FunctionInfo> Project::modify_function(u64 va, const std::function<void(FunctionInfo&)>& change) {
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
+    TRY(reload_locked(*state_));
+    auto next = std::make_shared<std::map<u64, FunctionInfo>>(*state_->functions);
+    FunctionInfo& info = (*next)[va];
+    change(info);
+    const FunctionInfo result = info;
+    state_->functions = std::move(next);
+    TRY(write_symbols_locked(*state_));
+    return result;
 }
 
 Result<void> Project::update_function(u64 va, const FunctionInfo& info) {
-    functions_[va] = info;
-    // Persist by rewriting symbols.txt from the current program state.
-    TRY_ASSIGN(auto program, open_program());
-    return save_symbols(program.symbols());
+    TRY(modify_function(va, [&](FunctionInfo& f) { f = info; }));
+    return {};
 }
+
+Result<SymbolChange> Project::set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin) {
+    if (edit.va == 0) return make_error(ErrorCode::invalid_argument, "set_symbol: no address");
+    if (edit.name && trim(*edit.name).empty()) return make_error(ErrorCode::invalid_argument, "set_symbol: empty name");
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
+    TRY(reload_locked(*state_));
+    SymbolChange change;
+    change.va = edit.va;
+    auto it = state_->symbols.find(edit.va);
+    if (it != state_->symbols.end()) change.before = it->second;
+    if (edit.remove) {
+        if (!change.before) return make_error(ErrorCode::not_found, "no symbol at {:#x}", edit.va);
+        state_->symbols.erase(it);
+    } else {
+        Symbol s = change.before.value_or(Symbol{});
+        if (!change.before) {
+            if (!edit.name) return make_error(ErrorCode::invalid_argument, "a new symbol at {:#x} needs a name", edit.va);
+            s.va = edit.va;
+            s.kind = SymbolKind::function;
+        }
+        if (edit.name) {
+            if (s.name != *edit.name && !s.name.empty()) s.aliases.push_back(s.name);
+            s.name = *edit.name;
+            s.display = display_name(s.name);
+        }
+        if (edit.kind) s.kind = *edit.kind;
+        if (edit.size) s.size = *edit.size;
+        s.source = origin.source;
+        state_->symbols[edit.va] = s;
+        change.after = std::move(s);
+    }
+    TRY(write_symbols_locked(*state_));
+    Json record = {{"time", now_iso()},
+                   {"va", edit.va},
+                   {"before", symbol_json(change.before)},
+                   {"after", symbol_json(change.after)},
+                   {"source", std::string(to_string(origin.source))},
+                   {"session", origin.session},
+                   {"reason", origin.reason}};
+    TRY(fs::append_text(root_ / ".decomp" / "symbols.log.jsonl", dump_compact(record) + "\n"));
+    return change;
+}
+
+std::vector<Symbol> Project::symbols() const {
+    std::lock_guard lock(state_->mutex);
+    std::vector<Symbol> out;
+    out.reserve(state_->symbols.size());
+    for (const auto& [va, s] : state_->symbols) out.push_back(s);
+    return out;
+}
+
+Result<bool> Project::reload_if_changed() {
+    std::lock_guard lock(state_->mutex);
+    const u64 before = state_->version.load();
+    TRY(reload_locked(*state_));
+    return state_->version.load() != before;
+}
+
+u64 Project::version() const { return state_->version.load(); }
 
 std::filesystem::path Project::function_dir(const Symbol& fn) const {
     return root_ / ".decomp" / "functions" / fs::from_utf8(safe_function_name(fn));
@@ -288,17 +448,12 @@ std::filesystem::path Project::matched_source_path(const Symbol& fn) const {
 }
 
 Result<void> Project::record_attempt(const Symbol& fn, const Json& attempt) const {
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
     return fs::append_text(function_dir(fn) / "attempts.jsonl", dump_compact(attempt) + "\n");
 }
 
-std::vector<Json> Project::attempts(const Symbol& fn) const {
-    std::vector<Json> out;
-    auto text = fs::read_text(function_dir(fn) / "attempts.jsonl");
-    if (!text) return out;
-    for (const auto& line : split_lines(*text))
-        if (auto j = parse_json(line)) out.push_back(std::move(*j));
-    return out;
-}
+std::vector<Json> Project::attempts(const Symbol& fn) const { return read_jsonl(function_dir(fn) / "attempts.jsonl"); }
 
 std::optional<std::string> Project::best_source(const Symbol& fn) const {
     auto text = fs::read_text(function_dir(fn) / "best.cpp");
@@ -307,6 +462,8 @@ std::optional<std::string> Project::best_source(const Symbol& fn) const {
 }
 
 Result<void> Project::save_best_source(const Symbol& fn, const std::string& source) const {
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
     return fs::write_text(function_dir(fn) / "best.cpp", source);
 }
 
@@ -314,11 +471,53 @@ std::string Project::notes(const Symbol& fn) const { return fs::read_text(functi
 
 Result<void> Project::append_note(const Symbol& fn, const std::string& note) const {
     auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
     return fs::append_text(function_dir(fn) / "notes.md", std::format("- {:%Y-%m-%d %H:%M}: {}\n", now, note));
 }
 
-Result<void> Project::write_matched_source(const Symbol& fn, const std::string& source) const {
-    return fs::write_text(matched_source_path(fn), source);
+Result<WriteReceipt> Project::write_matched_source(const Symbol& fn, const std::string& source, const ChangeOrigin& origin) const {
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
+    WriteReceipt receipt;
+    receipt.path = matched_source_path(fn);
+    receipt.size = source.size();
+    receipt.sha1 = sha1_hex(as_bytes(source.data(), source.size()));
+    if (auto old = fs::read_text(receipt.path); old && *old != source) {
+        const std::string old_sha1 = sha1_hex(as_bytes(old->data(), old->size()));
+        const auto blob = blobs_dir() / old_sha1;
+        std::error_code ec;
+        if (!std::filesystem::exists(blob, ec)) TRY(fs::write_text(blob, *old));
+        receipt.previous_sha1 = old_sha1;
+    }
+    TRY(fs::write_text(receipt.path, source));
+    std::error_code ec;
+    auto rel = std::filesystem::relative(receipt.path, root_, ec);
+    Json record = {{"time", now_iso()},
+                   {"path", fs::to_utf8(ec ? receipt.path : rel)},
+                   {"function", fn.name},
+                   {"va", fn.va},
+                   {"size", receipt.size},
+                   {"sha1", receipt.sha1},
+                   {"previous_sha1", receipt.previous_sha1 ? Json(*receipt.previous_sha1) : Json(nullptr)},
+                   {"source", std::string(to_string(origin.source))},
+                   {"session", origin.session},
+                   {"reason", origin.reason}};
+    TRY(fs::append_text(root_ / ".decomp" / "changes.jsonl", dump_compact(record) + "\n"));
+    return receipt;
+}
+
+Result<std::string> Project::read_blob(const std::string& sha1) const {
+    if (sha1.size() != 40 || sha1.find_first_not_of("0123456789abcdef") != std::string::npos)
+        return make_error(ErrorCode::invalid_argument, "not a blob id: '{}'", sha1);
+    return fs::read_text(blobs_dir() / sha1);
+}
+
+std::vector<Json> Project::changes() const { return read_jsonl(root_ / ".decomp" / "changes.jsonl"); }
+std::vector<Json> Project::symbol_log() const { return read_jsonl(root_ / ".decomp" / "symbols.log.jsonl"); }
+
+Result<std::optional<FileLock>> Project::try_lock_active_run() const {
+    return FileLock::try_acquire(root_ / ".decomp" / "active-run.lock", FileLock::Mode::exclusive);
 }
 
 Result<Project> Project::init(const std::filesystem::path& root, const std::filesystem::path& binary,
