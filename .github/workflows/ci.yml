@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PREMAKE_VERSION: 5.0.0-beta8
+
+jobs:
+  linux:
+    name: Linux (GCC 14)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install compilers and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14 libcurl4-openssl-dev clang-18 lld-18 llvm-18
+
+      - name: Install premake
+        run: |
+          set -e
+          url="https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz"
+          if curl -fsSL "$url" -o premake.tar.gz && tar -xzf premake.tar.gz premake5; then
+            sudo install premake5 /usr/local/bin/premake5
+          else
+            echo "release download failed; building premake from source"
+            git clone --depth 1 --branch "v${PREMAKE_VERSION}" https://github.com/premake/premake-core /tmp/premake
+            make -C /tmp/premake -f Bootstrap.mak linux -j"$(nproc)"
+            sudo install /tmp/premake/bin/release/premake5 /usr/local/bin/premake5
+          fi
+          premake5 --version
+
+      - name: Build
+        run: |
+          premake5 gmake
+          make -C build config=release_x64 CC=gcc-14 CXX=g++-14 -j"$(nproc)"
+
+      - name: Unit and integration tests
+        run: ./bin/Release/decomp_tests
+
+      - name: CLI smoke test
+        run: |
+          ./bin/Release/decomp info tests/fixtures/x86/basic.exe
+          ./bin/Release/decomp diff --binary tests/fixtures/x86/basic.exe --obj tests/fixtures/x86/basic.obj --all
+          ./bin/Release/decomp diff --binary tests/fixtures/x64/basic.exe --obj tests/fixtures/x64/basic.obj --all
+
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install premake
+        shell: pwsh
+        run: |
+          $url = "https://github.com/premake/premake-core/releases/download/v$env:PREMAKE_VERSION/premake-$env:PREMAKE_VERSION-windows.zip"
+          New-Item -ItemType Directory -Force tools | Out-Null
+          try {
+            Invoke-WebRequest $url -OutFile premake.zip
+            Expand-Archive premake.zip -DestinationPath tools -Force
+          } catch {
+            Write-Host "release download failed; building premake from source"
+            git clone --depth 1 --branch "v$env:PREMAKE_VERSION" https://github.com/premake/premake-core premake-src
+            Push-Location premake-src
+            cmd /c Bootstrap.bat
+            Pop-Location
+            Copy-Item premake-src\bin\release\premake5.exe tools\
+          }
+          & tools\premake5.exe --version
+
+      - name: Pick the Visual Studio action
+        id: vs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $major = [int](& $vswhere -latest -property catalog_productLineVersion)
+          $action = if ($major -ge 2026) { "vs2026" } else { "vs2022" }
+          Write-Host "Visual Studio $major -> premake action $action"
+          "action=$action" >> $env:GITHUB_OUTPUT
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        run: |
+          tools\premake5.exe ${{ steps.vs.outputs.action }}
+          msbuild build\Decomp.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal
+
+      - name: Unit and integration tests
+        run: bin\Release\decomp_tests.exe
+
+      - name: MSVC round trip (x86)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+      - shell: pwsh
+        run: tests\integration\msvc_roundtrip.ps1 -Arch x86
+
+      - name: MSVC round trip (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - shell: pwsh
+        run: tests\integration\msvc_roundtrip.ps1 -Arch x64

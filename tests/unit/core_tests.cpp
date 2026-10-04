@@ -148,3 +148,41 @@ TEST_CASE("run_process captures output, exit codes, env, cwd and timeouts") {
     CHECK(run_process(with_input).value().out == "piped");
 }
 #endif
+
+#ifdef _WIN32
+TEST_CASE("run_process on Windows: capture, exit codes, env, timeouts, stdin") {
+    ProcessSpec spec;
+    spec.argv = {"cmd.exe", "/c", "echo", "hello"};
+    auto r = run_process(spec).value();
+    CHECK(r.out.starts_with("hello"));
+    CHECK(r.exit_code == 0);
+
+    spec.argv = {"cmd.exe", "/c", "exit", "3"};
+    CHECK(run_process(spec).value().exit_code == 3);
+
+    spec.argv = {"cmd.exe", "/c", "dir", "C:\\definitely_missing_dir_xyz"};
+    r = run_process(spec).value();
+    CHECK(r.exit_code != 0);
+    CHECK_FALSE(r.err.empty());
+
+    spec.argv = {"cmd.exe", "/c", "echo", "%DECOMP_TEST_VAR%"};
+    spec.env = {{"DECOMP_TEST_VAR", "value with spaces"}};
+    CHECK(run_process(spec).value().out.starts_with("value with spaces"));
+
+    ProcessSpec slow;
+    slow.argv = {"cmd.exe", "/c", "ping", "-n", "6", "127.0.0.1"};
+    slow.timeout = std::chrono::milliseconds(300);
+    r = run_process(slow).value();
+    CHECK(r.timed_out);
+    CHECK(r.duration < std::chrono::seconds(4));
+
+    ProcessSpec missing;
+    missing.argv = {"definitely-not-a-real-program-xyz.exe"};
+    CHECK_FALSE(run_process(missing));
+
+    ProcessSpec with_input;
+    with_input.argv = {"findstr", "piped"};
+    with_input.stdin_data = "piped\r\n";
+    CHECK(run_process(with_input).value().out.starts_with("piped"));
+}
+#endif
