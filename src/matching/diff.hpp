@@ -7,13 +7,14 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace decomp::matching {
 
 // What an address-bearing instruction field refers to, in a form comparable across the linked target
 // image and an unlinked candidate object.
-enum class RefKind : u8 { symbol, label, string, float32, float64, vector, table, unknown };
+enum class RefKind : u8 { symbol, label, string, wide_string, float32, float64, vector, table, unknown };
 std::string_view to_string(RefKind kind);
 
 struct Ref {
@@ -23,6 +24,7 @@ struct Ref {
     i64 offset = 0;       // symbol + offset
     u64 target_va = 0;    // target side: the referenced address
     std::string display;  // readable text used when rendering
+    bool heuristic = false;  // target side: an address only by the in-image guess (image without .reloc)
 };
 
 struct SideInstruction {
@@ -33,10 +35,16 @@ struct SideInstruction {
 
 struct Side {
     std::string name;
+    std::string alt;  // target: the readable PDB name, when the symbol has one
     u64 address = 0;  // target: function VA; candidate: offset in its section
     usize size = 0;
     std::vector<SideInstruction> instructions;
 };
+
+// Whether a candidate symbol names the target's symbol. When the target's name is the linker's own
+// (C++-decorated, or a public that differs from the readable PDB name) it must be identical, which also
+// proves the declaration; otherwise readable names are compared.
+bool symbol_names_match(std::string_view target, std::string_view target_alt, std::string_view candidate);
 
 // Builds the comparable view of the target function at `va`.
 Result<Side> build_target_side(const Program& program, u64 va);

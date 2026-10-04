@@ -39,7 +39,8 @@ matching::MatchSetup clang_setup(Arch arch, const std::string& clang_cl, const s
 }
 
 std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& tools, const std::filesystem::path& dir,
-                                                   const std::vector<std::filesystem::path>& sources, const std::string& name) {
+                                                   const std::vector<std::filesystem::path>& sources, const std::string& name,
+                                                   const std::vector<std::string>& extra_link_flags) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     std::string a = arch == Arch::x86 ? "x86" : "x64";
@@ -62,6 +63,7 @@ std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& t
     ProcessSpec ld;
     ld.argv = {tools.lld_link, "/nologo", "/nodefaultlib", "/entry:entry", "/subsystem:console", "/debug", "/Brepro",
                "/out:" + fs::to_utf8(exe), "/pdb:" + fs::to_utf8(dir / (name + ".pdb"))};
+    ld.argv.insert(ld.argv.end(), extra_link_flags.begin(), extra_link_flags.end());
     ld.argv.insert(ld.argv.end(), objs.begin(), objs.end());
     ld.argv.push_back(fs::to_utf8(fixture(a + "/kernel32.lib")));
     auto r = run_process(ld);

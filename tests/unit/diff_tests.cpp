@@ -190,3 +190,81 @@ TEST_CASE("calls through linker thunks compare as calls to the destination") {
         CHECK(d.byte_exact);
     }
 }
+
+TEST_CASE("linker names must match exactly; readable names only when nothing better is known") {
+    using matching::symbol_names_match;
+    CHECK(symbol_names_match("?add@@YAHHH@Z", "add", "?add@@YAHHH@Z"));
+    CHECK_FALSE(symbol_names_match("?add@@YAHHH@Z", "add", "?add@@YAHHI@Z"));  // add(int, unsigned)
+    CHECK_FALSE(symbol_names_match("?add@@YAHHH@Z", "add", "_add"));           // extern "C"
+    CHECK(symbol_names_match("_entry", "entry", "_entry"));
+    CHECK_FALSE(symbol_names_match("_entry", "entry", "?entry@@YAXXZ"));       // missing extern "C"
+    CHECK(symbol_names_match("helper", "", "?helper@@YAHH@Z"));                // static: only the PDB name is known
+    CHECK(symbol_names_match("__imp__ExitProcess@4", "", "_ExitProcess@4"));
+    CHECK(symbol_names_match("__imp__ExitProcess@4", "", "__imp__ExitProcess@4"));
+    CHECK(symbol_names_match("exported_api", "", "_exported_api"));
+}
+
+TEST_CASE("a different declaration is not a match, even with identical code") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-decl").value();
+    auto exe = test::build_fixture_program(Arch::x86, *tools, dir.path() / "target");
+    REQUIRE(exe);
+    auto program = Program::open(*exe).value();
+    auto setup = test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "work");
+    // add(int, unsigned) generates the same code but mangles differently (?add@@YAHHI@Z).
+    auto source = fs::read_text(test::fixture("src/basic.cpp")).value();
+    const std::string from = "NOINLINE int add(int a, int b)", to = "NOINLINE int add(int a, unsigned b)";
+    REQUIRE(source.find(from) != std::string::npos);
+    source.replace(source.find(from), from.size(), to);
+    source = "int add(int a, unsigned b);\n" + source;
+
+    auto add = matching::compile_and_diff(program, setup, *program.resolve("add"), source).value();
+    REQUIRE(add.diff);
+    CHECK_FALSE(add.diff->byte_exact);
+    CHECK(add.diff->equal == add.diff->target.instructions.size());  // the code itself is identical
+    CHECK(std::ranges::any_of(add.diff->hints, [](const std::string& h) { return h.find("declaration differs") != std::string::npos; }));
+
+    auto dispatch = matching::compile_and_diff(program, setup, *program.resolve("dispatch"), source).value();
+    REQUIRE(dispatch.diff);
+    CHECK_FALSE(dispatch.diff->byte_exact);
+    CHECK(std::ranges::any_of(dispatch.diff->hints, [](const std::string& h) { return h.find("Declaration differs") != std::string::npos; }));
+}
+
+TEST_CASE("wide string literals compare in full; constants in images without .reloc compare by value") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-wide").value();
+    const auto source = dir.path() / "wide.cpp";
+    const std::string body = "extern \"C\" int _fltused = 0;\n"
+                             "__declspec(noinline) const wchar_t* wmsg() { return L\"hello\"; }\n"
+                             "__declspec(noinline) unsigned magic() { return 0x401000u; }\n"
+                             "extern \"C\" void entry() { wmsg(); magic(); }\n";
+    REQUIRE(fs::write_text(source, body));
+    // /fixed: no .reloc, so in-image constants can only be guessed to be addresses.
+    auto exe = test::build_program(Arch::x86, *tools, dir.path() / "out", {source}, "wide", {"/fixed", "/base:0x400000"});
+    REQUIRE(exe);
+    auto program = Program::open(*exe).value();
+    REQUIRE_FALSE(program.image().has_relocations());
+    auto setup = test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "work");
+    auto same = matching::compile_and_diff(program, setup, *program.resolve("wmsg"), body).value();
+    REQUIRE(same.diff);
+    CHECK(same.diff->byte_exact);
+
+    // Same first character: a comparison that stopped at the first zero byte would call this equal.
+    std::string other = body;
+    other.replace(other.find("L\"hello\""), 8, "L\"hxxxx\"");
+    auto changed = matching::compile_and_diff(program, setup, *program.resolve("wmsg"), other).value();
+    REQUIRE(changed.diff);
+    CHECK_FALSE(changed.diff->byte_exact);
+
+    auto magic = matching::compile_and_diff(program, setup, *program.resolve("magic"), body).value();
+    REQUIRE(magic.diff);
+    CHECK(magic.diff->byte_exact);
+}

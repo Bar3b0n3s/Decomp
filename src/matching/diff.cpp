@@ -19,6 +19,7 @@ std::string_view to_string(RefKind kind) {
     case RefKind::symbol: return "symbol";
     case RefKind::label: return "label";
     case RefKind::string: return "string";
+    case RefKind::wide_string: return "wide_string";
     case RefKind::float32: return "float32";
     case RefKind::float64: return "float64";
     case RefKind::vector: return "vector";
@@ -109,6 +110,51 @@ std::vector<std::string> operand_templates(const SideInstruction& si) {
     });
 }
 
+// MSVC names wide string literals ??_C@_1...; they are compared over all their UTF-16 units.
+bool is_wide_literal_symbol(std::string_view name) { return name.starts_with("??_C@_1"); }
+
+// UTF-16 units up to the terminator, read through `unit(i)`; the comparison key is their hex bytes.
+template <class ReadUnit>
+std::optional<Ref> wide_string_ref(ReadUnit unit) {
+    std::string bytes, text;
+    for (usize i = 0; i < (1u << 15); ++i) {
+        std::optional<u16> u = unit(i);
+        if (!u) return std::nullopt;
+        if (*u == 0) {
+            Ref r;
+            r.kind = RefKind::wide_string;
+            r.key = bytes_hex(reinterpret_cast<const std::byte*>(bytes.data()), bytes.size());
+            r.display = "L\"" + truncate_utf8(text, 48) + "\"";
+            return r;
+        }
+        bytes.push_back(static_cast<char>(*u & 0xFF));
+        bytes.push_back(static_cast<char>(*u >> 8));
+        if (*u >= 0x20 && *u < 0x7F && *u != '"' && *u != '\\') text.push_back(static_cast<char>(*u));
+        else text += std::format("\\u{:04x}", *u);
+    }
+    return std::nullopt;
+}
+
+std::optional<Ref> image_wide_string(const BinaryImage& image, u64 va) {
+    return wide_string_ref([&](usize i) { return image.read<u16>(va + 2 * i); });
+}
+
+} // namespace
+
+// A target name is the linker's own when it is C++-decorated or differs from the symbol's readable PDB
+// name (a public symbol); then the candidate must use exactly that name, so a match also proves the
+// declaration (signature, calling convention, linkage). Otherwise only readable names are known.
+bool symbol_names_match(std::string_view target, std::string_view target_alt, std::string_view candidate) {
+    auto strip = [](std::string_view n) { return n.starts_with("__imp_") ? n.substr(6) : n; };
+    const std::string_view t = strip(target), c = strip(candidate);
+    if (t == c || (!target_alt.empty() && target_alt == c)) return true;
+    const bool linker_name = t.starts_with('?') || (!target_alt.empty() && target_alt != target);
+    if (linker_name) return false;
+    return names_equivalent(t, c) || (!target_alt.empty() && names_equivalent(target_alt, c));
+}
+
+namespace {
+
 Ref target_ref(const Program& program, u64 va) {
     Ref r;
     r.target_va = va;
@@ -127,6 +173,12 @@ Ref target_ref(const Program& program, u64 va) {
     if (!s) {
         s = program.symbols().containing(va);
         if (s) off = static_cast<i64>(va - s->va);
+    }
+    if (s && off == 0 && s->kind == SymbolKind::string && is_wide_literal_symbol(s->name)) {
+        if (auto w = image_wide_string(image, va)) {
+            w->target_va = va;
+            return *w;
+        }
     }
     if (s && off == 0 && s->kind == SymbolKind::string) {
         if (auto str = image.read_cstring(va)) {
@@ -175,6 +227,7 @@ Result<Side> build_target_side(const Program& program, u64 va) {
     Side side;
     const Symbol* sym = program.symbols().at(va);
     side.name = sym ? sym->name : std::format("sub_{:x}", va);
+    if (sym && sym->pdb_name != sym->name) side.alt = sym->pdb_name;
     side.address = va;
     side.size = ext.end - ext.start;
     std::map<u64, usize> index_of;
@@ -212,6 +265,10 @@ Result<Side> build_target_side(const Program& program, u64 va) {
             } else {
                 si.refs[f] = target_ref(program, target);
             }
+            // Without .reloc, an in-image constant is only guessed to be an address.
+            if (!rva_table && !rva_field && !program.image().has_relocations() && field.kind != x86::FieldKind::rel &&
+                !field.rip_relative)
+                si.refs[f]->heuristic = true;
         }
         si.ins = std::move(ins);
         si.text = render_side(si);
@@ -306,8 +363,18 @@ Ref candidate_reloc_ref(const CandidateContext& ctx, const coff::Relocation& rel
         r.display = short_symbol(sym->name, addend);
         return r;
     }
-    if (is_string_literal_symbol(sym->name) || (tsec->comdat && sym->is_section_symbol() && !tsec->is_bss() &&
-                                                 [&] { auto n = defined_symbol_at(obj, sym->section_number, 0); return n && is_string_literal_symbol(n->name); }())) {
+    std::string literal = is_string_literal_symbol(sym->name) ? sym->name : std::string();
+    if (literal.empty() && tsec->comdat && sym->is_section_symbol() && !tsec->is_bss())
+        if (auto n = defined_symbol_at(obj, sym->section_number, 0); n && is_string_literal_symbol(n->name)) literal = n->name;
+    if (!literal.empty() && is_wide_literal_symbol(literal) && off >= 0) {
+        auto unit = [&](usize i) -> std::optional<u16> {
+            const usize at = static_cast<usize>(off) + 2 * i;
+            if (at + 2 > tsec->data.size()) return std::nullopt;
+            return read_le<u16>(ByteSpan(tsec->data), at);
+        };
+        if (auto w = wide_string_ref(unit)) return *w;
+    }
+    if (!literal.empty()) {
         if (auto str = read_cstring_at(tsec->data, static_cast<usize>(off), 1 << 16)) {
             r.kind = RefKind::string;
             r.key = *str;
@@ -471,6 +538,14 @@ bool refs_equal(const Ref& t, const Ref& c, const Program& program, const IndexM
         }
         return false;
     }
+    if (c.kind == RefKind::wide_string) {
+        if (t.kind == RefKind::wide_string) return t.key == c.key;
+        if (t.target_va) {
+            auto w = image_wide_string(image, t.target_va);
+            return w && w->key == c.key;
+        }
+        return false;
+    }
     if (c.kind == RefKind::float32 || c.kind == RefKind::float64 || c.kind == RefKind::vector) {
         if (t.kind == c.kind) return t.key == c.key;
         if (t.target_va) {
@@ -481,7 +556,7 @@ bool refs_equal(const Ref& t, const Ref& c, const Program& program, const IndexM
     }
     if (c.kind == RefKind::symbol) {
         if (t.kind != RefKind::symbol || t.offset != c.offset) return false;
-        return names_equivalent(t.key, c.key) || (!t.alt.empty() && names_equivalent(t.alt, c.key));
+        return symbol_names_match(t.key, t.alt, c.key);
     }
     return false;
 }
@@ -494,8 +569,18 @@ struct PairResult {
     bool bytes_equal = false;
 };
 
-PairResult compare_pair(const SideInstruction& t, const SideInstruction& c, const Program& program,
+PairResult compare_pair(const SideInstruction& target, const SideInstruction& c, const Program& program,
                         const IndexMap& map, std::vector<Binding>& bindings) {
+    // An address that was only guessed (image without .reloc) where the candidate has a plain constant
+    // is compared as that constant.
+    std::optional<SideInstruction> adjusted;
+    for (usize f = 0; f < target.refs.size() && f < c.refs.size() && f < c.ins.fields.size(); ++f) {
+        if (target.refs[f] && target.refs[f]->heuristic && !c.refs[f] && target.ins.fields[f].raw == c.ins.fields[f].raw) {
+            if (!adjusted) adjusted = target;
+            adjusted->refs[f].reset();
+        }
+    }
+    const SideInstruction& t = adjusted ? *adjusted : target;
     PairResult pr;
     auto tt = operand_templates(t), ct = operand_templates(c);
     for (usize i = 0; i < std::min(tt.size(), ct.size()); ++i) {
@@ -607,6 +692,10 @@ std::string inverse_condition(const std::string& m) {
 void add_hints(FunctionDiff& d) {
     if (d.byte_exact) return;
     auto& h = d.hints;
+    if (!d.candidate.name.empty() && !symbol_names_match(d.target.name, d.target.alt, d.candidate.name))
+        h.push_back(std::format("The candidate defines `{}` ({}) but the target function is `{}` ({}): the declaration differs "
+                                "(parameter types, const, calling convention or extern \"C\").",
+                                d.candidate.name, display_name(d.candidate.name), d.target.name, display_name(d.target.name)));
     usize diffs = d.encoding + d.operand + d.opcode + d.inserted + d.deleted;
     if (diffs == 0 && !d.exact) h.push_back("All instructions align, but some references could not be verified.");
 
@@ -681,7 +770,13 @@ void add_hints(FunctionDiff& d) {
                 }
                 std::string what = cr.kind == RefKind::string ? "String literal" : (cr.kind == RefKind::float32 || cr.kind == RefKind::float64) ? "Constant"
                                    : t.ins.flow == x86::Flow::call ? "Callee" : "Reference";
-                if (tr.kind == RefKind::unknown && cr.kind == RefKind::symbol)
+                if (tr.kind == RefKind::symbol && cr.kind == RefKind::symbol && tr.offset == cr.offset &&
+                    names_equivalent(tr.alt.empty() ? tr.key : tr.alt, cr.key))
+                    h.push_back(std::format("Declaration differs at target #{}: the target uses `{}` ({}) but the candidate's "
+                                            "declaration produces `{}` ({}). Match the signature, calling convention, const "
+                                            "and linkage (extern \"C\").",
+                                            *r.target, tr.key, display_name(tr.key), cr.key, display_name(cr.key)));
+                else if (tr.kind == RefKind::unknown && cr.kind == RefKind::symbol)
                     h.push_back(std::format("Target #{} references {:#x}, which has no symbol; the candidate uses `{}` there. "
                                             "If that is the same object, name the address `{}`.", *r.target, tr.target_va, cr.key, cr.key));
                 else
@@ -768,7 +863,9 @@ FunctionDiff diff_sides(Side target, Side candidate, const Program& program) {
         default: break;
         }
     }
-    d.exact = d.opcode == 0 && d.operand == 0 && d.inserted == 0 && d.deleted == 0 && refs_all_ok && n > 0;
+    // The candidate must define the function under the target's decorated name: same declaration.
+    const bool name_ok = d.candidate.name.empty() || symbol_names_match(d.target.name, d.target.alt, d.candidate.name);
+    d.exact = d.opcode == 0 && d.operand == 0 && d.inserted == 0 && d.deleted == 0 && refs_all_ok && name_ok && n > 0;
     d.byte_exact = d.exact && bytes_all_ok && d.encoding == 0;
     d.match_percent = d.byte_exact ? 100.0 : (n ? std::min(99.9, 100.0 * credit / static_cast<double>(n)) : 0.0);
     // Deduplicate bindings.

@@ -29,6 +29,7 @@ std::optional<std::filesystem::path> build_fixture_program(Arch arch, const Llvm
 // Compiles `sources` with the fixture flags (objects named after each source) and links them with the
 // fixture kernel32.lib into <dir>/<name>.exe + .pdb (entry point `entry`). Returns the exe path.
 std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& tools, const std::filesystem::path& dir,
-                                                   const std::vector<std::filesystem::path>& sources, const std::string& name);
+                                                   const std::vector<std::filesystem::path>& sources, const std::string& name,
+                                                   const std::vector<std::string>& extra_link_flags = {});
 
 } // namespace decomp::test
