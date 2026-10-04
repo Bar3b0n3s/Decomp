@@ -10,9 +10,10 @@ document covers goals, fixed decisions, the module design, data flow, threading,
 build and platform notes. Matching, the agent, the UI and the project format each have their own
 document.
 
-Status: the [first slice](roadmap.md#first-working-slice) is implemented; `decomp-gui` and the
-multi-worker runner are Phase 1. The type and function names below are the ones in the code, and the
-headers are authoritative. Anything marked *planned* does not exist yet.
+Status: the [first slice](roadmap.md#first-working-slice) and the [Phase 1](roadmap.md#phase-1-supervision-gui-and-batch-runner)
+runner are implemented: `decomp run` works on many functions with several workers, and `decomp-gui`
+opens projects, starts, steers and reopens runs. The type and function names below are the ones in the
+code, and the headers are authoritative. Anything marked *planned* does not exist yet.
 
 ## Goals and non-goals
 
@@ -55,15 +56,15 @@ headers are authoritative. Anything marked *planned* does not exist yet.
 
 ## Pipeline overview
 
-| Stage | What happens | Module | First slice | Later |
+| Stage | What happens | Module | Implemented | Later |
 |---|---|---|---|---|
 | Ingest | Parse the target image, its PDB and candidate objects | `formats` | PE32/PE32+, COFF `.obj` (including `/bigobj`), PDB 7.0, exports, imports, base relocations, CodeView, Rich header decode, x64 `.pdata` | COFF `.lib`, MSVC `.map` (Phase 2); ELF64 (Phase 7) |
 | Analyze | Build the symbol database, find function bounds, build CFGs | `analysis` | Symbol import, bounds from symbol size, `.pdata` or recursive descent, jump tables, linker-thunk resolution, basic blocks and loop headers, a cross-reference scan for callers | Full cross-reference index, RTTI/vtables, library signatures (Phase 2) |
 | Annotate | Turn a function into a readable, symbolized listing | `analysis` + `arch/x86` | Labels, symbolized operands, frame slot names, loop hints, switch tables | Field names from types (Phase 4) |
 | Match | Compile a candidate, extract the function, diff it | `matching` | Toolchain registry, compile driver and cache, diagnostics, relocation-aware diff, verdicts, hints | Data matching and relinking (Phase 5), flag search and permuter (Phase 6) |
-| Agent | Run one Claude conversation per function | `agent` | Transports, SSE, client, append-only conversation, tools, loop, single-session control, transcripts, cost | Multi-worker runner (Phase 1), more tools (Phases 3-4) |
+| Agent | Run one Claude conversation per function | `agent`, `run` | Transports, SSE, client, append-only conversation, tools, loop, live control and limits, transcripts, cost, shared rate gate, approvals; the multi-worker run controller with its queue and resumable run directories | More tools (Phases 3-4) |
 | Project | Persist sources, symbols, history and progress | `project` | `init`, `symbols.txt`, status and history, verified sources, `status` | Translation-unit organization (Phase 3), headers and types (Phase 4) |
-| Supervise | Show everything live and historically; take commands | `events`, `cli`, `gui` | Events, `EventBus`, `RunState`, JSONL log, CLI progress view, Ctrl+C and `--interactive` commands | `decomp-gui` (Phase 1) |
+| Supervise | Show everything live and historically; take commands | `events`, `cli`, `gui` | Events, the serialized `EventBus`, `RunState` and copy-on-write snapshots, JSONL log, CLI progress view, Ctrl+C and `--interactive` commands, `decomp-gui` | Later-phase views ([ui.md](ui.md#views)) |
 
 ## Data flow
 
@@ -87,8 +88,8 @@ flowchart LR
     LOOP -. events .-> BUS["EventBus"]
     BUS --> LOG["events.jsonl"]
     BUS --> RS["RunState reducer"]
-    RS --> VIEWS["CLI progress view<br/>decomp-gui (Phase 1)"]
-    VIEWS -->|"commands"| RC["LoopControl<br/>(RunController in Phase 1)"]
+    RS --> VIEWS["CLI progress view<br/>decomp-gui"]
+    VIEWS -->|"commands"| RC["RunController<br/>queue, workers, LoopControl per session"]
     RC --> LOOP
 ```
 
@@ -104,8 +105,9 @@ Lower layers never include higher ones:
 
 ```
 cli, gui                  entry points; argument parsing, rendering
-  agent                   run_loop, tools, Claude client, MatchSession, runner
-    project               decomp.json, symbols.txt, history, verified sources
+  run                     selection, work queue, run directories, RunController (N workers)
+  agent                   run_loop, tools, Claude client, rate gate, approvals, MatchSession, runner
+    project               decomp.json, symbols.txt, history, verified sources, locks, change logs
     matching              toolchains, compile, diff
       analysis            Program, SymbolDb, bounds, CFG, annotation, demangling
         arch/x86          decoding, formatting
@@ -124,17 +126,17 @@ Shared infrastructure, used by everything else:
 | Header | Provides |
 |---|---|
 | `core/result.hpp` | `ErrorCode`, `Error{code, message}` with `with_context()` and `describe()`, `Result<T> = std::expected<T, Error>`, `make_error(code, fmt, args...)`, the `TRY` and `TRY_ASSIGN` macros |
-| `core/log.hpp` | `decomp::log` levels (trace to error), colored stderr (TTY auto-detect), mirror to a file, extra sinks (meant for feeding log lines into the event bus; nothing registers one yet) |
-| `core/fs.hpp` | UTF-8 path conversion, `read_file`/`read_text`, atomic `write_file`/`write_text` (temp file + rename), `append_text`, `find_upwards`, `TempDir` |
+| `core/log.hpp` | `decomp::log` levels (trace to error), colored stderr (TTY auto-detect), mirror to a file, extra sinks called outside the logger's lock (`remove_sink` waits for calls in flight; runs use one to publish `log` events), a per-thread `ScopedContext` that tags lines with a worker and session, and an in-memory ring of recent lines (`recent()`) |
+| `core/fs.hpp` | UTF-8 path conversion, `read_file`/`read_text`, atomic `write_file`/`write_text` (temp file + rename, retried briefly on Windows while another process has the file open), `append_text`, `find_upwards`, `TempDir` |
 | `core/bytes.hpp` | `ByteSpan`, bounds-checked little-endian `read_le<T>`, sequential `ByteReader`, `read_cstring_at` |
 | `core/hash.hpp` | Streaming `Sha1`, `sha1_hex` |
-| `core/process.hpp` | `ProcessSpec{argv, cwd, env overrides, timeout, stdin}` and `run_process()` returning `ProcessResult{exit_code, out, err, timed_out, duration}`. POSIX uses fork/exec and poll, with the child in its own process group; Windows uses `CreateProcessW` with a job object and pipe threads. Also MSVCRT-correct argument quoting (`quote_windows_arg`, `build_windows_command_line`). |
+| `core/process.hpp` | `ProcessSpec{argv, cwd, env overrides, timeout, stdin, cancelled}` and `run_process()` returning `ProcessResult{exit_code, out, err, timed_out, cancelled, duration}`. POSIX uses fork/exec and poll on close-on-exec pipes (so parallel workers never inherit each other's pipes), with the child in its own process group; Windows uses `CreateProcessW` with a job object and pipe threads. Waits are sliced, so a `cancelled` callback (Abort) ends the process tree within a fraction of a second. Also MSVCRT-correct argument quoting (`quote_windows_arg`, `build_windows_command_line`). |
+| `core/file_lock.hpp` | `FileLock::acquire(path, shared or exclusive, timeout)` and `try_acquire`: advisory locks that conflict between processes and between lock objects of one process (`flock` on a descriptor of its own on POSIX, `LockFileEx` on Windows) |
 | `core/json.hpp` | `Json` (nlohmann, keys kept sorted so dumps are deterministic), `parse_json`, compact and pretty dumps, accessors that turn missing fields into errors or defaults |
 | `core/strings.hpp` | `trim`, `split`, `parse_u64` (accepts `0x...`, `...h`, decimal), `hex`, `truncate_utf8`, `escape_c_string`, UTF-8/UTF-16 conversion on Windows |
 
-Still planned for `core`: a small thread pool, and a cancellation hook for `run_process` so that Abort
-can end a running compile. (Response files for long compiler command lines are written by the compile
-driver in `matching`.)
+(Response files for long compiler command lines are written by the compile driver in `matching`. The
+GUI's background jobs run on a thread pool of its own, `gui/jobs.hpp`.)
 
 ### formats
 
@@ -192,7 +194,9 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
 - `Program`: a loaded target (image, decoder and symbols). `Program::open()` loads the image and its
   PDB (given, or found next to the image through the CodeView record or `<stem>.pdb`; a PDB whose GUID
   and age do not match is ignored), builds the `SymbolDb`, and moves names off incremental-linking
-  thunks. It resolves names and addresses (`resolve()`), finds function extents and instructions, scans
+  thunks. `with_symbols()` makes a new *symbol generation* that shares the image and decoder; workers
+  hold a `shared_ptr<const Program>`, so a symbol edit during a run builds a new generation that later
+  sessions pick up while running sessions keep theirs. It resolves names and addresses (`resolve()`), finds function extents and instructions, scans
   cross-references on first use (`xrefs_to()`, `callers_of()`), and follows linker thunks
   (`thunk_destination()`).
 - `SymbolDb`: `std::map<va, Symbol>` with `Symbol{name (decorated), display (demangled), pdb_name,
@@ -237,18 +241,29 @@ The backbone shared by the CLI, the GUI and the logs ([ui.md](ui.md#architecture
 side):
 
 - Typed events: a `std::variant` of plain structs, each stamped with a sequence number, a UTC time,
-  the run ID and, where it applies, a worker ID; payloads carry the session ID. The types are
+  the run ID and, where it applies, a worker ID; payloads carry the session ID. The slice's types are
   `run_started`, `run_finished`, `session_started`, `session_finished`, `turn_started`,
   `turn_finished`, `stream_delta`, `tool_call_started`, `tool_call_finished`, `compile_finished`,
-  `diff_computed`, `retry`, `refusal`, `guidance`, `status_changed`, `file_written` and `log`
-  ([ui.md](ui.md#events) lists their fields).
-- `EventBus`: thread-safe publishing from any thread. Sequence numbers are unique and increasing, and
-  subscribers are called synchronously on the publishing thread, so they must be quick.
-- `RunState`: a pure reducer that folds events into the run, its workers and sessions, and run totals.
+  `diff_computed`, `retry`, `refusal`, `guidance`, `status_changed`, `file_written` and `log`; the
+  runner adds `run_resumed`, `compile_started`, `worker_phase_changed`, `rate_limit_updated`,
+  `budget_changed`, `symbol_changed`, `approval_requested`, `approval_decided`, `queue_updated` and
+  `control` ([ui.md](ui.md#events) lists their fields). Changes are additive: a slice-era
+  `events.jsonl` still replays.
+- `EventBus`: publishing from any thread is *serialized*. `publish()` assigns the sequence number and
+  runs every subscriber under one lock, so subscribers see events one at a time in sequence order
+  whatever thread publishes; a publish from inside a subscriber is queued and delivered right after
+  the current event. `set_next_seq()` continues the numbering of a resumed run's log.
+- `RunState`: a pure reducer that folds events into the run, its workers and sessions, the queue,
+  pending approvals, rate limits, budgets, recent compiles, errors by kind, a log tail, worker phase
+  spans and per-minute throughput. Every collection is capped, so a long run uses bounded memory.
+- `RunStateStore`: the reducer behind a lock, with immutable snapshots for readers on other threads
+  (the GUI takes one per frame). Snapshots are copy-on-write: sessions are shared pointers that the
+  reducer clones before changing one that a snapshot still holds, and rarely changing collections
+  (the queue, files written) are shared between snapshots.
 - `JsonlEventLog` writes `events.jsonl` (all events except `stream_delta`), and `read_event_log()` plus
-  `RunState::replay()` read a log back into the same state, which is how the reducer is tested and how
-  past runs will be opened.
-- `ProgressRenderer`: the CLI's live progress view.
+  `RunState::replay()` read a log back into the same state, which is how the reducer is tested, how
+  `decomp runs show` summarizes a run and how the GUI opens past runs.
+- `ProgressRenderer`: the CLI's live progress view, one line per worker.
 
 ### agent
 
@@ -258,18 +273,27 @@ The built-in agent ([agent.md](agent.md) has the full design):
   dependency) and `ReplayTransport` (tests and `--replay`).
 - `SseParser`: incremental server-sent events parsing.
 - `Client`: request headers, retries with backoff, message assembly from the stream
-  (`MessageAccumulator`), and capture of rate-limit headers.
+  (`MessageAccumulator`), capture of rate-limit headers, and `list_models()` (the GUI's key check).
+- `RateGate` (`agent/rate_gate.hpp`): one per run, shared by every session's client. It reads the
+  `anthropic-ratelimit-*` headers of every response (errors included), holds requests back while the
+  request or token allowance is spent (below 2% left) until its reset time, and puts every session
+  into backoff after a 429 or 529 until `retry-after`.
+- `ApprovalGate` (`agent/approvals.hpp`): per-action policies (`automatic`, `ask`, `deny`) for gated
+  actions; today the one action is `write_source`, saving a verified match. `ask` publishes
+  `approval_requested` and waits (Abort ends the wait) until the supervisor decides.
 - `Conversation`: the append-only message history. It serializes the system prompt, tools and model
   once and reuses them byte-identically.
 - `ToolRegistry` with a JSON Schema validator, and `MatchSession`, which holds the per-function
   state and implements the match tools, the brief and the status line.
-- `run_loop()`, which returns a `LoopOutcome`, and `LoopControl`, its thread-safe commands (pause,
-  resume, stop, abort, inject guidance).
+- `run_loop()`, which returns a `LoopOutcome`, and `LoopControl`, its thread-safe commands: pause,
+  resume, stop and abort with a reason (user, skip, run budget, shutdown), guidance with an id that can
+  be retracted until it is sent, and live `LoopLimits` (turns, tokens, USD, wall clock) that take
+  effect at the next check. A `SpendLedger` shared by a run's sessions enforces the run budget.
 - `run_function()` (`agent/runner.hpp`): one session from start to finish, with events, the transcript
-  and project updates; its outcome is `matched`, `gave_up`, `refused`, `budget_exhausted`, `max_turns`,
-  `no_result`, `stopped`, `aborted` or `error`.
+  and project updates; its outcome is `matched`, `gave_up`, `refused`, `budget_exhausted`,
+  `run_budget_exhausted`, `max_turns`, `no_result`, `skipped`, `stopped`, `aborted` or `error`. A
+  session that ends without submitting a byte-exact best it already has submits it automatically.
 - The frozen system prompt (`system_prompt()`), the price table and cost accounting (`agent/cost.hpp`).
-- Planned for Phase 1: a `RunController` with a work queue, several workers, skips and approvals.
 
 ### project
 
@@ -277,14 +301,39 @@ The built-in agent ([agent.md](agent.md) has the full design):
   directory (`fs::find_upwards`) or `-C/--project`; `Project::init()` creates one.
 - Symbol file I/O (`symbols.txt`, sorted, one symbol per line), applied on top of the derived symbols.
 - Function status and history (`.decomp/functions/<fn>/`) and the per-function counters behind
-  `decomp status`.
-- Writing verified sources. All writes are confined to project-managed paths
+  `decomp status` (`project/progress.hpp`), and the match setup a session needs
+  (`project/setup.hpp`).
+- The write path is safe for parallel workers and other processes: every change to `symbols.txt`
+  (`modify_function`, `set_symbol`) takes an in-process mutex and the exclusive
+  `.decomp/project.lock`, starts from the latest file on disk, and bumps `version()`. Symbol edits are
+  recorded in `.decomp/symbols.log.jsonl`.
+- Writing verified sources (`write_matched_source`): the replaced content is kept in
+  `.decomp/blobs/<sha1>`, every write is recorded in `.decomp/changes.jsonl`, and `revert_change`
+  undoes one. `try_lock_active_run()` allows one live run per project. `target_status()` checks the
+  target's SHA-1 and PDB. All writes are confined to project-managed paths
   ([project-format.md](project-format.md)).
+
+### run
+
+Batch runs ([agent.md](agent.md#batch-runs) has the behavior):
+
+- `select_functions()` (`run/selection.hpp`): the default selection skips matched, refused, skipped
+  and library functions, imports, linker thunks and functions without a size or recoverable extent.
+- `WorkQueue` (`run/queue.hpp`): pending functions in dispatch order, with pins, moves, removal and
+  requeueing.
+- `RunStore` (`run/store.hpp`): a run's directory (`run.json`, `summary.json`, `events.jsonl`,
+  `sessions/`, `run.lock`), `list_runs()`, `find_run()` and `run_summary()`.
+- `RunController` (`run/controller.hpp`): N worker threads take functions from the queue and run one
+  session each through an injectable `SessionFn` (the agent's `run_function` by default; tests pass a
+  fake). Commands (pause all or one worker, stop, abort, skip, requeue, queue edits, concurrency, run
+  budget, limits, guidance, approvals, policies) are thread-safe and each is acknowledged by a
+  `control` event. `resume()` continues a stopped, budget-limited or interrupted run from its
+  directory.
 
 ### cli
 
 Commands built with CLI11 (`src/cli/`): `init`, `info`, `funcs`, `disasm`, `diff`,
-`toolchain list|test|add`, `status` and `agent`. Global options, which may come before or after the
+`toolchain list|test|add`, `status`, `agent`, `run` and `runs list|show`. Global options, which may come before or after the
 command name, are `--json`, `-v`/`--verbose` (repeat for trace), `-q`/`--quiet` and `-C`/`--project <dir>`, plus
 `--version`. `diff` takes `--source <file>` or `--obj <file>` (plus `--all` with `--obj`), and exits
 with 0 when byte-exact, 2 when the function differs and 3 when the compile failed (with `--all`, 0
@@ -292,14 +341,30 @@ only when every function the object shares with the target is byte-exact, and 2 
 none is shared). `agent` adds the
 live progress view, `--replay <file>`, `--interactive`, `--guidance`, budget overrides and model
 options, and exits with 0 when matched, 2 when not matched, 3 when refused and 1 on error or abort.
+`run` takes functions or a selection (`--all`, `--status`, `--filter`), `--workers`, budgets,
+`--policy`, `--replay-dir`, `--resume <id>` and `--interactive`, and exits with 0 when the run
+completed, 2 when it stopped or ran out of budget (resumable) and 1 when it was aborted or failed.
 Errors are printed as `error: <message>` with exit code 1.
 
-### gui (Phase 1)
+### gui
 
 `decomp-gui` is a separate application built with Dear ImGui (docking), ImPlot, GLFW/OpenGL 3 and
-ImGuiColorTextEdit. It renders `RunState` snapshots and sends commands through a `RunController`. It
-links `decomp_lib` like the CLI and contains no logic of its own beyond view models. The full
-specification is in [ui.md](ui.md).
+ImGuiColorTextEdit ([ui.md](ui.md) is the specification). It links `decomp_lib` like the CLI and
+contains no matching or agent logic of its own:
+
+- `Workspace` (`gui/workspace.hpp`): what the GUI has open, without ImGui. A project and its program
+  load on a background thread; the run the views show is either live (a `RunController` with its event
+  log, `RunStateStore` and log sink) or past (its `events.jsonl` replayed through the same reducer,
+  read-only). Workers wake the UI loop at most once per frame.
+- `AppServices` and `RunCommands` (`gui/services.hpp`): the views' only way to the workspace and the
+  controller, so the shell renders headless in tests with fakes.
+- `App` (`gui/app.hpp`): the docking shell, chrome (top bar, status bar, notifications, command
+  palette), actions and shortcuts, navigation history, settings and the view list
+  (`gui/views/views.cpp`). Each frame takes one snapshot, and every view renders from it.
+- `JobQueue` (`gui/jobs.hpp`): a small thread pool for the views' expensive work; the UI polls
+  results once per frame, and every job has a cancellation token.
+- `decomp_gui_lib` holds all of this without a window system; `src/gui/platform/` adds GLFW, the
+  OpenGL 3 backend and `main()`.
 
 ## Key flow: `decomp agent <func>`
 
@@ -327,53 +392,68 @@ specification is in [ui.md](ui.md).
 9. The CLI publishes `run_finished` and writes `summary.json`. Throughout, the event log and the
    transcript are appended, and the progress view renders the `RunState`.
 
-## Threading model
+## Key flow: a batch run
 
-In the slice, `decomp agent` runs one session, and the loop runs on the CLI's main thread:
+1. `decomp run` (or the GUI's Start) loads the project and its program, takes the project's
+   active-run lock, and picks the functions: the ones named, or a selection (`select_functions()`).
+2. `RunStore::create()` makes `.decomp/runs/<id>/` and takes its `run.lock`. An `EventBus` gets the
+   JSONL log, a `RunStateStore` and, in the CLI, the progress view; a log sink turns warnings and
+   errors into `log` events.
+3. `RunController::start()` publishes `run_started` and starts N workers. Until the first session
+   hears back from the API (or 30 s pass), only one worker runs, so the others find the shared prompt
+   prefix in the cache.
+4. Each worker takes the next queued function and runs one session (`run_function()` with a fresh
+   `LoopControl`, the run's rate gate, spend ledger and approval gate, and the current program
+   generation). Sessions write their transcripts to `sessions/` and publish their events with the
+   worker's id.
+5. Commands from the CLI's `--interactive` input or the GUI go to the controller, which changes its
+   state, forwards the command to the affected sessions' `LoopControl`, and publishes `control`.
+6. `run.json` is rewritten at every transition and `summary.json` as functions finish. When the queue
+   is empty (or the run is stopped, aborted or out of budget), the last worker publishes
+   `run_finished`, and the locks are released.
+7. `decomp run --resume <id>` (or Resume in the GUI) reopens the directory: finished functions stay
+   finished, and interrupted, stopped and failed ones start again with a fresh conversation whose
+   brief carries their attempts, notes and best source. The event numbering continues the log.
+
+## Threading model
 
 | Thread | Runs | Notes |
 |---|---|---|
-| Main | The CLI command, including `run_loop()`: request building, HTTP streaming, tool execution | The HTTP call blocks it; Ctrl+C is handled elsewhere. |
+| Main (CLI) | The command. `decomp agent` runs its one session here; `decomp run` starts the controller and waits for it. | |
+| UI (`decomp-gui`) | The GLFW event loop: one ImGui frame per wake-up, rendering one `RunStateStore` snapshot | GLFW requires the main thread. The loop sleeps until input or a worker's wake-up (at most once per frame). |
+| Workers | `decomp run` and the GUI: N `std::jthread`s owned by the `RunController`, each running one session at a time (request building, HTTP streaming, tools, compiles) | Concurrency can change during a run; workers above the new limit retire after their session. |
 | Tool tasks | Consecutive read-only tool calls of one turn (`disassemble`, `read_memory`, `lookup_symbol`), started with `std::async` | Results are still reported in call order. |
+| GUI background work | Loading a project and its program, replaying a past run (one thread each), and `JobQueue`'s pool for the views' expensive derivations | Results are taken on the UI thread; cancelled jobs' results are dropped. |
 | Interrupt watcher | Turns Ctrl+C into a stop (first), then an abort (second) | Polls a counter set by the signal handler, which itself exits the process on a third Ctrl+C. |
-| Stdin reader | `--interactive` only: guidance and `:pause`, `:resume`, `:stop`, `:abort` | Detached; blocks on stdin. |
+| Stdin reader | `--interactive` only: commands and guidance | Detached; blocks on stdin. |
 
-Event subscribers (the JSONL writer, the progress view) run synchronously on whichever thread
-publishes the event.
+Event subscribers (the JSONL writer, the reducer, the progress view) run on whichever thread
+publishes the event, one event at a time under the bus's lock.
 
-Rules that hold in the slice:
+Rules:
 
-- **Events are totally ordered.** `publish()` assigns unique, increasing sequence numbers, and
-  `read_event_log()` sorts by them, so the JSONL file is a faithful replay source.
+- **Events are totally ordered.** `publish()` assigns unique, increasing sequence numbers and
+  delivers in that order, and `read_event_log()` sorts by them, so the JSONL file is a faithful
+  replay source and a live run's state equals its replay.
+- **No lock cycles with the bus.** Components never publish while holding their own locks (the
+  controller changes its state, unlocks, then publishes `control`), and subscribers never call
+  commands.
+- **The UI never blocks workers.** The reducer's work per event is small, and `snapshot()` costs
+  little: sessions are shared between snapshots and copied only when an event changes one that a
+  snapshot still holds. A view that needs more than the snapshot (a transcript, a diff) reads files
+  or runs a job, never the controller's state.
 - **Commands are honored at safe points.** `LoopControl` holds the commands. The loop checks pause,
   stop and abort before each request, and appends queued guidance to the next user message. Abort also
-  cancels the request in flight: the transports poll a cancellation callback (libcurl about once a
-  second while idle; WinHTTP when the next chunk arrives), and retry waits end early. A running compile
-  is not interrupted; the abort takes effect when the compile ends.
-
-Planned for Phase 1:
-
-- **Session workers.** One loop per worker, N workers, with the GUI render loop on the main thread
-  (GLFW requires windowing there). A small fixed-size thread pool in `core` for read-only tools,
-  analysis jobs and background recompiles.
-- **An event dispatcher.** A dispatcher thread that delivers events in sequence order to the writer,
-  the reducer and the renderers, so that subscribers never run on worker threads.
-- **Compiles are serialized per session and limited globally.** A compile gate (a counting semaphore)
-  will bound concurrent compiler processes across workers. Old compilers are CPU- and disk-heavy, and
-  `mspdbsrv.exe` contention is real (see [matching.md](matching.md#isolating-parallel-compiles)).
-- **The UI never blocks workers.** After applying a batch of events, the reducer publishes an
-  immutable snapshot (`std::shared_ptr<const RunState>`, swapped atomically) at most once per frame
-  interval, and the GUI loads the latest snapshot at the start of each frame. Large collections are
-  shared between snapshots rather than copied; the exact structure-sharing scheme is open.
-- **Abort reaches compiles.** A cancellation token that the process runner observes, so in-flight
-  compiles end immediately.
-- **Rate limits are shared.** Workers acquire from a shared limiter fed by the API's
-  `anthropic-ratelimit-*` response headers. A 429 puts every worker into backoff until the
-  `retry-after` time.
-- **The prompt cache is warmed once.** All sessions in a run share a byte-identical prefix (tools and
-  system prompt). A cache entry only becomes readable once the first response starts streaming, so the
-  runner starts the first session alone and starts the others after its first streamed token. They
-  then read the prefix from the cache instead of each writing it.
+  cancels the request in flight (the transports poll a cancellation callback: libcurl about once a
+  second while idle, WinHTTP when the next chunk arrives), retry and rate-limit waits, and running
+  compiles (the process tree is killed).
+- **Compiles are limited globally.** A counting semaphore (`set_max_parallel_compiles()`, one per
+  hardware thread by default) bounds concurrent compiler processes across workers, compile
+  directories are unique per process and thread, and each MSVC compile gets its own `mspdbsrv`
+  endpoint ([matching.md](matching.md#isolating-parallel-compiles)).
+- **Rate limits are shared.** All sessions of a run go through one `RateGate`.
+- **Project writes are serialized.** An in-process mutex plus `.decomp/project.lock` order every
+  write to `symbols.txt` and the logs beside it, across workers and across processes.
 
 ## Error handling conventions
 
@@ -419,10 +499,13 @@ premake5 (v5.0.0-beta8; feature use verified against its source) generates Visua
 | `zycore`, `zydis` | StaticLib (C) | Zydis and its Zycore dependency, `ZYDIS_STATIC_BUILD`/`ZYCORE_STATIC_BUILD`. Zycore's OS-specific `src/API` files are not built. |
 | `raw_pdb` | StaticLib | PDB reading |
 | `llvm_demangle` | StaticLib | LLVM's Demangle library (MSVC, Itanium, Rust, D) |
+| `imgui`, `implot`, `imgui_text_edit`, `glfw` | StaticLib | The GUI libraries (below) |
 | `decomp_lib` | StaticLib | All of `src/` except `cli/` and `gui/` |
 | `decomp` | ConsoleApp | `src/cli/` |
-| `decomp_tests` | ConsoleApp | `tests/` (fixtures excluded), with `DECOMP_SOURCE_DIR` defined so tests find fixtures |
-| `decomp-gui` | Windowed app (Phase 1) | `src/gui/` plus Dear ImGui, ImPlot, GLFW, ImGuiColorTextEdit |
+| `decomp_tests` | ConsoleApp | `tests/` except `fixtures/` and `gui/`, with `DECOMP_SOURCE_DIR` defined so tests find fixtures |
+| `decomp_gui_lib` | StaticLib | `src/gui/` except `platform/`: the shell and the views, without a window system |
+| `decomp-gui` | WindowedApp | `src/gui/platform/`: GLFW, the OpenGL 3 backend, `main()` |
+| `decomp_gui_tests` | ConsoleApp | `tests/gui/`: the shell and every view rendered headless |
 
 Workspace settings: platform `x64`; `Debug` (defines `DECOMP_DEBUG`) and `Release` (`NDEBUG`,
 optimize for speed) configurations; symbols always on; multi-processor compile. C++23 (`cppdialect
@@ -442,8 +525,7 @@ dropping libcurl.
   at `43cc59b` (it has no upstream tags).
 - Vendored, unmodified copies for headers and small libraries: LLVM Demangle (`llvmorg-23.1.2`, the
   only addition being a two-line stand-in for LLVM's generated `llvm-config.h`), nlohmann/json
-  v3.12.0, doctest v2.5.3 and CLI11 v2.7.2. Phase 1 vendors Dear ImGui (v1.92.9, docking branch),
-  ImPlot v1.0, GLFW 3.5.1 and ImGuiColorTextEdit.
+  v3.12.0, doctest v2.5.3, CLI11 v2.7.2, stb_image_write and the GUI fonts.
 - The only system library is libcurl on Linux and macOS. WinHTTP ships with Windows.
 - No package manager. Everything is built from source by premake, so a fresh clone builds the same
   way everywhere.

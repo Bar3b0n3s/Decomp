@@ -10,10 +10,11 @@ request defaults, prompt caching, streaming, refusal handling, the append-only c
 loop, the tool schemas, the prompts, transcripts, cost accounting, safety and configuration, and how to
 run the agent live or from offline replays.
 
-Status: implemented in step 11 of the [first slice](roadmap.md#first-working-slice) and tested
-offline with replays. `decomp agent` runs one session for one function; the multi-worker runner comes
-in Phase 1. API details reflect the Claude API as of October 2026; check them against the current API
-documentation before changing defaults.
+Status: implemented in step 11 of the [first slice](roadmap.md#first-working-slice) and extended for
+Phase 1, and tested offline with replays. `decomp agent` runs one session for one function; `decomp
+run` and `decomp-gui` run many sessions on several workers ([Batch runs](#batch-runs)). API details
+reflect the Claude API as of October 2026; check them against the current API documentation before
+changing defaults.
 
 ## Components
 
@@ -25,12 +26,15 @@ documentation before changing defaults.
 | `Conversation` | `agent/conversation.hpp` | The append-only history. It serializes the frozen prefix once and produces each request body. |
 | `ToolRegistry` | `agent/tools.hpp` | Tool definitions, the input validator, and dispatch to handlers |
 | `MatchSession` | `agent/match_session.hpp` | Per-function state: target function, toolchain setup, attempts, best attempt and source. Implements the six tools and builds the brief and the status line. The frozen system prompt lives next to it. |
-| `run_loop` | `agent/loop.hpp` | The tool-use loop. Returns a `LoopOutcome` whose status is `finished`, `end_turn_without_finish`, `refused`, `budget_exhausted`, `max_turns`, `aborted`, `stopped` or `error`. |
-| `LoopControl` | `agent/loop.hpp` | Thread-safe commands for a running loop: pause, resume, stop, abort, and injected guidance |
+| `run_loop` | `agent/loop.hpp` | The tool-use loop. Returns a `LoopOutcome` whose status is `finished`, `end_turn_without_finish`, `refused`, `budget_exhausted`, `run_budget_exhausted`, `max_turns`, `aborted`, `stopped` or `error`. |
+| `LoopControl` | `agent/loop.hpp` | Thread-safe commands for a running loop: pause, resume, stop and abort (with a reason), guidance that can be retracted until it is sent, and live limits |
 | `run_function` | `agent/runner.hpp` | Runs one session: wires the session, tools, conversation and loop together, publishes events, writes the transcript and updates the project |
-| Price table | `agent/cost.hpp` | Usage-to-dollars accounting (`price_for`, `response_cost`) |
+| Price table | `agent/cost.hpp` | Usage-to-dollars accounting (`price_for`, `response_cost`), and `SpendLedger`, a run's shared spend against its budget |
+| `RateGate` | `agent/rate_gate.hpp` | One per run: holds requests back while the API's rate limits are spent, and backs every session off after a 429 or 529 ([Rate limits](#rate-limits)) |
+| `ApprovalGate` | `agent/approvals.hpp` | Per-action approval policies and the queue of decisions waiting for the supervisor ([Approvals](#approvals)) |
 
-A `RunController` with a work queue, several workers, skips and approvals is Phase 1.
+The `RunController` (`run/controller.hpp`) runs many sessions with a work queue and several workers
+([Batch runs](#batch-runs)).
 
 ## Transport
 
@@ -48,8 +52,10 @@ Every request is `POST https://api.anthropic.com/v1/messages` (the base URL can 
 
 The transport streams the body to the SSE parser as it arrives and exposes the response headers.
 The client keeps the `request-id`, `retry-after` and `anthropic-ratelimit-*` headers of each response;
-the transcript records the request ID. A shared rate limiter and a rate-limit gauge that use these
-headers are Phase 1. Bodies of non-2xx responses are kept (up to 64 KiB) for the error message.
+the transcript records the request ID, and a run's rate gate reads the rate-limit headers of every
+response, errors included ([Rate limits](#rate-limits)). Bodies of non-2xx responses are kept (up to
+64 KiB) for the error message. `Client::list_models()` sends `GET /v1/models`; the GUI's Settings view
+uses it to check the key.
 
 - **libcurl** (Linux, macOS): one handle per request. Proxies come from the usual environment
   variables, and `CURL_CA_BUNDLE` or `SSL_CERT_FILE`, and `SSL_CERT_DIR`, override the CA store.
@@ -136,9 +142,10 @@ lays requests out so that the expensive part is shared:
   nondeterministic tool serialization; changing tools, system, model, thinking or effort within a
   session (an effort change invalidates the conversation cache, and on some models also the system and
   tools cache); editing earlier messages.
-- **Concurrency (Phase 1).** A cache entry becomes readable only once the first response that writes
-  it starts streaming. The batch runner will therefore start the first session alone and start the
-  other workers after its first streamed token.
+- **Concurrency.** A cache entry becomes readable only once the first response that writes it starts
+  streaming. The batch runner therefore starts the first session alone and starts the other workers
+  when that session's first response begins (its `message_start`), or after 30 seconds without one
+  ([Batch runs](#batch-runs)).
 
 ## Streaming
 
@@ -228,8 +235,8 @@ session ends with outcome `refused`, the function is marked `refused`, and its h
 attempt are kept. No tool calls from that response run, and nothing from it is appended to the
 conversation. The `stop_details` category and explanation are recorded (in the outcome detail and a
 `refusal` event) for information only; Decomp branches on `stop_reason`. **Decomp does not rephrase,
-retry or otherwise work around a refusal.** `decomp agent` exits with code 3. Skipping refused
-functions in later runs is part of the Phase 1 batch runner.
+retry or otherwise work around a refusal.** `decomp agent` exits with code 3, and the batch runner's
+default selection leaves refused functions out of later runs.
 
 **Turning fallbacks off.** Set `agent.fallbacks` to `false` in `decomp.json`, or pass
 `--no-fallbacks`. Decomp then omits the parameter and the beta header, and any decline ends the
@@ -289,6 +296,7 @@ run_loop(client, conversation, tools, config, control, observer) -> LoopOutcome
         control: abort -> aborted; stop -> stopped; pause -> wait until resumed (or stopped/aborted)
         if turns == max_turns: return max_turns
         if the wall-clock budget is spent: return budget_exhausted
+        if the run's budget is spent: return run_budget_exhausted
         append the pending user message: tool results or nudge, then guidance + status line
         response = client.create_message(request)          # retries happen inside
         if response failed: return aborted (after Abort) or error
@@ -299,13 +307,21 @@ run_loop(client, conversation, tools, config, control, observer) -> LoopOutcome
             run them; cut-off or invalid calls get an is_error result instead
             if a result ends the session (submit_result): return finished
         else if 2 nudges were already used: return end_turn_without_finish
-        if a budget is spent: return budget_exhausted (tokens, USD, wall clock) or max_turns
+        if a budget is spent: return budget_exhausted (tokens, USD, wall clock), run_budget_exhausted
+                              or max_turns
         if there was no tool call: queue a nudge
 ```
 
 `run_function` turns the loop's status into the session outcome: `finished` becomes `matched` or
-`gave_up` (from `submit_result`), `end_turn_without_finish` becomes `no_result`, and `refused`,
-`budget_exhausted`, `max_turns`, `stopped`, `aborted` and `error` keep their names.
+`gave_up` (from `submit_result`), `end_turn_without_finish` becomes `no_result`, a stop for a skip
+becomes `skipped` and a stop because the run's budget ran out becomes `run_budget_exhausted`, and
+`refused`, `budget_exhausted`, `run_budget_exhausted`, `max_turns`, `stopped`, `aborted` and `error`
+keep their names.
+
+**Unsubmitted matches.** When a session ends any other way than `matched` or Abort (out of turns or
+budget, stopped, or without a result) and one of its attempts was byte-exact, `run_function` submits
+that source itself, exactly as `submit_result` would (verification, approval, write), and the outcome
+becomes `matched`. The transcript records an `auto_submit` record, and the detail says why.
 
 **Stop reasons.** Only `refusal` is special. Any other stop reason (`tool_use`, `end_turn`,
 `max_tokens`, `pause_turn`) is handled by whether the response contains tool calls. A tool call that
@@ -336,7 +352,7 @@ empty) becomes the outcome detail.
 | `matched` | `matched` | 0 |
 | `gave_up` | `gave_up` | 2 |
 | `refused` | `refused` | 3 |
-| `budget_exhausted`, `max_turns`, `no_result`, `stopped` | `nonmatching` if any attempt of this or an earlier session scored above 0%, otherwise the previous status (`unstarted` instead of `in_progress`) | 2 |
+| `budget_exhausted`, `run_budget_exhausted`, `max_turns`, `no_result`, `skipped`, `stopped` | `nonmatching` if any attempt of this or an earlier session scored above 0%, otherwise the previous status (`unstarted` instead of `in_progress`) | 2 |
 | `aborted`, `error` | As above | 1 |
 
 A function that was `matched` before stays `matched`. In every case the attempts, the best source, the
@@ -359,8 +375,17 @@ The turn limit and the wall clock are checked before every request; tokens, USD,
 are checked again after every response, once its tool calls have run. A turn already in flight is
 never cut short for budget reasons; only Abort does that. When a budget runs out, the session ends
 with `budget_exhausted` (`max_turns` for the turn limit). The status line tells the model how many
-turns remain, how many attempts it made and its best score. Run budgets, live budget changes and
-budget notifications come with the Phase 1 batch runner.
+turns remain, how many attempts it made and its best score.
+
+The limits are live: `LoopControl::set_limits()` (the run controller's `set_limits`, the GUI's Run
+monitor, `decomp run --interactive`) changes them for running sessions, which apply them at their next
+check, and for sessions that start later. The status line always reports the current limits.
+
+A batch run can also have a **run budget** in USD (`--run-budget-usd`, `agent.max_usd_per_run`): the
+sessions of the run share a `SpendLedger`, each response adds its cost, and once the total reaches
+the budget no new session starts and running sessions end after their current turn with
+`run_budget_exhausted`. Raising the budget during the run, or resuming the run with a higher one,
+continues it.
 
 ### Retries and timeouts
 
@@ -746,29 +771,107 @@ You ended your turn without calling `submit_result`. Continue working on the tas
 
 The status line does not mention spend; the budgets are enforced by the loop.
 
+## Batch runs
+
+`decomp run` and `decomp-gui` run the agent on many functions under a `RunController`
+(`run/controller.hpp`). Each function gets the same session as `decomp agent` (`run_function`, one
+conversation, the same tools, budgets and outcomes); the controller adds the queue, the workers and
+the run-wide controls.
+
+**Queue and workers.** The functions are queued in the order given, or for a selection by an estimate
+of difficulty (from the function's size), easiest first. N workers (`--workers`, `agent.workers`,
+default 4, at most 64) each take the next pending function and run one session at a time. Pinned
+functions go first. Functions can be added, removed, moved, pinned, skipped (a running session stops
+after its turn with `skipped`) and requeued (a finished function runs again, with a new session)
+while the run goes on. Pause holds every worker (or one) before its next request; Stop lets running
+sessions finish their current turn and leaves the rest of the queue pending; Abort also cancels the
+requests and compiles in flight. Concurrency can be raised or lowered during the run; workers above
+a lowered count retire when their session ends.
+
+**Staggered start.** Until the first session's first response begins streaming (or 30 seconds pass),
+only one session runs. The others then start with the shared prompt prefix (tools and system prompt)
+already in the cache, and read it instead of each writing it ([Prompt caching](#prompt-caching)).
+
+**Run budget and live limits.** See [Budgets](#budgets): a run budget in USD shared by all sessions,
+and per-function limits that can change while sessions run.
+
+**Guidance.** Guidance for a running session (`:guide <fn> <text>` in `decomp run --interactive`,
+the GUI's composer) is queued with an id and appended to the session's next user message. Until that
+message is sent, it can be retracted. The `guidance` event and transcript record carry the id.
+
+### Rate limits
+
+The run's sessions share one `RateGate`. It reads the `anthropic-ratelimit-*` headers of every
+response, errors included. Before each request, a session waits while the requests allowance is spent,
+or while less than 2% of the input or output token allowance is left, until the allowance's reset time
+(at most a minute per wait, then it checks again). A 429 or 529 puts every session into backoff until
+its `retry-after` time (10 s for a 429 and 2 s for a 529 without one; at most 5 minutes), on top of
+the session's own retry delay. Waits end early on Abort. Each change is published as a
+`rate_limit_updated` event, and sessions that wait show the phase "waiting for rate limit".
+
+### Approvals
+
+Some actions can need the supervisor's approval. The one gated action is `write_source`: saving a
+verified match to `src/functions/`. Each action has a policy:
+
+| Policy | Effect |
+|---|---|
+| `auto` (default) | The source is saved at once. |
+| `ask` | The match waits: `approval_requested` is published, the session's phase becomes "waiting for approval", and the supervisor approves or denies it, with an optional reason, in the GUI's Changes and approvals view. Stop does not cancel the wait; Abort does. Only the GUI can answer, so `decomp run` refuses `ask` (an `ask` in `decomp.json` must be overridden with `--policy`). |
+| `deny` | Matches are never saved. |
+
+The check comes after the byte-exact verification and before the write. A denied match is not saved,
+and the model gets a tool error: "Verified byte-exact, but the supervisor declined saving it ..."
+with the reason, so it can adjust the source or give up. A declined source is not submitted again
+automatically at the end of the session. Policies come from `agent.approvals` in `decomp.json`
+(`{"write_source": "ask"}`), `decomp run --policy write_source=deny`, or the GUI, which can change a
+live run's policy. `file_written` events and `.decomp/changes.jsonl` record how each write was
+approved.
+
+### Resuming
+
+A run's directory holds its settings, queue and event log
+([project-format.md](project-format.md#runsrun-id)). `decomp run --resume <id>` (or Resume in the GUI)
+continues a run that stopped, ran out of budget or was interrupted (its process died while `run.json`
+still said it was running): functions that finished stay finished, and interrupted, stopped, aborted
+and failed ones start again with a fresh conversation. The new session's brief carries the attempts,
+notes and best source of the earlier ones, so little is lost. The run keeps the settings it recorded
+(model, effort, workers, budgets, limits, policies) unless they are overridden on the command line,
+its event numbering continues, and `run_resumed` lists the functions whose sessions were interrupted.
+A run can be resumed only by one process at a time (`run.lock`), and a project runs one run at a time
+(`.decomp/active-run.lock`, which `decomp agent` takes too).
+
 ## Transcripts and event logs
 
 Run data lives in the project's `.decomp/` directory ([project-format.md](project-format.md)), or under
 `--log-dir`:
 
 ```
-.decomp/runs/<run-id>/events.jsonl          every event of the run except stream deltas, in order
-.decomp/runs/<run-id>/sessions/<fn>.jsonl   the transcript of one session
-.decomp/runs/<run-id>/summary.json          totals: status, model, effort, cost, per-function outcome and usage
-.decomp/functions/<fn>/attempts.jsonl       every compile attempt (fed into future briefs)
+.decomp/runs/<run-id>/events.jsonl              every event of the run except stream deltas, in order
+.decomp/runs/<run-id>/sessions/<fn>.jsonl       the transcript of a function's first session in the run
+.decomp/runs/<run-id>/sessions/<fn>.<n>.jsonl   the transcript of its n-th session (after a requeue or resume)
+.decomp/runs/<run-id>/summary.json              totals: status, model, effort, cost, per-function outcome and usage
+.decomp/runs/<run-id>/run.json                  batch runs: settings, status and queue ([project-format.md](project-format.md#runsrun-id))
+.decomp/functions/<fn>/attempts.jsonl           every compile attempt (fed into future briefs)
 ```
+
+Session ids are `<run-id>-<va>` for a function's first session in a run and `<run-id>-<va>-<n>` for
+later ones, so every session has its own transcript. A session writes each transcript record before
+it publishes the matching event, so a view that sees an event can read the record.
 
 A transcript is one JSON object per line, distinguished by `type`:
 
 | `type` | Contents |
 |---|---|
+| `session` | The header: `session`, `function`, `display`, `va`, `model`, `effort`, `worker` |
 | `request` | The first request body in full (`turn` 1): model, settings, system prompt, tools and the brief |
 | `request_delta` | For every later turn: the messages appended since the previous request. History is append-only, so these reconstruct each request body exactly. |
-| `response` | Per turn: message `id`, serving `model`, `stop_reason`, `stop_details`, the raw `content` (thinking blocks with signatures, `fallback` blocks), the raw `usage` (with `iterations`), `had_fallback`, `cost_usd`, `latency_ms`, `request_id` |
+| `response` | Per turn: message `id`, serving `model`, `stop_reason`, `stop_details`, the raw `content` (thinking blocks with signatures, `fallback` blocks), the raw `usage` (with `iterations`), `had_fallback`, `cost_usd`, `latency_ms`, `ttft_ms` (time to the first streamed event), `request_id` |
 | `tool` | Per tool call: `turn`, `id`, `name`, `input` (the raw text when it was not valid JSON), `is_error`, `result`, `elapsed_ms` |
-| `retry` | A retried request: `turn`, `attempt`, `error`, `delay_ms` |
-| `guidance` | Supervisor guidance as it was sent: `turn`, `text` |
+| `retry` | A retried request: `turn`, `attempt`, `error`, `delay_ms`, HTTP `status`, `retry_after_ms` |
+| `guidance` | Supervisor guidance as it was sent: `turn`, `id`, `text` |
 | `paused`, `resumed` | Pause and resume points (`turn`) |
+| `auto_submit` | An unsubmitted byte-exact attempt submitted at the end: `accepted`, `result` |
 | `outcome` | `outcome`, `detail`, `best_match`, `turns`, `cost_usd`, `usage` |
 
 **Never recorded:** the API key and the request headers. The scripted-replay transport also masks
@@ -839,8 +942,8 @@ roll up per turn (`turn_finished` events), per session (the outcome, `summary.js
 ## Configuration
 
 Agent settings live in the `agent` object of `decomp.json`, so they are shared with the project, and
-`decomp agent` options override them for one run. From Phase 1, the Settings view can also hold
-per-user overrides.
+`decomp agent` and `decomp run` options override them for one run. The GUI's Settings view edits
+them.
 
 | Key | Default | Option | Notes |
 |---|---|---|---|
@@ -851,10 +954,13 @@ per-user overrides.
 | `max_usd_per_function` | `5.0` | `--budget-usd` | `0` means unlimited |
 | `max_tokens_per_function` | `0` | `--max-tokens` | All four usage fields combined; `0` means unlimited. Cache reads grow every turn, so USD is the primary budget. |
 | `max_minutes_per_function` | `30` | `--max-minutes` | Wall clock; `0` means unlimited |
+| `workers` | `4` | `--workers` (`decomp run`) | Sessions that run at once |
+| `max_usd_per_run` | `0` | `--run-budget-usd` (`decomp run`) | The run budget; `0` means unlimited |
+| `approvals` | `{}` | `--policy action=policy` (`decomp run`) | Per-action approval policies ([Approvals](#approvals)); actions not listed are `auto` |
 
 Fixed in this version (configurable later): `max_tokens` 64000, thinking display `summarized`, 2
 nudges, 4 retries with a 1 s base and a 60 s cap, a 30 s connect timeout, a 120 s stall timeout, the
-tool limits and the price table. A run budget and concurrency arrive with the Phase 1 batch runner.
+stagger timeout of 30 s, the tool limits and the price table.
 
 The API key is the one setting that never lives in a file: it comes from `ANTHROPIC_API_KEY`.
 
@@ -891,6 +997,16 @@ The API key is the one setting that never lives in a file: it comes from `ANTHRO
 
 Without a project, `decomp agent <func> --binary <exe> --toolchain <name>` works on a bare binary;
 nothing is persisted unless `--log-dir <dir>` is given, and the best source is printed at the end.
+
+**Many functions.** `decomp run --all --workers 4 --run-budget-usd 20` runs every function the default
+selection takes (or name them, or choose with `--status unstarted,nonmatching` or `--filter <regex>`).
+The progress view shows one line per worker. With `--interactive`, stdin takes `:pause [worker]`,
+`:resume [worker]`, `:stop`, `:abort`, `:skip <fn>`, `:requeue <fn>`, `:workers <n>`, `:budget <usd>`,
+`:guide <fn> <text>` and `:status`. Exit codes: 0 completed, 2 stopped or out of budget (resumable), 1
+aborted or failed. `decomp runs list` shows the project's runs, `decomp runs show <id>` summarizes
+one, and `decomp run --resume <id>` continues it ([Resuming](#resuming)). In `decomp-gui`, open the
+project (File > Open project) and start a run from the top bar; the Run monitor and Agent session
+views steer it ([ui.md](ui.md)).
 
 ## Offline replay testing
 
@@ -935,6 +1051,16 @@ All agent tests run without a network or a key:
   --flag /GS- --flag /GR- --flag /EHs-c-`, the command `decomp -C <dir> agent add --replay
   tests/replay/agent_match_add.jsonl` runs the same path end to end. Only the model's side is
   scripted; the compiles are real, so clang-cl must be installed.
+- Batch runs take a directory of scripts, one per function: `--replay-dir <dir>` (and the GUI's
+  developer setting) gives each session the first script that exists of `<safe name>.jsonl` (for
+  example `Player__Hit_401000.jsonl`), the same name without the address (`Player__Hit.jsonl`) and
+  `default.jsonl`. `tests/replay/run/` (generated by
+  `tests/replay/make_run_scripts.py`) matches 8 of the x86 fixture's functions with their real sources
+  and gives up on the rest; `decomp -C <dir> run --all --workers 4 --replay-dir tests/replay/run` runs
+  all 13, and CI does so through the CLI and through `decomp-gui --run-all` under Xvfb. The run
+  controller's own tests use a fake session function: 200 functions on 4 workers, pause, per-worker
+  pause, stop, abort, skip, requeue, queue edits, concurrency changes, run budgets, approvals and a
+  resume after a simulated crash.
 
 ## Open questions
 

@@ -415,6 +415,9 @@ TEST_CASE("agent runner: approvals decide whether a verified match is saved") {
         CHECK(std::filesystem::exists(r.matched_source));
         REQUIRE(rec.state.data().files_written.size() == 1);
         CHECK(rec.state.data().files_written.back().file.approval == "approved by user");
+        const auto changes = cp.project->changes();
+        REQUIRE_FALSE(changes.empty());
+        CHECK(changes.back()["reason"] == "verified match, approved by user");
         CHECK(rec.state.data().approvals_pending == 0);
         CHECK(rec.counts["approval_requested"] == 1);
     }

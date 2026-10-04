@@ -10,9 +10,10 @@ writes JSON with sorted keys and `symbols.txt` sorted by address, and it replace
 a temporary file plus rename, so a project diffs and merges cleanly. This document specifies each
 file, the function status values and the toolchain registry.
 
-Status: implemented in the first slice (step 9 of the [roadmap](roadmap.md#first-working-slice)).
-Translation-unit organization replaces the one-file-per-function source layout in Phase 3. Anything
-marked *planned* does not exist yet.
+Status: implemented in the first slice (step 9 of the [roadmap](roadmap.md#first-working-slice)) and
+extended in Phase 1 with locks, change logs and batch-run directories. Translation-unit organization
+replaces the one-file-per-function source layout in Phase 3. Anything marked *planned* does not exist
+yet.
 
 ## Layout
 
@@ -25,7 +26,12 @@ marked *planned* does not exist yet.
     .gitignore                  written by init: /.decomp/                        (committed)
     .decomp/                    working data                                      (gitignored)
         functions/<fn>/         attempts.jsonl, best.cpp, notes.md
-        runs/<run-id>/          events.jsonl, sessions/<fn>.jsonl, summary.json
+        runs/<run-id>/          run.json, summary.json, events.jsonl, sessions/, run.lock
+        changes.jsonl           every file Decomp wrote into the project
+        blobs/<sha1>            the content those writes replaced
+        symbols.log.jsonl       every symbol edit
+        project.lock            held while symbols.txt and the logs are written
+        active-run.lock         held by the process that runs agent sessions
         build/                  per-compile working directories
         cache/objects/          compile cache
 ```
@@ -52,13 +58,16 @@ The example below is shown exactly as `decomp init ../bin/GAME.EXE --toolchain v
 ```json
 {
   "agent": {
+    "approvals": {},
     "effort": "high",
     "fallbacks": true,
     "max_minutes_per_function": 30,
     "max_tokens_per_function": 0,
     "max_turns": 40,
     "max_usd_per_function": 5.0,
-    "model": "claude-opus-5-5"
+    "max_usd_per_run": 0.0,
+    "model": "claude-opus-5-5",
+    "workers": 4
   },
   "flags": [
     "/O2",
@@ -172,10 +181,12 @@ their layouts are checked against the PDB.
 ## `src/functions/`
 
 Verified sources, one `.cpp` per function in the slice, named `<fn>.cpp` (for example
-`src/functions/add_401060.cpp`). A file is written when the agent's `submit_result` is accepted, and
-it is **exactly** the translation unit that verified byte-exact. Decomp adds no banner or comment,
-because even a comment can shift `__LINE__`. The history (session, attempts, scores) lives in
-`.decomp/`. `decomp diff --source` never writes here; a "verify and save" for hand-written sources is
+`src/functions/add_401060.cpp`). A file is written when the agent's `submit_result` is accepted (or
+when a session ends with a byte-exact attempt it did not submit), once the `write_source` approval
+policy lets it through ([agent.md](agent.md#approvals)), and it is **exactly** the translation unit
+that verified byte-exact. Decomp adds no banner or comment, because even a comment can shift
+`__LINE__`. Every write is recorded in [`.decomp/changes.jsonl`](#changesjsonl-and-blobs) and can be
+reverted. The history (session, attempts, scores) lives in `.decomp/`. `decomp diff --source` never writes here; a "verify and save" for hand-written sources is
 part of the Phase 1 GUI. Phase 3 groups functions into translation units, with one source per unit as
 in the original program.
 
@@ -199,14 +210,14 @@ Renaming a symbol changes its key; existing files are not moved.
 
 | File | Contents |
 |---|---|
-| `attempts.jsonl` | One JSON object per compile attempt of an agent session, that is, every `compile_and_diff` call and the verification compile of every `submit_result` with `matched`. Fields: `attempt` (numbered from 1 within the session), `session`, `compiled`, `match_percent`, `byte_exact`, `summary` (the diff's one-line summary, or why there is no diff) and the full `source`. `decomp diff` does not record attempts. |
+| `attempts.jsonl` | One JSON object per compile attempt of an agent session, that is, every `compile_and_diff` call and the verification compile of every `submit_result` with `matched`. Fields: `attempt` (numbered from 1 within the session), `session`, `origin` (`agent`; `user` for attempts made by hand in the GUI), `time` (UTC), `compiled`, `match_percent`, `byte_exact`, `summary` (the diff's one-line summary, or why there is no diff) and the full `source`. `decomp diff` does not record attempts. |
 | `best.cpp` | The source of the best attempt so far. An attempt replaces it when it compiled, was diffed, and scored at least the function's previous best (`best=` in `symbols.txt`), so among equal scores the most recent wins. For a matched function it equals the verified source. |
 | `notes.md` | Notes from the agent's `record_note`, one per line: `- YYYY-MM-DD HH:MM: <text>` (UTC) |
 
 An `attempts.jsonl` line from the scripted replay of the CI smoke test:
 
 ```json
-{"attempt":1,"byte_exact":false,"compiled":true,"match_percent":68.75,"session":"2026-10-04T02-08-33-f11d-401060","source":"extern int g_counter;\n\n__declspec(noinline) int add(int a, int b) { return a - b + g_counter; }\n","summary":"match 68.8% (2/4 equal; 1 operand, 1 opcode) - not matching"}
+{"attempt":1,"byte_exact":false,"compiled":true,"match_percent":68.75,"origin":"agent","session":"2026-10-04T02-08-33-f11d-401060","source":"extern int g_counter;\n\n__declspec(noinline) int add(int a, int b) { return a - b + g_counter; }\n","summary":"match 68.8% (2/4 equal; 1 operand, 1 opcode) - not matching","time":"2026-10-04T02:08:33.412Z"}
 ```
 
 This history feeds future briefs: the number of earlier attempts and the best score, the notes and the
@@ -214,58 +225,161 @@ best source go into the next session's first message ([agent.md](agent.md#prompt
 
 ### `runs/<run-id>/`
 
-A run is one invocation of `decomp agent`, which works on one function in the slice. The run ID is the
-UTC start time plus four random hex digits, such as `2026-10-04T15-30-12-3f9a`. With
-`decomp agent --log-dir <dir>` the run goes to `<dir>/<run-id>/` instead; without a project and
-without `--log-dir`, no run files are written.
+A run is one invocation of `decomp agent` (one function) or one batch run of `decomp run` or
+`decomp-gui` (many functions; [agent.md](agent.md#batch-runs)). The run ID is the UTC start time plus
+four random hex digits, such as `2026-10-04T15-30-12-3f9a`. With `decomp agent --log-dir <dir>` the
+run goes to `<dir>/<run-id>/` instead; without a project and without `--log-dir`, no run files are
+written.
 
 | File | Contents |
 |---|---|
-| `events.jsonl` | Every event of the run except the high-volume `stream_delta` events, one JSON object per line, in sequence order ([ui.md](ui.md#events)). `RunState::replay` folds it back into the run's state ([ui.md](ui.md#replay-of-past-runs)). |
-| `sessions/<fn>.jsonl` | The transcript of the session for one function: the first request in full, the messages each later request appended, every response with its usage and cost, tool calls, retries, guidance, pauses and the outcome ([agent.md](agent.md#transcripts-and-event-logs)). It never contains the API key. |
-| `summary.json` | Totals for the run: its status, model and effort, cost, and per function the outcome, best match, turns, cost and token usage. `decomp status` does not read it; it uses `symbols.txt`. |
+| `events.jsonl` | Every event of the run except the high-volume `stream_delta` events, one JSON object per line, in sequence order ([ui.md](ui.md#events)). `RunState::replay` folds it back into the run's state ([ui.md](ui.md#replay-of-past-runs)); `decomp runs show` and the GUI's past runs read it. A resumed run appends to it, continuing the numbering. |
+| `sessions/<fn>.jsonl` | The transcript of a function's first session in the run, and `sessions/<fn>.<n>.jsonl` of its n-th (after a requeue or a resume): a `session` header, the first request in full, the messages each later request appended, every response with its usage and cost, tool calls, retries, guidance, pauses and the outcome ([agent.md](agent.md#transcripts-and-event-logs)). It never contains the API key. |
+| `summary.json` | What the run did: totals, and per function the outcome of its latest session plus the totals of all its sessions. Batch runs rewrite it as functions finish; `decomp runs show <id>` computes the same from `events.jsonl`. `decomp status` does not read it; it uses `symbols.txt`. |
+| `run.json` | Batch runs: settings, status and queue, rewritten at every transition (below) |
+| `run.lock` | Batch runs: held by the process running the run. A run whose `run.json` says it is live but whose lock is free was interrupted, and `decomp runs list` shows it as `interrupted`. |
 
-The `summary.json` of the CI smoke test's scripted run (`"replay": true`; a live run has `false`):
+The `summary.json` of a scripted batch run (`"replay": true` in `run.json`), with one of its 13
+functions:
 
 ```json
 {
-  "cost_usd": 0.072854,
+  "cost_usd": 0.61896,
   "effort": "high",
-  "finished": "2026-10-04T02:08:33Z",
+  "finished": "2026-10-04T14:14:17Z",
   "functions": [
     {
       "best_match": 100.0,
-      "cost_usd": 0.072854,
+      "cost_usd": 0.04892,
       "detail": "'submit_result' ended the session",
-      "display": "int __cdecl add(int, int)",
-      "function": "?add@@YAHHH@Z",
+      "display": "public: void __thiscall Player::Hit(int)",
+      "function": "?Hit@Player@@QAEXH@Z",
       "matched": true,
       "outcome": "matched",
-      "turns": 4,
+      "session": "2026-10-04T14-14-16-df8f-401000",
+      "sessions": 1,
+      "turns": 2,
       "usage": {
-        "cache_creation_input_tokens": 8270,
-        "cache_read_input_tokens": 20900,
-        "input_tokens": 31,
-        "output_tokens": 1360
+        "cache_creation_input_tokens": 6100,
+        "cache_read_input_tokens": 6100,
+        "input_tokens": 2400,
+        "output_tokens": 380
       },
-      "va": 4198496
+      "va": 4198400
     }
   ],
+  "functions_matched": 8,
+  "functions_planned": 13,
+  "functions_worked": 13,
   "model": "claude-opus-5-5",
-  "replay": true,
-  "run": "2026-10-04T02-08-33-f11d",
-  "started": "2026-10-04T02:08:33Z",
-  "status": "completed"
+  "project": "pf",
+  "run": "2026-10-04T14-14-16-df8f",
+  "sessions": 13,
+  "started": "2026-10-04T14:14:16Z",
+  "status": "completed",
+  "usage": {
+    "cache_creation_input_tokens": 79300,
+    "cache_read_input_tokens": 79300,
+    "input_tokens": 31200,
+    "output_tokens": 4090
+  },
+  "workers": 4
 }
 ```
 
-`status` is `completed`, `stopped`, `aborted` or `error`; the function's `outcome` is one of the
-outcomes in [agent.md](agent.md#the-loop).
+`status` is `completed`, `stopped`, `aborted`, `budget_exhausted` or `error`; a function's `outcome`
+is one of the outcomes in [agent.md](agent.md#the-loop).
+
+The `run.json` of the same run, with one queue entry:
+
+```json
+{
+  "counts": {"done": 13, "matched": 8, "pending": 0, "running": 0, "skipped": 0},
+  "created": "2026-10-04T14:14:16Z",
+  "effort": "high",
+  "id": "2026-10-04T14-14-16-df8f",
+  "limits": {"max_seconds": 1800, "max_tokens": 0, "max_turns": 40, "max_usd": 5.0},
+  "model": "claude-opus-5-5",
+  "policies": {},
+  "project": "pf",
+  "queue": [
+    {
+      "difficulty": 2.807354922057604,
+      "display": "int __cdecl read_counter(void)",
+      "name": "?read_counter@@YAHXZ",
+      "outcome": "matched",
+      "sessions": 1,
+      "state": "done",
+      "va": 4198512
+    }
+  ],
+  "replay": true,
+  "replay_dir": "tests/replay/run",
+  "run_budget_usd": 0.0,
+  "selection": {"all": true, "filter": "", "functions": [], "include_finished": false, "statuses": []},
+  "spent_usd": 0.61896,
+  "status": "completed",
+  "updated": "2026-10-04T14:14:17Z",
+  "version": 1,
+  "workers": 4
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `status` | `starting`, `running`, `paused`, `stopping` or `aborting` while live; then `completed`, `stopped`, `aborted` or `budget_exhausted` |
+| `queue` | Every function of the run in dispatch order: `state` (`pending`, `running`, `done` or `skipped`), the latest `outcome`, the number of `sessions`, the `difficulty` estimate and `pinned` when pinned |
+| `model`, `effort`, `workers`, `limits`, `run_budget_usd`, `policies` | The settings, including changes made during the run; a resume starts from them |
+| `selection`, `replay`, `replay_dir` | How the functions were chosen, and the scripts of a scripted run (so that a resume finds them) |
+| `counts`, `spent_usd`, `created`, `updated` | Progress for `decomp runs list` |
+
+### `changes.jsonl` and `blobs/`
+
+Every file Decomp writes into the project (today: verified sources in `src/functions/`) is recorded
+in `changes.jsonl`, one JSON object per write, and the content it replaced is kept in
+`blobs/<sha1 of that content>`, so any write can be undone:
+
+```json
+{"function":"?scale@@YAMM@Z","path":"src/functions/scale_401180.cpp","previous_sha1":null,"reason":"verified match","session":"2026-10-04T14-14-16-df8f-401180","sha1":"e5f5b03613cdcf0060ce0290b4b5b0d5b3fab780","size":71,"source":"agent","time":"2026-10-04T14:14:17.022Z","va":4198784}
+```
+
+| Field | Meaning |
+|---|---|
+| `path` | Relative to the project directory |
+| `sha1`, `size` | The content written (`sha1` is `null` when a revert removed the file) |
+| `previous_sha1` | The content replaced, kept in `blobs/`; `null` for a new file |
+| `source`, `session`, `reason` | Who wrote it: `agent` (with its session) or `user`, and why. A match saved after the supervisor's approval says so (`verified match, approved by user`). |
+| `function`, `va`, `time` | The function and when (UTC) |
+
+Reverting a change (`Project::revert_change`, the GUI's Changes and approvals view) restores the
+content it replaced, or removes the file when there was none, and appends its own record with
+`reason: "revert"`; the reverted content goes to `blobs/` too. Only a file still holding the content
+of that change can be reverted, so later changes are reverted first. A function whose matched source
+is removed goes back to `nonmatching`; its attempts and best source stay.
+
+### `symbols.log.jsonl`
+
+Every symbol edit made through Decomp's project API (`Project::set_symbol`: renames, new symbols, kind
+and size changes, removals) appends `{time, va, before, after, source, session, reason}`, where `before` and `after` hold the symbol's `name`, `kind`, `size` and `source` (`null` when
+it did not exist). `symbols.txt` holds the result; the log holds the provenance. Edits made to
+`symbols.txt` by hand are not logged.
+
+### Locks
+
+| File | Held | Purpose |
+|---|---|---|
+| `project.lock` | Exclusively while `symbols.txt`, the logs beside it, a function's history (attempts, best source, notes) or `src/functions/` are written | Workers and processes never interleave writes; each write starts from the latest `symbols.txt` on disk |
+| `active-run.lock` | By the process that runs agent sessions (`decomp agent`, `decomp run`, `decomp-gui` during a run) | One live run per project |
+| `runs/<id>/run.lock` | By the process running that batch run | Tells a live run from an interrupted one; a run is resumed by one process at a time |
+
+The locks are advisory file locks (`flock` on Linux, `LockFileEx` on Windows) that the system releases
+when a process dies, so a crash never leaves a project locked. The lock files themselves stay.
 
 ### `build/` and `cache/`
 
 - `build/` holds one fresh working directory per compile, named `c<first 12 hex digits of the cache
-  key>-<n>`: `candidate.cpp`, `candidate.obj`, and `args.rsp` when the command line is long. The
+  key>-<process id>-<n>` (unique across workers and processes): `candidate.cpp`, `candidate.obj`, and
+  `args.rsp` when the command line is long. The
   directory of a successful compile is deleted right away; a failed compile's directory is kept for
   inspection, and nothing prunes those yet.
 - `cache/objects/` is the compile cache: `<sha1>.obj` plus `<sha1>.json` with the compile result
@@ -283,7 +397,7 @@ outcomes in [agent.md](agent.md#the-loop).
 | `matched` | A verified byte-exact source is in `src/functions/` | `submit_result` verification. A matched function stays matched, whatever later sessions do. |
 | `refused` | The model declined the request, including after fallbacks when they are enabled | The runner |
 | `gave_up` | The agent called `submit_result` with `give_up` | The agent |
-| `skipped` | Excluded from work | Editing `symbols.txt`. Nothing else sets or reads it yet; selecting work for a batch is Phase 1. |
+| `skipped` | Excluded from work | Editing `symbols.txt`. The default batch selection leaves it out. |
 | `library` | Library or runtime code that is not meant to be decompiled | Editing `symbols.txt`; library signature matching from Phase 2 |
 
 ```
@@ -295,9 +409,10 @@ unstarted --agent--> in_progress --+--> matched
 any status --edit symbols.txt--> skipped | library | unstarted (reset; history kept)
 ```
 
-`decomp agent` runs on a function whatever its status. Skipping refused, skipped and library functions
-belongs to the Phase 1 batch runner. Re-verifying matched functions after a change of toolchain or
-flags is open.
+`decomp agent`, and `decomp run` given function names, run on a function whatever its status. The
+default selection of `decomp run --all` and of the GUI leaves out matched, refused, skipped and library
+functions, linker thunks and functions without a size or recoverable extent (`--status` chooses by
+status instead). Re-verifying matched functions after a change of toolchain or flags is open.
 
 ## Toolchain registry
 

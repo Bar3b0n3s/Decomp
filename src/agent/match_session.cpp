@@ -403,7 +403,9 @@ ToolOutput MatchSession::submit_result(const Json& input) {
         best_source_ = source;
     }
     if (project_) {
-        if (auto r = project_->write_matched_source(symbol_, source, project::ChangeOrigin{SymbolSource::agent, session_id_, "verified match"}); r)
+        // changes.jsonl says who let the write through when it was not automatic.
+        const std::string reason = approval == "auto" ? std::string("verified match") : std::format("verified match, {}", approval);
+        if (auto r = project_->write_matched_source(symbol_, source, project::ChangeOrigin{SymbolSource::agent, session_id_, reason}); r)
             publish(events::FileWritten{fs::to_utf8(r->path), "matched source", r->size, r->sha1, session_id_, approval});
         else
             log::warn("cannot save the matched source of {}: {}", symbol_.name, r.error().message);
