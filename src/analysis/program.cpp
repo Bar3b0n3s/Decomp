@@ -7,6 +7,8 @@
 #include "formats/pdb.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <map>
 #include <format>
 #include <set>
 
@@ -20,6 +22,68 @@ std::string_view to_string(XrefKind kind) {
     case XrefKind::address: return "address";
     }
     return "?";
+}
+
+namespace {
+
+// The 64-bit register a general-purpose register name belongs to ("r8d" -> "r8", "al" -> "rax").
+std::string gpr64(std::string_view r) {
+    static const std::map<std::string_view, std::string_view> legacy = {
+        {"eax", "rax"}, {"ax", "rax"}, {"al", "rax"}, {"ah", "rax"}, {"ebx", "rbx"}, {"bx", "rbx"}, {"bl", "rbx"},
+        {"bh", "rbx"},  {"ecx", "rcx"}, {"cx", "rcx"}, {"cl", "rcx"}, {"ch", "rcx"}, {"edx", "rdx"}, {"dx", "rdx"},
+        {"dl", "rdx"},  {"dh", "rdx"},  {"esi", "rsi"}, {"si", "rsi"}, {"sil", "rsi"}, {"edi", "rdi"}, {"di", "rdi"},
+        {"dil", "rdi"}, {"ebp", "rbp"}, {"bp", "rbp"}, {"bpl", "rbp"}, {"esp", "rsp"}, {"sp", "rsp"}, {"spl", "rsp"}};
+    if (auto it = legacy.find(r); it != legacy.end()) return std::string(it->second);
+    if (r.size() >= 2 && r[0] == 'r' && std::isdigit(static_cast<unsigned char>(r[1]))) {
+        usize n = 1;
+        while (n < r.size() && std::isdigit(static_cast<unsigned char>(r[n]))) ++n;
+        return std::string(r.substr(0, n));
+    }
+    return std::string(r);
+}
+
+} // namespace
+
+std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, std::span<const x86::Instruction> list) {
+    std::set<std::pair<u64, usize>> out;
+    if (image.arch() != Arch::x64) return out;
+    const u64 base = image.image_base();
+    std::set<std::string> holders;  // registers currently holding the image base
+    for (const auto& ins : list) {
+        for (const auto& op : ins.operands) {
+            if (op.kind != x86::OperandKind::mem || !op.mem.has_disp || op.mem.field < 0) continue;
+            const auto& field = ins.fields[static_cast<usize>(op.mem.field)];
+            if (field.rip_relative || field.size != 4 || field.raw <= 0) continue;
+            const bool via_base = !op.mem.base.empty() && holders.contains(gpr64(op.mem.base));
+            const bool via_index = !op.mem.index.empty() && op.mem.scale == 1 && holders.contains(gpr64(op.mem.index));
+            if ((via_base || via_index) && image.section_at(base + static_cast<u64>(field.raw)))
+                out.emplace(ins.address, static_cast<usize>(op.mem.field));
+        }
+        // Update what the registers hold after this instruction.
+        if (ins.mnemonic == "lea" && ins.operands.size() == 2 && ins.operands[0].kind == x86::OperandKind::reg &&
+            ins.operands[1].kind == x86::OperandKind::mem && ins.operands[1].mem.field >= 0) {
+            const auto& f = ins.fields[static_cast<usize>(ins.operands[1].mem.field)];
+            const std::string reg = gpr64(ins.operands[0].reg);
+            if (f.rip_relative && f.absolute == base && ins.operands[1].mem.index.empty()) holders.insert(reg);
+            else holders.erase(reg);
+            continue;
+        }
+        if (ins.flow == x86::Flow::call || ins.flow == x86::Flow::indirect_call) {
+            for (const char* r : {"rax", "rcx", "rdx", "r8", "r9", "r10", "r11"}) holders.erase(r);
+            continue;
+        }
+        static const std::set<std::string_view> no_write = {"cmp", "test", "bt", "push"};
+        if (!ins.operands.empty() && ins.operands[0].kind == x86::OperandKind::reg && !no_write.contains(ins.mnemonic))
+            holders.erase(gpr64(ins.operands[0].reg));
+        if (ins.mnemonic == "xchg" && ins.operands.size() == 2 && ins.operands[1].kind == x86::OperandKind::reg)
+            holders.erase(gpr64(ins.operands[1].reg));
+        static const std::set<std::string_view> rax_rdx = {"mul", "div", "idiv", "cdq", "cqo", "cwd"};
+        if (rax_rdx.contains(ins.mnemonic) || (ins.mnemonic == "imul" && ins.operands.size() == 1)) {
+            holders.erase("rax");
+            holders.erase("rdx");
+        }
+    }
+    return out;
 }
 
 Result<Program> Program::open(const std::filesystem::path& binary, const std::optional<std::filesystem::path>& pdb_path) {

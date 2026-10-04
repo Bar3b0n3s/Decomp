@@ -179,6 +179,7 @@ Result<Side> build_target_side(const Program& program, u64 va) {
     side.size = ext.end - ext.start;
     std::map<u64, usize> index_of;
     for (usize i = 0; i < list.size(); ++i) index_of[list[i].address] = i;
+    const auto rva_fields = image_relative_fields(program.image(), list);
 
     for (auto& ins : list) {
         SideInstruction si;
@@ -193,7 +194,10 @@ Result<Side> build_target_side(const Program& program, u64 va) {
                     target = t.table_va;
                     rva_table = true;
                 }
-            if (!rva_table && !is_address_field(program, ins, field)) continue;
+            // MSVC x64 addresses globals as [image base register + index + RVA].
+            const bool rva_field = !rva_table && rva_fields.contains({ins.address, f});
+            if (rva_field) target = program.image().image_base() + static_cast<u64>(field.raw);
+            if (!rva_table && !rva_field && !is_address_field(program, ins, field)) continue;
             if (const JumpTable* t = table_at(ext, target)) {
                 Ref r;
                 r.kind = RefKind::table;

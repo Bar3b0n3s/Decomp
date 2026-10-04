@@ -9,6 +9,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -51,6 +53,12 @@ struct Xref {
     u64 function = 0;  // start of the function containing `from` (0 if unknown)
     XrefKind kind = XrefKind::read;
 };
+
+// Displacements that are RVAs because their base or index register holds the image base. MSVC x64
+// materializes `lea r, [rip+__ImageBase]` and then reads `[r+index*scale+<rva>]` (global arrays, jump
+// and byte tables). Registers are tracked in address order; a write or a call (volatile registers)
+// forgets them. Returns (instruction address, field index) pairs.
+std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, std::span<const x86::Instruction> list);
 
 // A loaded target binary: image, symbols and lazily computed analysis results.
 class Program {

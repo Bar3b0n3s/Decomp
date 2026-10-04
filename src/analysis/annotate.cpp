@@ -123,6 +123,7 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
     auto label_for = [](u64 va) { return std::format("loc_{:x}", va); };
 
     std::map<u64, Reference> callees, data_refs;
+    const auto rva_fields = image_relative_fields(program.image(), ins);
     const bool x64 = program.arch() == Arch::x64;
     const i64 slot = x64 ? 8 : 4;
     i64 sp = 0;  // stack pointer relative to the value at entry (return address at [sp_entry])
@@ -144,6 +145,17 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
 
         std::vector<std::string> notes;
         auto renderer = [&](const x86::Instruction& in, const x86::Field& f) -> std::optional<std::string> {
+            const auto field_no = static_cast<usize>(&f - in.fields.data());
+            if (f.kind != x86::FieldKind::rel && rva_fields.contains({in.address, field_no})) {
+                // Image-base-relative (MSVC x64 `[r8+rcx*4+rva]`): name what the RVA points at.
+                const u64 va = program.image().image_base() + static_cast<u64>(f.raw);
+                if (std::ranges::any_of(ext.jump_tables, [&](const JumpTable& t) { return t.table_va == va; }))
+                    return std::format("switch_table_{:x}", va);
+                auto ref = describe_reference(program, va);
+                data_refs.emplace(va, ref);
+                if (!ref.detail.empty() && ref.kind != "function") notes.push_back(ref.detail);
+                return std::format("imagerel {}", ref.display);
+            }
             if (f.kind == x86::FieldKind::rel) {
                 if (ext.contains(f.absolute)) return label_for(f.absolute);
                 auto ref = describe_reference(program, f.absolute);

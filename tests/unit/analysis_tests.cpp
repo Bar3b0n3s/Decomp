@@ -2,6 +2,8 @@
 #include "analysis/cfg.hpp"
 #include "analysis/demangle.hpp"
 #include "analysis/program.hpp"
+#include "core/bytes.hpp"
+#include "formats/pe.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
@@ -141,4 +143,30 @@ TEST_CASE("annotated listing symbolizes operands and names frame slots") {
     auto j = to_json(fn);
     CHECK(j["lines"].size() == fn.lines.size());
     CHECK(j["callees"].size() == fn.callees.size());
+}
+
+TEST_CASE("image-base-relative operands (MSVC x64) are found by tracking the base register") {
+    auto image = pe::Image::load(test::fixture("x64/basic.exe")).value();
+    REQUIRE(image.image_base() == 0x140000000);
+    const std::vector<u8> code = {
+        0x4C, 0x8D, 0x05, 0xF9, 0xEF, 0xFF, 0xFF,              // lea r8, [rip-0x1007]  (= __ImageBase)
+        0x41, 0x8B, 0x84, 0x88, 0x00, 0x20, 0x00, 0x00,        // mov eax, [r8+rcx*4+0x2000]      RVA
+        0x42, 0x0F, 0xBE, 0x8C, 0x01, 0x10, 0x20, 0x00, 0x00,  // movsx ecx, byte [rcx+r8+0x2010] RVA (index)
+        0x8B, 0x81, 0x00, 0x20, 0x00, 0x00,                    // mov eax, [rcx+0x2000]           plain offset
+        0x49, 0x89, 0xC8,                                      // mov r8, rcx                     r8 overwritten
+        0x41, 0x8B, 0x84, 0x88, 0x00, 0x20, 0x00, 0x00,        // mov eax, [r8+rcx*4+0x2000]      plain offset
+    };
+    x86::Decoder d(Arch::x64);
+    auto list = d.decode_all(as_bytes(code.data(), code.size()), 0x140001000);
+    REQUIRE(list.size() == 6);
+    CHECK(list[0].fields[0].absolute == 0x140000000);
+    const auto fields = image_relative_fields(image, list);
+    CHECK(fields.size() == 2);
+    CHECK(fields.contains({list[1].address, 0}));
+    CHECK(fields.contains({list[2].address, 0}));
+    CHECK_FALSE(fields.contains({list[3].address, 0}));
+    CHECK_FALSE(fields.contains({list[5].address, 0}));
+    // x86 never uses this addressing.
+    auto x86_image = pe::Image::load(test::fixture("x86/basic.exe")).value();
+    CHECK(image_relative_fields(x86_image, list).empty());
 }

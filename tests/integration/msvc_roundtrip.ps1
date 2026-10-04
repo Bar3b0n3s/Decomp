@@ -32,6 +32,7 @@ if ($failed) {
     foreach ($fn in "dispatch", "message", "scale", "entry") {
         & $decomp diff $fn --binary "$out\basic.exe" --obj "$out\basic.obj" --compact
     }
+    & $decomp diff other_value --binary "$out\basic.exe" --obj "$out\other.obj" --compact
     throw "MSVC round trip ($Arch): some functions are not byte-exact"
 }
 Write-Host "MSVC round trip ($Arch): all functions byte-exact"
