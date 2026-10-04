@@ -1,0 +1,78 @@
+#pragma once
+
+#include "core/result.hpp"
+#include "core/types.hpp"
+
+#include <array>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace decomp::pdb {
+
+struct Procedure {
+    std::string name;  // undecorated, e.g. "Player::Hit"
+    u32 rva = 0;
+    u32 size = 0;
+    bool global = true;  // S_GPROC32 vs S_LPROC32 (static)
+    u32 module = 0;      // index into modules()
+};
+
+struct DataSymbol {
+    std::string name;  // undecorated
+    u32 rva = 0;
+    u32 type_index = 0;
+    bool global = true;
+    u32 module = 0;  // only meaningful for module-local (static) data
+};
+
+struct PublicSymbol {
+    std::string name;  // decorated, e.g. "?Hit@Player@@QAEXH@Z"
+    u32 rva = 0;
+    bool is_function = false;
+};
+
+struct Module {
+    std::string name;         // object file path as recorded by the linker
+    std::string object_name;  // library or object name
+};
+
+struct Contribution {
+    u32 rva = 0;
+    u32 size = 0;
+    u32 module = 0;
+    u32 characteristics = 0;
+};
+
+struct Info {
+    std::array<u8, 16> guid{};
+    u32 age = 0;
+    u32 signature = 0;
+};
+
+// Reads PDB 7.0 (MSF 7.00) files: procedures, data symbols, publics, modules and section contributions.
+class Reader {
+public:
+    static Result<Reader> load(const std::filesystem::path& path);
+
+    const Info& info() const { return info_; }
+    const std::vector<Procedure>& procedures() const { return procedures_; }
+    const std::vector<DataSymbol>& data_symbols() const { return data_; }
+    const std::vector<PublicSymbol>& publics() const { return publics_; }
+    const std::vector<Module>& modules() const { return modules_; }
+    const std::vector<Contribution>& contributions() const { return contributions_; }
+
+    // True when the GUID and age match a PE's CodeView record.
+    bool matches(const std::array<u8, 16>& guid, u32 age) const { return guid == info_.guid && age == info_.age; }
+
+private:
+    Info info_;
+    std::vector<Procedure> procedures_;
+    std::vector<DataSymbol> data_;
+    std::vector<PublicSymbol> publics_;
+    std::vector<Module> modules_;
+    std::vector<Contribution> contributions_;
+};
+
+} // namespace decomp::pdb
