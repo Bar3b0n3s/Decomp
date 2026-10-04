@@ -2,6 +2,7 @@
 #include "core/fs.hpp"
 #include "core/strings.hpp"
 #include "matching/diff.hpp"
+#include "matching/health.hpp"
 #include "matching/match.hpp"
 #include "matching/toolchain.hpp"
 #include "project/project.hpp"
@@ -68,20 +69,10 @@ void register_toolchain_commands(CLI::App& app, GlobalOptions& g) {
                 TRY_ASSIGN(auto reg, matching::ToolchainRegistry::load());
                 const auto* t = reg.find(*name);
                 if (!t) return make_error(ErrorCode::not_found, "unknown toolchain '{}'", *name);
-                TRY_ASSIGN(auto tmp, fs::TempDir::create("decomp-probe"));
-                matching::Compiler compiler(*t, tmp.path());
-                matching::CompileRequest req;
-                req.source = "int decomp_probe(int x) { return x * 3 + 1; }\n";
-                TRY_ASSIGN(auto r, compiler.compile(req));
-                std::string detail;
-                if (r.ok) {
-                    auto obj = coff::Object::parse(r.object_data);
-                    detail = obj ? std::format("COFF {} object, {} functions", to_string(obj->arch()), obj->function_symbols().size())
-                                 : "not a COFF object (" + obj.error().message + ")";
-                }
-                if (g.json) print_json({{"ok", r.ok}, {"command", r.command}, {"output", r.output}, {"duration_ms", r.duration.count()}, {"object", detail}});
+                TRY_ASSIGN(auto r, matching::check_toolchain(*t));
+                if (g.json) print_json(matching::to_json(r));
                 else std::println("{} {} ({} ms){}\n{}", r.ok ? "OK" : "FAILED", join(r.command, " "), r.duration.count(),
-                                  detail.empty() ? "" : "\n  " + detail, r.output);
+                                  r.object.empty() ? "" : "\n  " + r.object, r.output);
                 return r.ok ? 0 : 1;
             }));
         });
