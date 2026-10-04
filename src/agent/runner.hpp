@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace decomp::agent {
 
@@ -24,6 +25,9 @@ struct AgentRunConfig {
     LoopConfig loop;  // finish_tool and status_line are set by run_function
     ClientConfig client;
     std::shared_ptr<HttpTransport> transport;  // the default HTTPS transport when null
+    // Supervisor guidance sent with the brief in the first message (later guidance goes through
+    // LoopControl::inject and joins the next turn's tool results).
+    std::vector<std::string> guidance;
 };
 
 // Model, effort, fallbacks and budgets from a project's agent settings.

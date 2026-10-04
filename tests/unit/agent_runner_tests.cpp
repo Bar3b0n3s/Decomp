@@ -285,3 +285,24 @@ TEST_CASE("agent runner: a stop request ends the session between turns") {
     CHECK(replay->requests().size() == 1);
     CHECK(fx.project.function_info(fx.add).status == project::FunctionStatus::unstarted);
 }
+
+TEST_CASE("agent runner: initial guidance rides in the first message") {
+    FixtureProject fx;
+    auto replay = std::make_shared<ReplayTransport>(std::vector<Json>{
+        tool_turn("toolu_1", "submit_result", {{"outcome", "give_up"}, {"source", ""}, {"reason", "test"}}),
+    });
+    AgentRunConfig config = replay_config(replay);
+    config.guidance = {"Start with the listing.", "  "};
+    events::EventBus bus("run-initial");
+    Recorder rec;
+    rec.attach(bus);
+    const FunctionRunResult r = run_function(fx.program, &fx.project, fx.setup(), fx.add, config, bus, {});
+    CHECK(r.outcome == "gave_up");
+    const auto& reqs = replay->requests();
+    REQUIRE(reqs.size() == 1);
+    const Json& messages = reqs[0].body["messages"];
+    REQUIRE(messages.size() == 1);  // one user message: the brief plus the guidance
+    REQUIRE(messages[0]["content"].size() == 2);
+    CHECK(messages[0]["content"][1]["text"] == "[Supervisor guidance] Start with the listing.");
+    CHECK(rec.counts["guidance"] == 1);  // blank guidance is dropped
+}

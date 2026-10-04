@@ -174,8 +174,8 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     bus.publish(events::RunStarted{target_name, settings.model, settings.effort, 1, {display}}, -1);
     const auto started = std::chrono::system_clock::now();
 
+    config.guidance = a.guidance;
     auto control = std::make_shared<agent::LoopControl>();
-    for (const auto& text : a.guidance) control->inject(text);
     agent::FunctionRunResult result;
     {
         InterruptWatcher watcher(*control);

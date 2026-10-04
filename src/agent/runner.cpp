@@ -211,9 +211,16 @@ FunctionRunResult run_function(const Program& program, project::Project* project
 
     ToolRegistry tools = make_tools(session);
     Conversation conversation(config.conversation, system_prompt(), tools.definitions());
-    conversation.append_user_text(session.brief());
-
     Transcript transcript(transcript_path);
+    Json first = Json::array({Json{{"type", "text"}, {"text", session.brief()}}});
+    for (const auto& text : config.guidance) {
+        if (trim(text).empty()) continue;
+        first.push_back(Json{{"type", "text"}, {"text", "[Supervisor guidance] " + text}});
+        bus.publish(events::Guidance{session_id, text}, worker);
+        transcript.write({{"type", "guidance"}, {"turn", 0}, {"text", text}});
+    }
+    conversation.append_user_blocks(std::move(first));
+
     Bridge bridge(bus, transcript, session_id, worker, config.conversation.model);
     LoopConfig loop = config.loop;
     loop.finish_tool = "submit_result";
