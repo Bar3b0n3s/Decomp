@@ -115,6 +115,8 @@ struct MinuteStats {
     long long ttft_sum_ms = 0;
     int ttft_count = 0;
     double cost_usd = 0;
+    long long input_tokens = 0, cache_write_tokens = 0, cache_read_tokens = 0;  // prompt tokens (cache-hit rate)
+    int rate_limited = 0;  // retries after a 429 answer
 };
 
 struct ControlRecord {

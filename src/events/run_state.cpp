@@ -191,6 +191,9 @@ void RunState::apply(const Event& e) {
                        auto& m = minute(e);
                        ++m.turns;
                        m.output_tokens += p.usage.output;
+                       m.input_tokens += p.usage.input;
+                       m.cache_write_tokens += p.usage.cache_write;
+                       m.cache_read_tokens += p.usage.cache_read;
                        m.cost_usd += p.cost_usd;
                        if (p.ttft_ms > 0) {
                            m.ttft_sum_ms += p.ttft_ms;
@@ -267,7 +270,9 @@ void RunState::apply(const Event& e) {
                        auto& s = session(p.session);
                        ++s.retries;
                        ++data_.retries;
-                       ++minute(e).retries;
+                       auto& m = minute(e);
+                       ++m.retries;
+                       if (p.status == 429) ++m.rate_limited;
                        error_record(e, "api", p.session, std::format("retry {}: {}", p.attempt, p.error), p.status, p.delay_ms);
                        s.phase = "backoff";
                        set_worker_phase(e, p.session, s.phase);
