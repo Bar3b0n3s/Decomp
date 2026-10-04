@@ -96,6 +96,7 @@ public:
     std::string_view title() const override { return "Agent session"; }
     ImGuiWindowFlags window_flags() const override { return ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse; }
 
+    // Anchors: "turn:<n>" scrolls the timeline to that turn; "attempts", "notes" and "timeline" pick a tab.
     void navigate(ViewContext& ctx, const NavTarget& target) override {
         register_actions(ctx);
         if (!target.session.empty()) {
@@ -104,6 +105,19 @@ public:
             pinned_ = true;
         } else if (target.va) {
             pinned_ = false;
+        }
+        if (target.anchor.starts_with("turn:")) {
+            if (auto n = parse_u64(target.anchor.substr(5))) {
+                wanted_turn_ = static_cast<int>(*n);
+                wanted_turn_frames_ = 3;
+                select_tab_ = 0;
+            }
+        } else if (target.anchor == "timeline") {
+            select_tab_ = 0;
+        } else if (target.anchor == "attempts") {
+            select_tab_ = 1;
+        } else if (target.anchor == "notes") {
+            select_tab_ = 2;
         }
     }
 
@@ -119,18 +133,20 @@ public:
         }
         draw_header(ctx, s);
         if (ImGui::BeginTabBar("##session_tabs")) {
-            if (ImGui::BeginTabItem("Timeline")) {
+            auto flags = [&](int tab) { return select_tab_ == tab ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None; };
+            if (ImGui::BeginTabItem("Timeline", nullptr, flags(0))) {
                 draw_timeline_tab(ctx, s);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Attempts")) {
+            if (ImGui::BeginTabItem("Attempts", nullptr, flags(1))) {
                 draw_attempts_tab(ctx, s);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Notes")) {
+            if (ImGui::BeginTabItem("Notes", nullptr, flags(2))) {
                 draw_notes_tab(ctx);
                 ImGui::EndTabItem();
             }
+            select_tab_ = -1;
             ImGui::EndTabBar();
         }
     }
@@ -197,6 +213,8 @@ private:
         } else if (sel.function_va) {
             const auto latest = vm::latest_sessions(*ctx.snapshot);
             if (auto it = latest.find(*sel.function_va); it != latest.end()) wanted = it->second->id;
+        } else if (const events::SessionState* newest = vm::newest_session(*ctx.snapshot)) {
+            wanted = newest->id;  // nothing selected: what the run did last
         }
         if (!wanted.empty() && wanted != session_) show_session(ctx, wanted);
         if (wanted.empty() && sel.function_va && (!va_ || *va_ != *sel.function_va)) {
@@ -410,6 +428,19 @@ private:
     }
 
     // ---- drawing: header ----
+    // Every session of the run, newest first, by id (sessions only start, so the order changes only when
+    // their number does; their state is looked up in the frame's snapshot).
+    void refresh_list(ViewContext& ctx) {
+        if (!ctx.snapshot || (list_count_ == ctx.snapshot->sessions.size() && list_run_ == ctx.snapshot->run_id)) return;
+        list_count_ = ctx.snapshot->sessions.size();
+        list_run_ = ctx.snapshot->run_id;
+        std::vector<const events::SessionState*> sessions;
+        for (const auto& [id, s] : ctx.snapshot->sessions) sessions.push_back(s.get());
+        std::ranges::sort(sessions, [](const events::SessionState* a, const events::SessionState* b) { return a->started > b->started; });
+        list_.clear();
+        for (const auto* s : sessions) list_.push_back(s->id);
+    }
+
     void draw_session_list(ViewContext& ctx) {
         if (!ctx.snapshot) {
             ImGui::TextDisabled("No run. Start one with Run > Start run (F5), or open a past run (Run > Runs...).");
@@ -417,13 +448,7 @@ private:
         }
         if (va_) ImGui::TextDisabled("The selected function has no session in this run.");
         ImGui::TextDisabled("Pick a session (or a function in the Function browser, the Run monitor or the Logs):");
-        if (list_seq_ != ctx.snapshot->last_seq || list_run_ != ctx.snapshot->run_id) {
-            list_seq_ = ctx.snapshot->last_seq;
-            list_run_ = ctx.snapshot->run_id;
-            list_.clear();
-            for (const auto& [id, s] : ctx.snapshot->sessions) list_.push_back(s.get());
-            std::ranges::sort(list_, [](const events::SessionState* a, const events::SessionState* b) { return a->started > b->started; });
-        }
+        refresh_list(ctx);
         if (list_.empty()) {
             ImGui::TextDisabled("No session has started yet.");
             return;
@@ -440,7 +465,9 @@ private:
         clipper.Begin(static_cast<int>(list_.size()));
         while (clipper.Step())
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const events::SessionState& s = *list_[static_cast<usize>(i)];
+                const events::SessionState* found = ctx.snapshot->session(list_[static_cast<usize>(i)]);
+                if (!found) continue;
+                const events::SessionState& s = *found;
                 ImGui::PushID(i);
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -468,16 +495,23 @@ private:
             ImGui::SetTooltip("%s at %s\nOpen in the Inspector.", s ? s->function.c_str() : "", hex(*va_, 8).c_str());
         ImGui::SameLine();
         ImGui::TextDisabled("%s", session_.c_str());
-        if (s && ctx.snapshot) {
-            // The function's other sessions in this run (after a requeue or a resume).
+        if (ctx.snapshot) {
+            // Any other session of the run, newest first.
             ImGui::SameLine();
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
-            if (ImGui::BeginCombo("##other_sessions", "Sessions", ImGuiComboFlags_HeightLarge)) {
-                for (const auto& [id, other] : ctx.snapshot->sessions) {
-                    if (other->va != s->va) continue;
-                    if (ImGui::Selectable(std::format("{} ({})##{}", id, other->finished ? other->outcome : other->phase, id).c_str(), id == session_))
-                        ctx.open(kViewId, NavTarget{.va = other->va, .session = id});
-                }
+            if (ImGui::BeginCombo("##sessions", "Sessions", ImGuiComboFlags_HeightLarge)) {
+                refresh_list(ctx);
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(list_.size()));
+                while (clipper.Step())
+                    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                        const events::SessionState* found = ctx.snapshot->session(list_[static_cast<usize>(i)]);
+                        if (!found) continue;
+                        const events::SessionState& other = *found;
+                        const std::string label = std::format("{} - {}##{}", other.display.empty() ? other.function : other.display,
+                                                              other.finished ? other.outcome : other.phase, other.id);
+                        if (ImGui::Selectable(label.c_str(), other.id == session_)) ctx.open(kViewId, NavTarget{.va = other.va, .session = other.id});
+                    }
                 ImGui::EndCombo();
             }
         }
@@ -633,6 +667,17 @@ private:
         }
         at_bottom_ = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         const float base = ImGui::GetCursorPosY();
+        // A link to a turn: scroll to its header (again for a few frames, while heights get measured).
+        if (wanted_turn_ && wanted_turn_frames_ > 0) {
+            auto it = std::ranges::find_if(items_, [&](const vm::TimelineItem& item) {
+                return item.kind == Kind::turn && static_cast<usize>(item.turn) < doc.turns.size() && doc.turns[static_cast<usize>(item.turn)].turn == *wanted_turn_;
+            });
+            if (it != items_.end()) {
+                ImGui::SetScrollY(base + heights_.offset(static_cast<usize>(it - items_.begin())));
+                scroll_to_end_ = false;
+                if (--wanted_turn_frames_ == 0) wanted_turn_.reset();
+            }
+        }
         const float scroll = ImGui::GetScrollY();
         const float bottom = scroll + ImGui::GetWindowHeight();
         // Only the items in view are drawn; their measured heights replace the estimates.
@@ -937,9 +982,12 @@ private:
             const vm::Series scores = vm::score_per_attempt(*s);
             const vm::Series best = vm::best_score_per_attempt(*s);
             if (ImPlot::BeginPlot("##scores", ImVec2(-1, ImGui::GetFontSize() * 11))) {
-                ImPlot::SetupAxes("attempt", "match %", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_None);
-                ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 105, ImPlotCond_Always);
                 const int n = static_cast<int>(scores.size());
+                ImPlot::SetupAxes("attempt", "match %", ImPlotAxisFlags_None, ImPlotAxisFlags_None);
+                ImPlot::SetupAxisLimits(ImAxis_X1, 0.5, n + 0.5, ImPlotCond_Always);
+                ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 105, ImPlotCond_Always);
+                ImPlot::SetupAxisFormat(ImAxis_X1, "%.0f");
+                if (n <= 20) ImPlot::SetupAxisTicks(ImAxis_X1, 1, n, n);  // whole attempts
                 ImPlot::PlotBars("score", scores.x.data(), scores.y.data(), n, 0.6, {ImPlotProp_FillAlpha, 0.6f});
                 ImPlot::PlotLine("best so far", best.x.data(), best.y.data(), n, {ImPlotProp_Marker, ImPlotMarker_Circle, ImPlotProp_LineWeight, 2.0f});
                 ImPlot::EndPlot();
@@ -1168,8 +1216,8 @@ private:
     std::optional<u64> resolved_va_;
     std::string resolved_session_, resolved_run_;
     usize resolved_count_ = 0;
-    std::vector<const events::SessionState*> list_;  // the session picker, newest first
-    u64 list_seq_ = ~u64{0};
+    std::vector<std::string> list_;  // the session picker: ids, newest first
+    usize list_count_ = ~usize{0};
     std::string list_run_;
 
     // Transcript.
@@ -1195,6 +1243,9 @@ private:
     bool follow_ = true;
     bool at_bottom_ = true;
     bool scroll_to_end_ = false;
+    std::optional<int> wanted_turn_;  // navigation asked for this turn ("turn:<n>")
+    int wanted_turn_frames_ = 0;
+    int select_tab_ = -1;  // navigation asked for this tab
 
     // History and comparison.
     JobHandle<FunctionHistory> history_job_;

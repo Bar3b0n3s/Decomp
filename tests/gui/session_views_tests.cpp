@@ -56,6 +56,9 @@ const std::vector<Navigation>& navigations() {
         {"agent_session", {.va = 0x401080}},                           // the function's latest session
         {"agent_session", {.va = 0x4fffff}},                           // a function without a session
         {"agent_session", {.session = "no-such-session"}},
+        {"agent_session", {.session = "run-401060", .anchor = "attempts"}},
+        {"agent_session", {.session = "run-401060", .anchor = "notes"}},
+        {"agent_session", {.session = "run-4010a0", .anchor = "turn:1"}},
         {"diff_viewer", {.va = 0x401060}},
         {"diff_viewer", {.va = 0x401060, .session = "run-401060", .anchor = "manual"}},
         {"diff_viewer", {.va = 0x4010a0, .anchor = "attempt:3"}},
@@ -379,6 +382,19 @@ TEST_CASE("past runs: a missing transcript, a truncated one, and a large one tha
     std::printf("Agent session with a %zu-byte transcript: %.2f ms per frame on average, %.2f ms at worst (scrolled %.0f px)\n", text.size(),
                 mean_ms, worst_ms, deepest);
     CHECK(deepest > 10'000);  // the frames really scrolled through the session
+
+    // A link to a turn scrolls the timeline to it: turn 200 is about half way down.
+    app.context().open("agent_session", {.va = add, .session = big, .anchor = "turn:1"});
+    gui.frames(6, [&] { app.frame(); });
+    REQUIRE(timeline());
+    const float top = timeline()->Scroll.y;
+    app.context().open("agent_session", {.va = add, .session = big, .anchor = "turn:200"});
+    gui.frames(6, [&] { app.frame(); });
+    REQUIRE(timeline());
+    const float middle = timeline()->Scroll.y;
+    CHECK(top < 5'000.0f);
+    CHECK(middle > top + 10'000.0f);
+    CHECK(middle < timeline()->ScrollMax.y);
 #ifdef NDEBUG
     CHECK_MESSAGE(mean_ms < 5 * 8.0, "frame budget exceeded: " << mean_ms << " ms");
 #endif

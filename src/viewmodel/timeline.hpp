@@ -47,6 +47,11 @@ std::vector<TimelineItem> build_timeline(const TranscriptDoc& doc, bool live);
 // has streamed text or thinking, and its current turn has no response record.
 bool show_live(const TranscriptDoc& doc, int current_turn, bool finished, bool has_live_text);
 
+// The session the Agent session and the Diff viewer show when nothing is selected: the most recently
+// started session still running, else the most recently started one (ties: the larger id). Null for a
+// run without sessions. O(sessions).
+const events::SessionState* newest_session(const events::RunStateData& run);
+
 // The candidate sources the session sent, in order: the "source" of compile_and_diff and submit_result
 // calls.
 struct SourceRef {

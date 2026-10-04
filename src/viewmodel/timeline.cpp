@@ -74,6 +74,22 @@ bool show_live(const TranscriptDoc& doc, int current_turn, bool finished, bool h
     return it == doc.turns.end() || !it->has_response;
 }
 
+const events::SessionState* newest_session(const events::RunStateData& run) {
+    const events::SessionState* best = nullptr;
+    for (const auto& [id, s] : run.sessions) {
+        if (!best) {
+            best = s.get();
+            continue;
+        }
+        if (s->finished != best->finished) {
+            if (!s->finished) best = s.get();
+            continue;
+        }
+        if (s->started > best->started || (s->started == best->started && s->id > best->id)) best = s.get();
+    }
+    return best;
+}
+
 std::vector<SourceRef> transcript_sources(const TranscriptDoc& doc) {
     std::vector<SourceRef> out;
     for (usize t = 0; t < doc.turns.size(); ++t) {

@@ -18,6 +18,7 @@
 #include "viewmodel/diff_view.hpp"
 #include "viewmodel/exports.hpp"
 #include "viewmodel/recompile.hpp"
+#include "viewmodel/timeline.hpp"
 
 #include <TextEditor.h>
 
@@ -63,6 +64,7 @@ public:
     DiffViewerView() {
         editor_.SetLanguage(TextEditor::Language::Cpp());
         editor_.SetShowLineNumbersEnabled(true);
+        editor_.SetShowWhitespacesEnabled(false);
         editor_.SetTabSize(4);
         editor_.SetInsertSpacesOnTabs(true);
         editor_.SetChangeCallback([this] { edited_ = true; }, 0);
@@ -151,6 +153,7 @@ private:
         wanted_attempt_.reset();
         attempt_result_.reset();
         attempt_compile_.cancel();
+        attempt_pending_ = false;
         edit_result_.reset();
         edit_compile_.cancel();
         editing_ = false;
@@ -183,6 +186,7 @@ private:
         auto program = ws ? ws->program() : nullptr;
         if (!va_ || index >= attempts_.size() || !project || !program) return;
         attempt_ = index;
+        attempt_pending_ = true;
         attempt_compile_.submit(ctx.jobs, [program, project = *project, va = *va_, source = attempts_[index].source](const CancelToken& t) {
             return compile_source(program, project, va, source, t);
         });
@@ -223,11 +227,21 @@ private:
 
     // ---- per frame ----
     void poll(ViewContext& ctx) {
-        // Follow the selection unless editing (the edits belong to their function).
+        // Follow the selection unless editing (the edits belong to their function); with nothing
+        // selected, the function of the run's newest session.
         if (!editing_) {
             std::optional<u64> wanted = ctx.selection.function_va;
             if (!wanted && !ctx.selection.session.empty() && ctx.snapshot)
                 if (const auto* s = ctx.snapshot->session(ctx.selection.session)) wanted = s->va;
+            if (!wanted && ctx.snapshot) {
+                if (ctx.snapshot->sessions.size() != newest_count_ || ctx.snapshot->run_id != newest_run_) {
+                    newest_count_ = ctx.snapshot->sessions.size();
+                    newest_run_ = ctx.snapshot->run_id;
+                    const events::SessionState* newest = vm::newest_session(*ctx.snapshot);
+                    newest_va_ = newest ? std::optional<u64>(newest->va) : std::nullopt;
+                }
+                wanted = newest_va_;
+            }
             if (wanted && wanted != va_) select_function(ctx, *wanted);
         }
         // New attempts recorded by a running session of the function: reload the history. Only the
@@ -247,6 +261,7 @@ private:
                 if (loaded->va == va_) on_attempts(ctx, std::move(*loaded));
             }
             if (auto r = attempt_compile_.poll()) {
+                attempt_pending_ = false;
                 attempt_result_ = std::move(*r);
                 if (!editing_) table_.set(attempt_result_->diff, layout());
             }
@@ -319,7 +334,8 @@ private:
             // A best source without a history (an older project): show it all the same.
             attempt_result_.reset();
             Workspace* ws = ctx.services.workspace;
-            if (ws && ws->project() && ws->program())
+            attempt_pending_ = ws && ws->project() && ws->program();
+            if (attempt_pending_)
                 attempt_compile_.submit(ctx.jobs, [program = ws->program(), project = *ws->project(), va = *va_, source = *loaded.best_source](
                                                       const CancelToken& t) { return compile_source(program, project, va, source, t); });
         }
@@ -542,8 +558,12 @@ private:
         const CompiledSource* s = shown();
         const ThemeColors& c = ctx.colors();
         if (!s) {
-            const bool loading = attempt_compile_.busy() || edit_compile_.busy() || !attempts_loaded_;
-            ImGui::TextDisabled("%s", loading ? "Compiling..." : session_summary(ctx).c_str());
+            Workspace* ws = ctx.services.workspace;
+            if (attempt_pending_ || edit_compile_.busy() || (editing_ && schedule_.stale())) ImGui::TextDisabled("Compiling...");
+            else if (!attempts_loaded_) ImGui::TextDisabled("Loading the attempt history...");
+            else if (!ws || !ws->project()) ImGui::TextDisabled("%s", session_summary(ctx).c_str());
+            else if (attempts_.empty() && !editing_) ImGui::TextDisabled("No attempt to show: edit the function by hand to make one.");
+            else ImGui::TextDisabled("No diff.");
             return;
         }
         if (s->diff) {
@@ -894,6 +914,9 @@ private:
 
     std::optional<u64> va_;
     std::string session_;  // the session navigation named (take over, hand back)
+    std::optional<u64> newest_va_;  // the newest session's function (shown when nothing is selected)
+    usize newest_count_ = ~usize{0};
+    std::string newest_run_;
     bool wants_edit_ = false;
     std::optional<usize> wanted_attempt_;  // an attempts.jsonl index from navigation
 
@@ -904,6 +927,7 @@ private:
     u64 signal_seq_ = ~u64{0}, seen_signal_ = ~u64{0};
 
     LatestWins<CompiledSource> attempt_compile_;
+    bool attempt_pending_ = false;  // a compile of the chosen attempt has not been shown yet
     std::optional<CompiledSource> attempt_result_;
     DiffTable table_;
 

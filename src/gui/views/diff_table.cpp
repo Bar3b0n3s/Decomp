@@ -137,7 +137,9 @@ void DiffTable::draw_side(ViewContext& ctx, const matching::Row& row, vm::DiffSi
     const float line_h = ImGui::GetTextLineHeight();
     const bool hover_window = ImGui::IsWindowHovered();
     const auto& si = (side == vm::DiffSide::target ? diff_->target : diff_->candidate).instructions[cell.instruction];
-    const auto marks = options.relocations || options.bytes ? vm::field_marks(si) : std::vector<vm::FieldMark>{};
+    // Relocated fields: branches inside the function are not relocated (their arrows show them).
+    auto marks = options.relocations || options.bytes ? vm::field_marks(si) : std::vector<vm::FieldMark>{};
+    std::erase_if(marks, [](const vm::FieldMark& m) { return m.kind == matching::RefKind::label; });
 
     dl->AddText(pos, muted, std::format("{:4x}:", cell.offset).c_str());
     float x = pos.x + ch * 6;
@@ -243,7 +245,7 @@ void DiffTable::draw(ViewContext& ctx, const char* id, ImVec2 size, const DiffDr
     const float glyph_w = ch * 2, off_w = ch * 6, sep_w = ch * 2, notes_w = ch * 22;
     const float bytes_w = options.bytes ? ch * static_cast<float>(bytes_chars_ + 1) : 0.0f;
     const float fixed = gutter_t + glyph_w + 2 * (off_w + bytes_w) + sep_w + gutter_c + notes_w;
-    const float text_w = std::max(ch * 30, std::floor((ImGui::GetContentRegionAvail().x - fixed) / 2));
+    const float text_w = std::max(ch * (options.bytes ? 24 : 30), std::floor((ImGui::GetContentRegionAvail().x - fixed) / 2));
     const float content_w = fixed + 2 * text_w;
     const float x_glyph = gutter_t, x_target = x_glyph + glyph_w;
     const float x_sep = x_target + off_w + bytes_w + text_w;

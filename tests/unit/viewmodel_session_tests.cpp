@@ -9,6 +9,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cmath>
+#include <memory>
 #include <random>
 
 using namespace decomp;
@@ -172,6 +174,27 @@ TEST_CASE("timeline: the live buffer shows only what the transcript does not hav
 
     const TranscriptDoc whole = parse_transcript(all);
     CHECK_FALSE(show_live(whole, 2, false, true));  // turn 2's response is recorded
+}
+
+TEST_CASE("timeline: with nothing selected, the newest running session (else the newest)") {
+    events::RunStateData run;
+    CHECK(newest_session(run) == nullptr);
+    auto add = [&](const std::string& id, int started_s, bool finished) {
+        auto s = std::make_shared<events::SessionState>();
+        s->id = id;
+        s->started = from_unix_ms(1'791'108'000'000 + started_s * 1000LL);
+        s->finished = finished;
+        run.sessions[id] = s;
+    };
+    add("a", 10, true);
+    add("b", 30, true);
+    CHECK(newest_session(run)->id == "b");
+    add("c", 20, false);  // running beats finished, however recent
+    CHECK(newest_session(run)->id == "c");
+    add("d", 25, false);
+    CHECK(newest_session(run)->id == "d");
+    add("e", 25, false);  // a tie: the larger id
+    CHECK(newest_session(run)->id == "e");
 }
 
 TEST_CASE("timeline: what tool results say") {
