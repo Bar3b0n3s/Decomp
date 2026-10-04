@@ -78,14 +78,17 @@ struct QueueEta {
     };
     std::vector<Running> running;  // sessions in progress
     std::vector<Item> items;       // the queue, in dispatch order
+    // A large run's queue arrives as its head (events::QueueUpdated): the pending functions beyond it
+    // are not listed, and count in `finish` at the mean estimate of the listed ones.
+    usize beyond_head = 0;
     double finish = 0;             // seconds from `now` until the last queued function is done
     int workers = 0;
 };
 
 // Simulates the queue: every worker first finishes its running session, then takes the next queued
 // function in dispatch order as soon as it is free (greedy list scheduling, the way the controller
-// dispatches). `workers` < 1 uses current_concurrency(state). O(queue * log workers). Without a live
-// run (no running sessions) it is the time to work through the queue from now.
+// dispatches). `workers` < 1 uses current_concurrency(state). O(queue head * log workers). Without a
+// live run (no running sessions) it is the time to work through the queue from now.
 QueueEta estimate_queue(const DurationModel& model, const events::RunStateData& state, const SymbolDb& symbols, TimePoint now,
                         int workers = 0);
 

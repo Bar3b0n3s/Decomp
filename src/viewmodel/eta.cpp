@@ -125,6 +125,24 @@ QueueEta estimate_queue(const DurationModel& model, const events::RunStateData& 
         q.finish = std::max(q.finish, item.finish);
         q.items.push_back(std::move(item));
     }
+    // The rest of a large queue: its work at the listed functions' mean, spread over the workers from
+    // when each becomes free.
+    q.beyond_head = state.queue_total > state.queue->size() ? state.queue_total - state.queue->size() : 0;
+    if (q.beyond_head > 0) {
+        double mean = DurationModel::default_seconds(0);
+        if (!q.items.empty()) {
+            double sum = 0;
+            for (const auto& item : q.items) sum += item.estimate.seconds;
+            mean = sum / static_cast<double>(q.items.size());
+        }
+        double free_sum = 0;
+        while (!free_at.empty()) {
+            free_sum += free_at.top();
+            free_at.pop();
+        }
+        const double rest = (free_sum + static_cast<double>(q.beyond_head) * mean) / q.workers;
+        q.finish = std::max(q.finish, rest);
+    }
     return q;
 }
 

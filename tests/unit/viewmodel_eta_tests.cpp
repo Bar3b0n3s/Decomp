@@ -235,9 +235,25 @@ TEST_CASE("eta: sessions of a run, the queue simulation and the concurrency in e
     // One worker: everything in sequence after the running session.
     const QueueEta one = estimate_queue(model, run.data(), symbols, run.now, 1);
     CHECK(one.finish == doctest::Approx(40 + small + small + large));
+    CHECK(one.beyond_head == 0);
     // A session running longer than its estimate is given a tenth of the estimate.
     const QueueEta late = estimate_queue(model, run.data(), symbols, run.now + std::chrono::seconds(500), 1);
     CHECK(late.running[0].remaining == doctest::Approx(10));
+
+    // A large queue arrives as its head: the 100 functions beyond it take the listed ones' mean,
+    // spread over both workers from when each is free (after mix and after message).
+    {
+        test::EventScript big = run;
+        big.add(events::QueueUpdated{{{fx.va("read_counter"), "read_counter", false, 0},
+                                      {fx.va("message"), "message", false, 0},
+                                      {fx.va("mix"), "mix", false, 0}},
+                                     103});
+        const QueueEta head = estimate_queue(model, big.data(), symbols, run.now, 2);
+        CHECK(head.items.size() == 3);
+        CHECK(head.beyond_head == 100);
+        const double mean = (2 * small + large) / 3;
+        CHECK(head.finish == doctest::Approx((40 + small + small + large + 100 * mean) / 2));
+    }
 
     CHECK(current_concurrency(run.data()) == 2);
     run.add(events::Control{"set_concurrency", "", "5"});
