@@ -38,18 +38,19 @@ matching::MatchSetup clang_setup(Arch arch, const std::string& clang_cl, const s
     return s;
 }
 
-std::optional<std::filesystem::path> build_fixture_program(Arch arch, const LlvmTools& tools, const std::filesystem::path& dir) {
+std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& tools, const std::filesystem::path& dir,
+                                                   const std::vector<std::filesystem::path>& sources, const std::string& name) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     std::string a = arch == Arch::x86 ? "x86" : "x64";
     std::vector<std::string> objs;
-    for (const char* name : {"basic", "other"}) {
-        auto obj = fs::to_utf8(dir / (std::string(name) + ".obj"));
+    for (const auto& source : sources) {
+        auto obj = fs::to_utf8(dir / (fs::to_utf8(source.stem()) + ".obj"));
         ProcessSpec cc;
         cc.argv = {tools.clang_cl, target_triple(arch), "/nologo", "/c", "/Zl", "/Z7", "/Brepro"};
         cc.argv.insert(cc.argv.end(), fixture_flags().begin(), fixture_flags().end());
         cc.argv.push_back("/Fo" + obj);
-        cc.argv.push_back(fs::to_utf8(fixture(std::string("src/") + name + ".cpp")));
+        cc.argv.push_back(fs::to_utf8(source));
         auto r = run_process(cc);
         if (!r || !r->ok()) {
             MESSAGE("clang-cl failed: " << (r ? r->out + r->err : r.error().message));
@@ -57,10 +58,10 @@ std::optional<std::filesystem::path> build_fixture_program(Arch arch, const Llvm
         }
         objs.push_back(obj);
     }
-    auto exe = dir / "basic.exe";
+    auto exe = dir / (name + ".exe");
     ProcessSpec ld;
     ld.argv = {tools.lld_link, "/nologo", "/nodefaultlib", "/entry:entry", "/subsystem:console", "/debug", "/Brepro",
-               "/out:" + fs::to_utf8(exe), "/pdb:" + fs::to_utf8(dir / "basic.pdb")};
+               "/out:" + fs::to_utf8(exe), "/pdb:" + fs::to_utf8(dir / (name + ".pdb"))};
     ld.argv.insert(ld.argv.end(), objs.begin(), objs.end());
     ld.argv.push_back(fs::to_utf8(fixture(a + "/kernel32.lib")));
     auto r = run_process(ld);
@@ -69,6 +70,10 @@ std::optional<std::filesystem::path> build_fixture_program(Arch arch, const Llvm
         return std::nullopt;
     }
     return exe;
+}
+
+std::optional<std::filesystem::path> build_fixture_program(Arch arch, const LlvmTools& tools, const std::filesystem::path& dir) {
+    return build_program(arch, tools, dir, {fixture("src/basic.cpp"), fixture("src/other.cpp")}, "basic");
 }
 
 } // namespace decomp::test

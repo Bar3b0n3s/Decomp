@@ -40,6 +40,16 @@ Reference describe_reference(const Program& program, u64 va) {
     Reference r;
     r.va = va;
     const Symbol* s = program.symbols().at(va);
+    if (!s) {
+        // Calls through linker thunks read as calls to the destination.
+        if (auto dest = program.thunk_destination(va)) {
+            r = describe_reference(program, *dest);
+            r.va = va;
+            const std::string via = std::format("via thunk at {:#x}", va);
+            r.detail = r.detail.empty() ? via : r.detail + "; " + via;
+            return r;
+        }
+    }
     i64 offset = 0;
     if (!s) {
         s = program.symbols().containing(va);

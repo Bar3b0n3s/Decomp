@@ -1,6 +1,9 @@
+#include "analysis/annotate.hpp"
 #include "analysis/program.hpp"
+#include "core/fs.hpp"
 #include "formats/coff.hpp"
 #include "matching/diff.hpp"
+#include "llvm_fixture.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
@@ -142,4 +145,48 @@ TEST_CASE("missing candidate symbol lists what the object defines") {
     REQUIRE_FALSE(r);
     CHECK(r.error().code == ErrorCode::not_found);
     CHECK(r.error().message.find("other_value") != std::string::npos);
+}
+
+TEST_CASE("calls through linker thunks compare as calls to the destination") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-thunks").value();
+    // ExitProcess without dllimport: the linker adds an import thunk `jmp [__imp_ExitProcess]`.
+    const auto source = dir.path() / "thunks.cpp";
+    REQUIRE(fs::write_text(source, "extern \"C\" int _fltused = 0;\n"
+                                   "extern \"C\" void __stdcall ExitProcess(unsigned int code);\n"
+                                   "__declspec(noinline) void quit(unsigned int code) { ExitProcess(code + 1); }\n"
+                                   "extern \"C\" void entry() { quit(3); }\n"));
+    for (Arch arch : {Arch::x86, Arch::x64}) {
+        CAPTURE(to_string(arch));
+        const auto out = dir.path() / std::string(to_string(arch));
+        auto exe = test::build_program(arch, *tools, out, {source}, "thunks");
+        REQUIRE(exe);
+        auto program = Program::open(*exe).value();
+        const u64 va = *program.resolve("quit");
+        auto list = program.function_instructions(va).value();
+        auto call = std::ranges::find_if(list, [](const x86::Instruction& i) {
+            return (i.flow == x86::Flow::call || i.flow == x86::Flow::jump) && i.branch_target;
+        });
+        REQUIRE(call != list.end());
+        const u64 thunk = *call->branch_target;
+        // lld names import thunks in the PDB; MSVC's incremental-linking thunks have no symbol at all.
+        // Drop the name to exercise the unnamed case.
+        if (program.symbols().at(thunk)) program.symbols().remove(thunk);
+        REQUIRE(program.symbols().at(thunk) == nullptr);
+        auto dest = program.thunk_destination(thunk);
+        REQUIRE(dest);
+        CHECK(program.symbols().at(*dest)->kind == SymbolKind::import);
+        CHECK_FALSE(program.thunk_destination(va));  // a function is not a thunk
+
+        auto listing = annotate_function(program, va).value();
+        CHECK(to_text(listing).find("ExitProcess") != std::string::npos);
+
+        auto obj = coff::Object::load(out / "thunks.obj").value();
+        auto d = matching::diff_function(program, va, obj).value();
+        CHECK(d.byte_exact);
+    }
 }

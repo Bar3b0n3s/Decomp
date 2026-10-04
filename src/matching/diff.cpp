@@ -114,6 +114,15 @@ Ref target_ref(const Program& program, u64 va) {
     r.target_va = va;
     const auto& image = program.image();
     const Symbol* s = program.symbols().at(va);
+    if (!s) {
+        // A call through an incremental-linking or import thunk compares as a call to its destination
+        // (the object file names the function itself).
+        if (auto dest = program.thunk_destination(va)) {
+            r = target_ref(program, *dest);
+            r.target_va = va;
+            return r;
+        }
+    }
     i64 off = 0;
     if (!s) {
         s = program.symbols().containing(va);
@@ -314,7 +323,9 @@ Ref candidate_reloc_ref(const CandidateContext& ctx, const coff::Relocation& rel
             return r;
         }
     }
-    if (!sym->is_section_symbol() && sym->storage_class != coff::storage::label) {
+    // Named symbols compare by name, except labels on data inside the function's own section (MSVC
+    // x86 names in-section jump tables `$LN<n>`), which are read like anonymous tables below.
+    if (!sym->is_section_symbol() && sym->storage_class != coff::storage::label && tsec != &ctx.section) {
         r.kind = RefKind::symbol;
         r.key = sym->name;
         r.offset = addend;

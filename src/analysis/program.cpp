@@ -3,6 +3,7 @@
 #include "core/fs.hpp"
 #include "core/log.hpp"
 #include "core/strings.hpp"
+#include "analysis/demangle.hpp"
 #include "formats/pdb.hpp"
 
 #include <algorithm>
@@ -61,7 +62,52 @@ Result<Program> Program::open(const std::filesystem::path& binary, const std::op
     }
     if (pdb_path && !reader) return make_error(ErrorCode::not_found, "PDB '{}' could not be used", fs::to_utf8(*pdb_path));
     p.symbols_ = SymbolDb::from_pe(*p.image_, reader.get());
+    p.fold_linker_thunks();
     return p;
+}
+
+std::optional<x86::Instruction> Program::decode_at(u64 va) const {
+    const ImageSection* sec = image_->section_at(va);
+    if (!sec || !sec->executable) return std::nullopt;
+    const u64 avail = sec->va + std::max(sec->virtual_size, sec->file_size) - va;
+    auto bytes = image_->view(va, static_cast<usize>(std::min<u64>(15, avail)));
+    if (!bytes) return std::nullopt;
+    return decoder_->decode(*bytes, va);
+}
+
+// With incremental linking the entry point and the exports lead to ILT entries (`jmp rel32` into the
+// real function). Their names move to the destination, so they name the code the compiler produced;
+// the thunk stays unnamed and calls through it resolve via thunk_destination().
+void Program::fold_linker_thunks() {
+    auto is_jmp_rel32 = [&](u64 va) {
+        auto b = image_->read<u8>(va);
+        return b && *b == 0xE9 && image_->is_code(va);
+    };
+    std::vector<std::pair<u64, Symbol>> moves;
+    for (const auto& [va, s] : symbols_) {
+        if (s.kind != SymbolKind::function) continue;
+        if (s.source != SymbolSource::export_table && s.source != SymbolSource::analysis) continue;
+        auto ins = decode_at(va);
+        if (!ins || ins->flow != x86::Flow::jump || !ins->branch_target || ins->length != 5) continue;
+        const u64 dest = *ins->branch_target;
+        if (dest == va || !image_->is_code(dest)) continue;
+        const Symbol* d = symbols_.at(dest);
+        if (d && d->kind != SymbolKind::function) continue;
+        // Only an ILT entry (a table of 5-byte jumps) or a jump to the same function under its PDB name;
+        // an ordinary exported function whose body is a tail call stays where it is.
+        const bool in_table = is_jmp_rel32(va - 5) || is_jmp_rel32(va + 5);
+        const bool same_name = d && (names_equivalent(d->name, s.name) || (!d->pdb_name.empty() && names_equivalent(d->pdb_name, s.name)));
+        if (!in_table && !same_name) continue;
+        Symbol moved = s;
+        moved.va = dest;
+        moved.size = 0;
+        moves.emplace_back(va, std::move(moved));
+    }
+    for (auto& [from, symbol] : moves) {
+        log::debug("{} at {:#x} is a linker thunk; naming its destination {:#x}", symbol.name, from, symbol.va);
+        symbols_.remove(from);
+        symbols_.add(std::move(symbol));
+    }
 }
 
 std::optional<u64> Program::resolve(std::string_view text) const {
@@ -316,6 +362,27 @@ std::string Program::describe_address(u64 va) const {
     if (auto s = symbols_.at(va)) return s->display.empty() ? s->name : s->display;
     if (auto s = symbols_.containing(va)) return std::format("{}+{:#x}", s->display.empty() ? s->name : s->display, va - s->va);
     return std::format("{:#x}", va);
+}
+
+std::optional<u64> Program::thunk_destination(u64 va) const {
+    u64 at = va;
+    for (int hop = 0; hop < 4; ++hop) {
+        auto ins = decode_at(at);
+        if (!ins) return std::nullopt;
+        if (ins->flow == x86::Flow::jump && ins->branch_target) {
+            const u64 dest = *ins->branch_target;
+            if (const Symbol* s = symbols_.at(dest)) {
+                if (s->kind == SymbolKind::function) return dest;
+                return std::nullopt;
+            }
+            at = dest;  // chained thunk
+            continue;
+        }
+        if (ins->flow == x86::Flow::indirect_jump && ins->memory_target)
+            if (const Symbol* s = symbols_.at(*ins->memory_target); s && s->kind == SymbolKind::import) return *ins->memory_target;
+        return std::nullopt;
+    }
+    return std::nullopt;
 }
 
 } // namespace decomp

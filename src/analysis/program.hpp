@@ -83,7 +83,14 @@ public:
     // Display name for an address: symbol (+offset), import, or hex.
     std::string describe_address(u64 va) const;
 
+    // Thunks the linker inserts between a call and its destination: incremental-linking (ILT)
+    // entries `jmp rel32 <function>` (possibly chained) and import thunks `jmp [IAT slot]`. Returns the
+    // function's address or the IAT slot's address; nullopt when `va` is not such a thunk.
+    std::optional<u64> thunk_destination(u64 va) const;
+
 private:
+    void fold_linker_thunks();
+    std::optional<x86::Instruction> decode_at(u64 va) const;
     void build_xrefs() const;
     std::optional<JumpTable> read_jump_table(const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const;
     // x64 tables are reached through registers; `before` holds the instructions preceding the jump.

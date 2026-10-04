@@ -50,6 +50,14 @@ jobs:
           ./bin/Release/decomp info tests/fixtures/x86/basic.exe
           ./bin/Release/decomp diff --binary tests/fixtures/x86/basic.exe --obj tests/fixtures/x86/basic.obj --all
           ./bin/Release/decomp diff --binary tests/fixtures/x64/basic.exe --obj tests/fixtures/x64/basic.obj --all
+          # The agent end to end without an API key: a scripted replay matches add() with clang-cl.
+          p="$(mktemp -d)/project"
+          ./bin/Release/decomp init tests/fixtures/x86/basic.exe --dir "$p" --toolchain clang-cl-x86 \
+            --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+          ./bin/Release/decomp -C "$p" agent add --replay tests/replay/agent_match_add.jsonl
+          ./bin/Release/decomp -C "$p" status
+          test -f "$p/src/functions/add_401060.cpp"
+          test -f "$(ls -d "$p"/.decomp/runs/*/ | head -1)summary.json"
 
   windows:
     name: Windows (MSVC)

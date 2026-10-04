@@ -35,3 +35,16 @@ if ($failed) {
     throw "MSVC round trip ($Arch): some functions are not byte-exact"
 }
 Write-Host "MSVC round trip ($Arch): all functions byte-exact"
+
+# The agent end to end without an API key: a scripted replay matches add() with the real cl.exe.
+$env:DECOMP_TOOLCHAINS = Join-Path $out "toolchains.json"
+& $decomp toolchain add "msvc-$Arch" --kind msvc --compiler cl.exe
+if ($LASTEXITCODE -ne 0) { throw "decomp toolchain add failed" }
+$project = Join-Path $out "project"
+if (Test-Path $project) { Remove-Item -Recurse -Force $project }
+& $decomp init "$out\basic.exe" --dir $project --toolchain "msvc-$Arch" --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+if ($LASTEXITCODE -ne 0) { throw "decomp init failed" }
+& $decomp -C $project agent add --replay "$root\tests\replay\agent_match_add.jsonl"
+if ($LASTEXITCODE -ne 0) { throw "scripted agent run did not match add() with cl.exe ($Arch)" }
+& $decomp -C $project status
+Write-Host "MSVC agent replay ($Arch): matched"
