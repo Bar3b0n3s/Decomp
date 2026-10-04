@@ -6,14 +6,17 @@ write and dollar. Live runs and past runs use the same views, because a past run
 event log through the same state reducer. The user can pause, stop, steer, approve or take over at any
 moment. Dashboards summarize, and every number drills down to its source. The UI is a separate desktop
 application, `decomp-gui` (Dear ImGui), that renders immutable snapshots of a `RunState`, which is
-folded from typed events, and sends commands through a `RunController`. The CLI keeps headless parity.
-This document specifies the chrome, every view, the interactions, notifications, accessibility,
-persistence, CLI parity, the event-driven architecture, testing and phasing.
+folded from typed events, and sends commands through a `RunController`. The CLI covers the headless
+subset ([CLI parity](#cli-parity)). This document specifies the chrome, every view, the interactions,
+notifications, accessibility, persistence, CLI parity, the event-driven architecture, testing and
+phasing.
 
-Status: the backbone (events, `EventBus`, `RunState`, the JSONL event log with replay, and the CLI
-`--progress` view) is part of the [first slice](roadmap.md#first-working-slice). `decomp-gui` and every
-view below except the later-phase ones are Phase 1. Event and field names are descriptive;
-`src/events/` is authoritative once it lands.
+Status: the backbone is implemented in the [first slice](roadmap.md#first-working-slice): the typed
+events, `EventBus`, the `RunState` reducer, the JSONL event log and its replay into `RunState`, the CLI
+progress view, and single-session control through `LoopControl` (pause, resume, stop, abort,
+guidance). `decomp-gui`, the `RunController` and every view below are Phase 1 or later and do not
+exist yet. Data sources name the slice's event types (`turn_finished`, `status_changed`, ...;
+[Events](#events) lists them); event types marked *planned* will be added with the GUI.
 
 ## Principles
 
@@ -128,8 +131,9 @@ Each view lists what it **shows**, what the user can **do**, and its **data sour
 
 - Project state: `decomp.json`, `symbols.txt` and `.decomp/functions/*/attempts.jsonl`.
 - Run summaries (`.decomp/runs/*/summary.json`).
-- Live: `RunState.functions` and the counters, updated by `FunctionStatusChanged`, `UsageRecorded` and
-  `SessionFinished`.
+- Live: `status_changed`, `turn_finished` (usage and cost) and `session_finished`, folded into the
+  `RunState` totals. A per-function overlay in `RunState` is planned; today it tracks sessions and run
+  totals.
 - The numbers are the same ones `decomp status` prints.
 
 ### Run monitor
@@ -158,15 +162,17 @@ Each view lists what it **shows**, what the user can **do**, and its **data sour
 
 **Data sources**
 
-- `WorkerPhaseChanged`, `TurnStarted`/`TurnFinished`, `StreamDelta` (tokens per second, time to first
-  token), `ToolCallStarted`/`ToolCallFinished`, `CompileStarted`/`CompileFinished`, `DiffComputed`,
-  `RateLimitUpdated` and `RetryScheduled`.
-- `RunState.workers` and `RunState.queue`.
+- `turn_started`/`turn_finished`, `stream_delta` (tokens per second, time to first token),
+  `tool_call_started`/`tool_call_finished`, `compile_finished`, `diff_computed` and `retry`; the
+  planned `worker_phase_changed`, `compile_started` and `rate_limit_updated`. Today the reducer derives
+  each worker's phase from the other events.
+- The `RunState` workers (session and phase); the queue is Phase 1.
 
 **Notes**
 
-The slice has one worker and no queue. The CLI `--progress` view is that single-worker version of
-this view.
+The slice has one worker and no queue. The progress view of `decomp agent` is that single-worker
+version of this view ([CLI parity](#cli-parity)). Its phases today are starting, waiting for model,
+thinking, writing, running tools, turn done, compiling, running `<tool>`, backoff and done.
 
 ### Agent session
 
@@ -202,10 +208,12 @@ this view.
 
 **Data sources**
 
-- Live: `StreamDelta`, `ToolCallStarted`/`ToolCallFinished`, `CompileStarted`/`CompileFinished`,
-  `DiffComputed`, `UsageRecorded`, `TurnFinished`, `Refused`, `GuidanceInjected` and
-  `SessionFinished`, folded into `RunState.sessions[id].turns`.
-- Past: the transcript `.decomp/runs/<run-id>/sessions/<fn>.jsonl`, loaded on demand, and the
+- Live: `stream_delta`, `turn_started`/`turn_finished`, `tool_call_started`/`tool_call_finished`,
+  `compile_finished`, `diff_computed`, `refusal`, `guidance` and `session_finished`. Today `RunState`
+  keeps a summary per session (turn, phase, scores, usage, cost, last tool call, the tail of the
+  streamed text); per-turn detail (`turns[]`) is planned.
+- Past: the transcript `.decomp/runs/<run-id>/sessions/<fn>.jsonl` (its `response` records carry the
+  serving model, the thinking summaries and the usage of every turn), loaded on demand, and the
   function's `attempts.jsonl`.
 
 **Notes**
@@ -218,8 +226,9 @@ block shows as a "thinking (no summary)" marker.
 **Shows**
 
 - An objdiff-style aligned, side-by-side view of the target and candidate assembly.
-- Rows colored by kind: equal, operand, opcode, insert, delete or symbol. The differing operand is
-  highlighted within its row.
+- Rows colored by kind: equal, encoding, operand, opcode, insert or delete
+  ([matching.md](matching.md#5-row-kinds)). The differing operand is highlighted within its row, with
+  its category (register, immediate, memory, stack or symbol).
 - Branch arrows in both gutters, offsets, and optionally the raw bytes and relocation markers.
 - Symbol tooltips: address, demangled name, kind, size, and type when known.
 - A data-diff panel for strings, floats and jump tables.
@@ -243,12 +252,14 @@ block shows as a "thinking (no summary)" marker.
 
 **Data sources**
 
-- `DiffComputed` and `attempts.jsonl` for agent attempts.
+- `diff_computed` (score, byte-exact flag, summary) and `attempts.jsonl` (with each attempt's source)
+  for agent attempts.
 - Manual compiles use the same compile and diff engine as the agent's tool. They run as background
   jobs through `RunController`, emit the same events (tagged as manual), and are recorded as attempts
-  with `origin: user`.
+  with `origin: user` (planned; today's attempts carry no `origin` and all come from the agent).
 - `SymbolDb` for tooltips.
-- The view shows the same `Report` that `decomp diff --json` prints ([matching.md](matching.md)).
+- The view shows the same report that `decomp --json diff` prints
+  ([matching.md](matching.md#8-output-formats)).
 
 ### Function browser and inspector
 
@@ -277,7 +288,7 @@ block shows as a "thinking (no summary)" marker.
 
 - `SymbolDb` and analysis results.
 - Project status and history.
-- Live overlay: `FunctionStatusChanged` and `DiffComputed`.
+- Live overlay: `status_changed` and `diff_computed`.
 
 **Notes**
 
@@ -303,17 +314,20 @@ filtering run as background jobs over the snapshot.
 
 **Data sources**
 
-- `pe::Image` and `pdb::Reader`, `SymbolDb` and analysis. The slice provides callers and callees;
-  Phase 2 adds the full cross-reference index, Rich-header compiler names and RTTI class names.
+- `pe::Image` and `pdb::Reader`, `SymbolDb` and analysis. The slice provides callers, callees, a
+  cross-reference scan over the functions with known sizes (`Program::xrefs_to`) and Rich-header
+  descriptions for VC6 to Visual Studio 2005; Phase 2 adds a full cross-reference index, a complete
+  compiler table and RTTI class names.
 
 ### Symbols and provenance
 
 **Shows**
 
 - Every symbol: address, kind, decorated and demangled names, size, source and status.
-- Who set each symbol (PDB, export, import, user or agent), when, and in which session.
-- An audit trail of agent edits, each linked to the session turn that made it. Agent edits are
-  bindings recorded on a match in the slice, and `set_symbol` calls from Phase 3.
+- Who set each symbol (its source: analysis, import, export, PDB, agent or user), and, once symbol
+  changes are logged, when and in which session.
+- An audit trail of agent edits, each linked to the session turn that made it. Agent edits will be
+  bindings recorded on a match (planned) and `set_symbol` calls from Phase 3.
 
 **Actions**
 
@@ -323,7 +337,8 @@ filtering run as background jobs over the snapshot.
 **Data sources**
 
 - `symbols.txt` for the current state.
-- `SymbolChanged` events in the run logs for the history.
+- `symbol_changed` events in the run logs for the history (planned; the slice records no symbol
+  changes).
 
 ### Changes and approvals
 
@@ -342,20 +357,21 @@ filtering run as background jobs over the snapshot.
 | Action type | Default policy |
 |---|---|
 | Write a verified source to `src/functions/` | auto (mechanically verified) |
-| Record symbol bindings from a match | auto (can be switched to ask) |
+| Record symbol bindings from a match (planned) | auto (can be switched to ask) |
 | Rename or create a symbol through `set_symbol` (Phase 3) | ask |
 | Change shared headers through `define_type` (Phase 3) | ask |
 
 **Data sources**
 
-- `FileWritten`, `SymbolChanged`, `ApprovalRequested` and `ApprovalDecided`.
+- `file_written` (in the slice: verified sources), and the planned `symbol_changed`,
+  `approval_requested` and `approval_decided`.
 
 **Notes**
 
 A gated tool call waits for its decision, and the worker shows the phase "waiting for approval". A
 denial goes back to the agent as an error result so that it can adapt. Whether a long wait should
-return "pending" immediately instead is open. The slice has no approval queue; it applies the
-default policies.
+return "pending" immediately instead is open. The slice has no approval queue: it writes verified
+sources automatically, which is the default policy.
 
 ### Cost and usage
 
@@ -376,14 +392,14 @@ default policies.
 
 **Data sources**
 
-- `UsageRecorded`, `TurnFinished` and `BudgetUpdated`.
+- `turn_finished` (usage and cost per turn) and the planned `budget_updated`.
 - Run summaries and the price table ([agent.md](agent.md#cost-accounting)).
 
 ### Toolchains and compiles
 
 **Shows**
 
-- The registry: name, kind, compiler path, detected version, wrapper and environment.
+- The registry: name, kind, compiler path, detected version (planned), wrapper and environment.
 - Health-check results.
 - Recent compiles: the full command line, environment overrides, duration, exit code, output, and
   whether it was a cache hit.
@@ -397,7 +413,8 @@ default policies.
 **Data sources**
 
 - `ToolchainRegistry` and health-check results.
-- `CompileStarted`/`CompileFinished`.
+- `compile_finished` (success, cache hit, duration, error count) and the planned `compile_started`,
+  which will carry the toolchain, the command line and the output.
 
 ### Logs and errors
 
@@ -415,7 +432,9 @@ default policies.
 
 **Data sources**
 
-- `LogLine`, `RetryScheduled` and any event that carries an error.
+- `log` events (defined, but nothing publishes them yet; feeding the logger into the event bus is
+  planned), `retry`, and any event that carries an error, such as `tool_call_finished` with
+  `is_error` and `session_finished` with outcome `error`. `RunState` keeps the last 50 error lines.
 
 ### Settings
 
@@ -454,26 +473,36 @@ default policies.
 
 | Command | Effect | Takes effect |
 |---|---|---|
-| Start | Builds the queue from the selection and starts the workers (one in the slice) | Immediately |
+| Start | Builds the queue from the selection and starts the workers | Immediately |
 | Pause | Each worker finishes its current turn (request and tools), then waits | Between turns |
 | Resume | Workers continue | Immediately |
-| Stop | Workers finish their current turn, then sessions end (`ErrorCode::cancelled`) and best attempts are kept | Between turns |
-| Abort | In-flight requests and compiles are cancelled and partial turns discarded | Immediately |
+| Stop | Workers finish their current turn, then sessions end with outcome `stopped` and best attempts are kept | Between turns |
+| Abort | In-flight requests are cancelled and partial turns discarded; sessions end with outcome `aborted`. Cancelling running compiles is planned. | Immediately |
 | Skip function | Ends that function's session, if any, and marks it `skipped` | Between turns |
 | Pause worker | Pauses one worker | Between turns |
 | Set concurrency, change budgets (Phase 1) | Applied to the running run | Next scheduling decision |
 
-A turn is never left half-recorded. A stopped or paused session can be resumed or inspected exactly
-as it was.
+In the slice, `decomp agent <func>` starts one session, and Pause, Resume, Stop and Abort exist for
+it: the first Ctrl+C stops, a second aborts, and with `--interactive` the stdin commands `:pause`,
+`:resume`, `:stop` and `:abort` do the same. Skip, per-worker pause and live changes come with the
+Phase 1 runner.
+
+A turn is never left half-recorded. A paused session resumes exactly where it was, and a stopped
+session can be inspected exactly as it was through its transcript. Whether a stopped session can be
+resumed from its last committed turn is open
+([roadmap.md](roadmap.md#phase-1-supervision-gui-and-batch-runner)).
 
 ### Steering
 
 The Agent session view has a guidance composer. A message is queued for the session and appended to
-the conversation at the next safe point, after the next set of tool results, prefixed `[supervisor]`.
-Until then it shows as pending and can be retracted. Once appended, it is part of the conversation
-for good (the conversation is [append-only](agent.md#the-append-only-conversation)) and appears
-inline in the timeline. Guidance can also carry a source: the Diff viewer's "hand back" sends the
-edited source this way.
+the conversation at the next safe point: in the next user message, after the tool results (or the
+nudge) and before the status line, prefixed `[Supervisor guidance]`. Until then it shows as pending
+and can be retracted (retraction is planned; `LoopControl` has no retract command yet). Once
+appended, it is part of the conversation for good (the conversation is
+[append-only](agent.md#the-append-only-conversation)) and appears inline in the timeline. Guidance can
+also carry a source: the Diff viewer's "hand back" sends the edited source this way. In the slice,
+`decomp agent --interactive` queues each line typed on stdin as guidance, and `--guidance` queues
+text for the first request; a `guidance` event and transcript record mark when it was sent.
 
 ### Approvals
 
@@ -488,7 +517,7 @@ then opens the Diff viewer on the best attempt. The user edits with live recompi
 runs the same mechanical check as `submit_result` (compile, diff, require `byte_exact`), then writes
 the source and updates the status. "Hand back" resumes or starts a session with the user's source
 appended as guidance. Manual attempts are recorded in the history like the agent's, with
-`origin: user`.
+`origin: user` (a field that `attempts.jsonl` does not have yet).
 
 ### Navigation
 
@@ -556,9 +585,9 @@ Default bindings (provisional):
 
 - **Colorblind-safe palettes.** The default diff palette is chosen to stay distinguishable under the
   common color-vision deficiencies. Alternative palettes and a high-contrast theme are in Settings.
-- **Never color alone.** Each row kind also has a gutter glyph: `=` equal, `~` operand, `@` symbol,
-  `!` opcode, `+` insert, `-` delete. The differing operand is boxed as well as colored, and run
-  states and health lights carry text.
+- **Never color alone.** Each row kind also has a gutter glyph: `=` equal, `e` encoding, `~` operand
+  (`@` when a symbol differs), `!` opcode, `+` insert, `-` delete. The differing operand is boxed as
+  well as colored, and run states and health lights carry text.
 - **Font scaling.** Fonts scale at runtime (Ctrl+= and Ctrl+-) and follow per-monitor DPI. The
   embedded fonts are rasterized at the sizes in use.
 - **Keyboard navigation.** ImGui keyboard navigation is on, every action is reachable through the
@@ -567,8 +596,8 @@ Default bindings (provisional):
 - **Reduced motion.** There are no animations. Following live output (auto-scroll) can be turned off
   per view.
 - **Screen readers.** Dear ImGui exposes no accessibility tree, so screen readers cannot read the GUI.
-  The CLI (`decomp status`, `--progress` in plain-line mode, `--json` and the text transcripts) is the
-  accessible path, with full parity for monitoring.
+  The CLI is the accessible path for monitoring: `decomp status`, the progress view in plain-line
+  mode (used whenever stderr is not a terminal), `--json` output and the JSONL transcripts.
 
 ## Persistence
 
@@ -576,132 +605,169 @@ Default bindings (provisional):
 |---|---|
 | Window and dock layout, named saved layouts, recent projects, theme, font size, palette | User config directory (`%APPDATA%\decomp\` or `~/.config/decomp/`) |
 | Per-project view state (open views, filters, column layout, sort order) | User config directory, keyed by project path |
-| Agent settings, budgets and approval policies chosen per project | `decomp.json` (shared through git) |
+| Agent settings and budgets (and, with Phase 1, approval policies) chosen per project | `decomp.json` (shared through git) |
 | Runs, transcripts and history | Already on disk under `.decomp/`. The UI only reads them. |
 | Anything about the API key | Nowhere |
 
 ## CLI parity
 
-The CLI covers starting, monitoring and stopping work, and every command has `--json` output.
-Steering, approvals and manual mode are GUI features.
+The CLI covers inspecting the target, matching by hand, and running, watching and steering one agent
+session. `--json` is a global option, given before the command name (`decomp --json status`), and
+most commands honor it; `toolchain add` prints text only. Multi-function runs, approvals, manual mode
+and opening past runs are GUI features (Phase 1).
 
 | GUI | CLI |
 |---|---|
-| Dashboard | `decomp status` |
-| Run monitor | `decomp agent <func> --progress`: an ANSI view redrawn in place (phase, turn, best score, spend, last tool call, tail of the streamed text); plain lines when the output is not a TTY |
-| Agent session | Transcripts in `.decomp/runs/<run-id>/sessions/<fn>.jsonl` |
-| Diff viewer | `decomp diff <func> --source <file>` or `--obj <file>` |
-| Function browser | `decomp funcs` |
+| Dashboard | `decomp status`: functions and code bytes matched, status buckets, spend (the sum of the functions' `cost=` in `symbols.txt`) |
+| Run monitor | `decomp agent <func>`: a live progress view on stderr, on by default (`--no-progress` hides it, `--progress` keeps it with `--json` or `-q`). On a terminal it is a block redrawn in place: a run header (run ID, status, model and effort, elapsed time, spend, cache-hit rate, functions matched), one line per worker (function, turn, phase, best score, spend, elapsed time) and the last four activity lines. Otherwise it prints the activity lines as they happen. |
+| Agent session | Steering with `--interactive` (guidance lines, `:pause`, `:resume`, `:stop`, `:abort`) and `--guidance`; Ctrl+C to stop, twice to abort; the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl` |
+| Diff viewer | `decomp diff <func> --source <file>` or `--obj <file>` (with `--compact`, `--context`, `--bytes`) |
+| Function browser | `decomp funcs` (address, size, symbol source and name; `--filter <regex>`); statuses, scores and spend are in `symbols.txt` |
 | Binary explorer | `decomp info`, `decomp disasm <func>` |
-| Toolchains and compiles | `decomp toolchain list`, `decomp toolchain test` |
+| Toolchains and compiles | `decomp toolchain list`, `decomp toolchain test <name>`, `decomp toolchain add <name>` |
 
 ## Architecture
 
+In the slice, `decomp agent` publishes events from its own threads, and every subscriber runs
+synchronously on the publishing thread. The parts marked Phase 1 are the GUI design:
+
 ```
- session workers (AgentLoop, tools, compiles)
+ decomp agent: run_loop, tools, compiles (CLI main thread)
         | publish(Event)
         v
-    EventBus --- dispatcher thread ---+--> JSONL writer --> .decomp/runs/<run-id>/events.jsonl
-                                      +--> CLI progress renderer
-                                      +--> RunState reducer --> snapshot: shared_ptr<const RunState>
-                                                                     | atomic load, once per frame
-                                                                     v
-                                                              decomp-gui views
-                                                                     | commands
-                                                                     v
-                                                              RunController --> session workers
+    EventBus --+--> JsonlEventLog --> .decomp/runs/<run-id>/events.jsonl   (stream deltas skipped)
+               +--> ProgressRenderer (its own RunState) --> stderr
+               +--> RunState reducer --> snapshot: shared_ptr<const RunState>     (Phase 1)
+                                               | atomic load, once per frame
+                                               v
+                                        decomp-gui views                          (Phase 1)
+                                               | commands
+                                               v
+                                        RunController --> session workers         (Phase 1)
+
+ Ctrl+C, --interactive --> LoopControl --> run_loop                               (slice)
 ```
 
 ### Events
 
-Events are a `std::variant` of plain structs. Each one carries a header with a sequence number, a UTC
-time, the run ID, and the session and worker IDs where they apply.
+Events are a `std::variant` of plain structs (`src/events/events.hpp`). Each one carries a header
+with a sequence number (`seq`), a UTC time (`time`, milliseconds since the Unix epoch), the run ID
+(`run`) and, where it applies, the worker (`worker`); session-related payloads carry the session ID.
+In `events.jsonl` an event is one line with its `type` and its payload under `data`:
 
-| Event | Main fields |
+```json
+{"data":{"function":"?add@@YAHHH@Z","status":"matched","va":4198496},"run":"2026-10-04T02-08-33-f11d","seq":47,"time":1791079713812,"type":"status_changed","worker":0}
+```
+
+| Type | Payload |
 |---|---|
-| `RunStarted`, `RunFinished` | Selection; model, effort and budgets; outcome counts and totals |
-| `WorkerPhaseChanged` | Worker, phase, function |
-| `SessionStarted`, `SessionFinished` | Function; outcome and reason |
-| `TurnStarted`, `TurnFinished` | Turn number; stop reason, serving model, usage, cost, time to first token, latency |
-| `StreamDelta` | Block index, kind (text, thinking, tool input), text |
-| `ToolCallStarted`, `ToolCallFinished` | Tool and input summary; result summary, `is_error`, duration |
-| `CompileStarted`, `CompileFinished` | Toolchain and command line; exit code, duration, cached flag, diagnostic count |
-| `DiffComputed` | Attempt, match percentage, `exact`, `byte_exact`, row counts, hint kinds |
-| `UsageRecorded`, `BudgetUpdated` | Tokens by type and dollars; budget used against limit |
-| `RateLimitUpdated`, `RetryScheduled` | Header snapshot; status, delay, retry number |
-| `Refused` | Refusal category, fallback information |
-| `FunctionStatusChanged` | Function, old and new status, best percentage |
-| `SymbolChanged` | Address, old and new name, kind, size, source |
-| `FileWritten` | Path, kind, size, SHA-1, approval state |
-| `GuidanceInjected` | Session, text |
-| `ApprovalRequested`, `ApprovalDecided` | Action and decision (Phase 1) |
-| `LogLine` | Level, module, message |
+| `run_started` | `project`, `model`, `effort`, `workers`, `functions` (the selection) |
+| `run_finished` | `status`: `completed`, `stopped`, `aborted` or `error` |
+| `session_started` | `session`, `function`, `display`, `va` |
+| `session_finished` | `session`, `outcome`, `detail`, `best_match`, `turns`, `cost_usd` |
+| `turn_started` | `session`, `turn` |
+| `turn_finished` | `session`, `turn`, `stop_reason`, `usage` (`input`, `output`, `cache_write`, `cache_read`), `cost_usd`, `latency_ms` |
+| `stream_delta` | `session`, `kind` (`text` or `thinking`), `text` |
+| `tool_call_started` | `session`, `id`, `tool`, `turn`, `input` |
+| `tool_call_finished` | `session`, `id`, `tool`, `is_error`, `summary` (the first line of the result), `duration_ms` |
+| `compile_finished` | `session`, `ok`, `cached`, `duration_ms`, `errors` |
+| `diff_computed` | `session`, `match_percent`, `byte_exact`, `summary` |
+| `retry` | `session`, `attempt`, `error`, `delay_ms` |
+| `refusal` | `session`, `category`, `explanation` |
+| `guidance` | `session`, `text` |
+| `status_changed` | `function`, `va`, `status` |
+| `file_written` | `path`, `reason` |
+| `log` | `level`, `message` (defined; nothing publishes it yet) |
+
+Planned with the GUI: `worker_phase_changed` (worker, phase, function), `compile_started`
+(toolchain and command line), `budget_updated` (budget used against limit), `rate_limit_updated`
+(header snapshot), `symbol_changed` (address, old and new name, kind, size, source),
+`approval_requested` and `approval_decided`, and more fields on existing events: the serving model
+and time to first token on `turn_finished`, the attempt number, row counts and hints on
+`diff_computed`, the old status and best score on `status_changed`, and size, SHA-1 and approval
+state on `file_written`.
 
 ### RunState
 
-`RunState` is a pure fold over events: `apply(RunState&, const Event&)` contains no I/O and does not
-read the clock. Roughly:
+`RunState` (`src/events/run_state.hpp`) is a pure fold over events: `RunState::apply(const Event&)`
+contains no I/O and takes times only from the events. It tracks:
 
 ```
 RunState
-  run         id, config, state (idle | running | paused | stopping | finished), times, budgets
-  workers[]   id, phase, phase_since, session
-  sessions{}  function, turns[], attempts[], best, usage, cost, outcome, pending guidance
-    turns[]   n, blocks[] (thinking summary | text | tool_use | fallback), tool_calls[],
-              stop_reason, serving model, usage, cost, ttft, latency
-  functions{} status, best %, attempts, cost (overlaid on the project's stored state)
-  counters    tokens by type, dollars, turns, compiles, compile cache hits, retries, errors
-  rate_limit  requests and tokens remaining, reset times, backoff until
-  queue[], approvals[] (Phase 1), notifications[], log tail (ring buffer)
+  run         id, project, model, effort, status (running, then completed | stopped | aborted | error),
+              worker count, planned functions, started, ended
+  sessions{}  function, display, va, worker, phase, turn, tool calls, compiles, compile errors,
+              best and last match, matched, scores[] (one per diff), usage, cost, retries,
+              last tool and its summary, stream tail (last 600 characters), refusal category,
+              outcome, detail, started, ended
+  workers{}   id, session, phase
+  totals      tokens by type, dollars, matched, finished, retries, refusals, tool calls, compiles,
+              cache-hit rate
+  activity    the last 200 plain-language lines, such as
+              "[02:08:33] int __cdecl add(int, int): turn 2 compile_and_diff -> compile: ok"
+  errors      the last 50 error lines
+  files_written, last_seq
 ```
 
-The plain-language activity feed, the throughput figures and the chart series are derived from
-`RunState` by view-model functions, which are pure and testable without ImGui.
+Planned for Phase 1: per-turn detail (`turns[]` with blocks, tool calls, stop reason, serving model,
+usage, cost, time to first token and latency), a per-function overlay on the project's stored state,
+rate-limit state, the queue, approvals, notifications and a log tail. The activity feed is built by
+the reducer; throughput figures and chart series will be derived from `RunState` by view-model
+functions, which are pure and testable without ImGui.
 
-### Snapshots
+### Snapshots (Phase 1)
 
-The reducer runs on the dispatcher thread. After a batch of events it publishes a new immutable
+The reducer will run on a dispatcher thread. After a batch of events it publishes a new immutable
 snapshot with an atomic swap, at most once per frame interval. Completed turns, attempts and log
 chunks are immutable and shared between snapshots, so publishing one does not copy the history. The
 exact structure-sharing scheme is open. The GUI loads the latest snapshot at the start of each frame
 and never touches worker state. Streaming deltas arriving faster than the frame rate are coalesced.
+In the slice there are no snapshots: the progress view applies each event to its own `RunState` under
+a lock, and redraws at most every 100 ms for stream deltas.
 
-### RunController
+### RunController (Phase 1)
 
-`RunController` is the only way to change anything: start(selection, config), pause, resume, stop,
-abort, skip, inject_message(session, text), approve(action, decision), and in Phase 1
-set_concurrency and live budget changes. Commands are queued and acknowledged through events, so the
-UI shows a command as pending until the workers act on it.
+`RunController` will be the only way to change anything: start(selection, config), pause, resume,
+stop, abort, skip, inject_message(session, text), approve(action, decision), set_concurrency and live
+budget changes. Commands are queued and acknowledged through events, so the UI shows a command as
+pending until the workers act on it. The slice has the single-session `LoopControl`: pause, resume,
+stop, abort and inject guidance. Guidance is acknowledged by a `guidance` event when it is sent, and
+pauses and resumptions are recorded in the transcript.
 
 ### Replay of past runs
 
 Opening a past run reads its `events.jsonl` through the same reducer and shows the result in the same
 views, read-only, with the run controls disabled. Transcripts are loaded on demand when an Agent
 session is opened. "Run again" starts a new run with the same selection and configuration. Because
-past and live runs share one code path, anything visible live is visible afterwards.
+past and live runs share one code path, anything visible live is visible afterwards; the one gap is
+the streamed text, which `events.jsonl` omits and the transcript holds in full. The library side
+exists in the slice (`read_event_log()` and `RunState::replay()`); the views are Phase 1.
 
 ## Testing strategy
 
-- **Reducer unit tests.** Synthetic event sequences fold into the expected `RunState`: sessions, turns,
-  counters, statuses and notifications.
-- **Log round trip.** Events are written to JSONL, replayed, and must produce an identical `RunState`.
-- **View-model tests.** Pure derivations (table rows, feed sentences, chart series, ETAs) are tested
-  without ImGui.
-- **Headless ImGui smoke test.** An ImGui context with no window or GPU backend (font atlas built,
-  display size set) renders every view for several frames against synthetic snapshots: empty, huge,
-  mid-stream and error states. ImGui assertions are turned into test failures. This runs in CI on all
-  platforms.
-- **Performance check.** A synthetic run with 100,000 functions and a high event rate must keep frame
-  build time and snapshot publication within budget in Release builds.
+- **Reducer unit tests** (in the slice). Synthetic event sequences fold into the expected `RunState`:
+  sessions, workers, scores, counters and the activity feed.
+- **Log round trip** (in the slice). Events are written to JSONL, read back and replayed, and must
+  produce the same `RunState` apart from the streamed text, which the log omits.
+- **Progress view tests** (in the slice). The rendered status block and the plain-line output are
+  checked for a scripted run.
+- **View-model tests** (Phase 1). Pure derivations (table rows, feed sentences, chart series, ETAs) are
+  tested without ImGui.
+- **Headless ImGui smoke test** (Phase 1). An ImGui context with no window or GPU backend (font atlas
+  built, display size set) renders every view for several frames against synthetic snapshots: empty,
+  huge, mid-stream and error states. ImGui assertions are turned into test failures. This runs in CI
+  on all platforms.
+- **Performance check** (Phase 1). A synthetic run with 100,000 functions and a high event rate must
+  keep frame build time and snapshot publication within budget in Release builds.
 - **Manual acceptance.** The Phase 1 exit scenario, on Windows and Linux.
 
 ## Phasing
 
 | Part | Phase |
 |---|---|
-| Event types, `EventBus`, `RunState` reducer, JSONL log and replay, CLI `--progress`, single-session `RunController` | First slice |
+| Event types, `EventBus`, `RunState` reducer, JSONL log and replay, CLI progress view, single-session `LoopControl` | First slice |
 | `decomp-gui`: chrome and every view above except the later-phase ones; multi-worker `RunController` (queue, concurrency, shared rate limiter, approvals queue, live budget changes, resumable runs) | Phase 1 |
-| Binary explorer enrichment (cross-reference index, Rich-header compiler names, RTTI class names) | Phase 2 |
+| Binary explorer enrichment (full cross-reference index, Rich-header compiler names, RTTI class names) | Phase 2 |
 | Units view; approvals for `set_symbol` and `define_type` | Phase 3 |
 | Types and layouts view | Phase 4 |
 | Data matching and relink view | Phase 5 |

@@ -10,9 +10,9 @@ document covers goals, fixed decisions, the module design, data flow, threading,
 build and platform notes. Matching, the agent, the UI and the project format each have their own
 document.
 
-Status: `core` and the build scaffold exist; the other modules are being written as part of the
-[first slice](roadmap.md#first-working-slice). Type names below follow the approved plan. Where a
-sketch differs from the code once it lands, the headers are authoritative.
+Status: the [first slice](roadmap.md#first-working-slice) is implemented; `decomp-gui` and the
+multi-worker runner are Phase 1. The type and function names below are the ones in the code, and the
+headers are authoritative. Anything marked *planned* does not exist yet.
 
 ## Goals and non-goals
 
@@ -49,7 +49,7 @@ sketch differs from the code once it lands, the headers are authoritative.
 | AI | **Built-in agent only.** The tool calls the Claude API itself and owns the loop, and the user supervises. No MCP. |
 | Third-party code | Any library is allowed; external applications are not. |
 | Decompiler | **Assembly only.** No decompiler engine; rich disassembly annotation and a fast compile/diff loop instead. |
-| Host OS | **Windows primary** (old MSVC runs natively; premake generates VS 2022 solutions). Linux is supported for development and CI. |
+| Host OS | **Windows primary** (old MSVC runs natively; premake generates Visual Studio solutions). Linux is supported for development and CI. |
 | UI | Detailed visibility of everything the agent does, live and historical ([ui.md](ui.md)). |
 | First milestone | Design docs, the Phase-0 scaffold and a first working slice that includes the agent loop, tested offline through replays. |
 
@@ -57,13 +57,13 @@ sketch differs from the code once it lands, the headers are authoritative.
 
 | Stage | What happens | Module | First slice | Later |
 |---|---|---|---|---|
-| Ingest | Parse the target image, its PDB and candidate objects | `formats` | PE32/PE32+, COFF `.obj`, PDB 7.0, exports, imports, base relocations, CodeView, Rich header decode | COFF `.lib`, MSVC `.map`, x64 `.pdata` bounds (Phase 2); ELF64 (Phase 7) |
-| Analyze | Build the symbol database, find function bounds, build CFGs | `analysis` | Symbol import, bounds from symbol size or recursive descent, basic blocks, dominators and loop headers, callers and callees | Xref index, RTTI/vtables, library signatures (Phase 2) |
-| Annotate | Turn a function into a readable, symbolized listing | `analysis` + `arch/x86` | Labels, symbolized operands, frame variable names, loop/if hints | Field names from types (Phase 4) |
+| Ingest | Parse the target image, its PDB and candidate objects | `formats` | PE32/PE32+, COFF `.obj` (including `/bigobj`), PDB 7.0, exports, imports, base relocations, CodeView, Rich header decode, x64 `.pdata` | COFF `.lib`, MSVC `.map` (Phase 2); ELF64 (Phase 7) |
+| Analyze | Build the symbol database, find function bounds, build CFGs | `analysis` | Symbol import, bounds from symbol size, `.pdata` or recursive descent, jump tables, linker-thunk resolution, basic blocks and loop headers, a cross-reference scan for callers | Full cross-reference index, RTTI/vtables, library signatures (Phase 2) |
+| Annotate | Turn a function into a readable, symbolized listing | `analysis` + `arch/x86` | Labels, symbolized operands, frame slot names, loop hints, switch tables | Field names from types (Phase 4) |
 | Match | Compile a candidate, extract the function, diff it | `matching` | Toolchain registry, compile driver and cache, diagnostics, relocation-aware diff, verdicts, hints | Data matching and relinking (Phase 5), flag search and permuter (Phase 6) |
-| Agent | Run one Claude conversation per function | `agent` | Transports, SSE, client, append-only conversation, tools, loop, single-session controller, transcripts, cost | Multi-worker runner (Phase 1), more tools (Phases 3-4) |
+| Agent | Run one Claude conversation per function | `agent` | Transports, SSE, client, append-only conversation, tools, loop, single-session control, transcripts, cost | Multi-worker runner (Phase 1), more tools (Phases 3-4) |
 | Project | Persist sources, symbols, history and progress | `project` | `init`, `symbols.txt`, status and history, verified sources, `status` | Translation-unit organization (Phase 3), headers and types (Phase 4) |
-| Supervise | Show everything live and historically; take commands | `events`, `cli`, `gui` | Events, `EventBus`, `RunState`, JSONL log, CLI `--progress` | `decomp-gui` (Phase 1) |
+| Supervise | Show everything live and historically; take commands | `events`, `cli`, `gui` | Events, `EventBus`, `RunState`, JSONL log, CLI progress view, Ctrl+C and `--interactive` commands | `decomp-gui` (Phase 1) |
 
 ## Data flow
 
@@ -71,30 +71,30 @@ sketch differs from the code once it lands, the headers are authoritative.
 flowchart LR
     BIN["Target binary<br/>PE32 / PE32+"] --> FMT["formats<br/>pe::Image, pdb::Reader"]
     PDB["PDB (optional)"] --> FMT
-    FMT --> AN["analysis<br/>SymbolDb, find_bounds, Cfg"]
+    FMT --> AN["analysis<br/>Program, SymbolDb, function_extent, Cfg"]
     SYM["symbols.txt"] --> AN
-    AN --> ANN["Annotator<br/>AnnotatedFunction"]
+    AN --> ANN["annotate_function<br/>AnnotatedFunction"]
     ANN --> BRIEF["Per-function brief"]
-    BRIEF --> LOOP["agent<br/>AgentLoop + MatchSession"]
+    BRIEF --> LOOP["agent<br/>run_loop + MatchSession"]
     LOOP <-->|"HTTPS + SSE"| API[("Claude API")]
-    LOOP -->|"candidate TU"| CMP["matching<br/>compile()"]
+    LOOP -->|"candidate TU"| CMP["matching<br/>Compiler::compile()"]
     CMP -->|"argv + env"| CC[["Original compiler"]]
     CC -->|".obj"| CMP
-    CMP --> DIFF["ObjFunction, TargetFunction<br/>Normalizer, Differ, Report"]
+    CMP --> DIFF["build_target_side, build_candidate_side<br/>diff_sides, to_text / to_json"]
     AN --> DIFF
     DIFF -->|"diff report"| LOOP
     LOOP -->|"verified source"| PRJ["project<br/>src/functions, symbols.txt, .decomp/"]
     LOOP -. events .-> BUS["EventBus"]
-    CMP -. events .-> BUS
     BUS --> LOG["events.jsonl"]
     BUS --> RS["RunState reducer"]
-    RS --> VIEWS["CLI --progress<br/>decomp-gui"]
-    VIEWS -->|"commands"| RC["RunController"]
+    RS --> VIEWS["CLI progress view<br/>decomp-gui (Phase 1)"]
+    VIEWS -->|"commands"| RC["LoopControl<br/>(RunController in Phase 1)"]
     RC --> LOOP
 ```
 
 The same diff path serves the human-driven commands: `decomp diff --source` compiles and diffs
-without the agent, and `decomp diff --obj` skips compilation.
+without the agent, and `decomp diff --obj` skips compilation. Compile and diff events
+(`compile_finished`, `diff_computed`) are published by the agent's session around each compile.
 
 ## Module design
 
@@ -104,234 +104,288 @@ Lower layers never include higher ones:
 
 ```
 cli, gui                  entry points; argument parsing, rendering
-  agent                   AgentLoop, tools, Claude client, RunController
+  agent                   run_loop, tools, Claude client, MatchSession, runner
     project               decomp.json, symbols.txt, history, verified sources
     matching              toolchains, compile, diff
-      analysis            SymbolDb, bounds, CFG, annotation, demangling
-        arch/x86          decoding, formatting (arch::Decoder interface)
+      analysis            Program, SymbolDb, bounds, CFG, annotation, demangling
+        arch/x86          decoding, formatting
         formats           PE, COFF, PDB (BinaryImage interface)
-  events                  event types, EventBus, RunState (depends on core only)
+  events                  event types, EventBus, RunState, progress view (depends on core only)
 core                      errors, logging, fs, bytes, hashing, processes, JSON
 ```
 
-Event payloads are plain data (strings, numbers, small enums), so `events` depends only on `core`, and
-producers (`matching`, `agent`) and consumers (`cli`, `gui`) can both depend on it without cycles.
+Event payloads are plain data (strings, numbers, JSON values), so `events` depends only on `core`,
+and producers (`agent`) and consumers (`cli`, `gui`) can both depend on it without cycles.
 
-### core (exists)
+### core
 
 Shared infrastructure, used by everything else:
 
 | Header | Provides |
 |---|---|
 | `core/result.hpp` | `ErrorCode`, `Error{code, message}` with `with_context()` and `describe()`, `Result<T> = std::expected<T, Error>`, `make_error(code, fmt, args...)`, the `TRY` and `TRY_ASSIGN` macros |
-| `core/log.hpp` | `decomp::log` levels (trace to error), colored stderr (TTY auto-detect), mirror to a file, extra sinks (used to feed log lines into the event bus) |
+| `core/log.hpp` | `decomp::log` levels (trace to error), colored stderr (TTY auto-detect), mirror to a file, extra sinks (meant for feeding log lines into the event bus; nothing registers one yet) |
 | `core/fs.hpp` | UTF-8 path conversion, `read_file`/`read_text`, atomic `write_file`/`write_text` (temp file + rename), `append_text`, `find_upwards`, `TempDir` |
 | `core/bytes.hpp` | `ByteSpan`, bounds-checked little-endian `read_le<T>`, sequential `ByteReader`, `read_cstring_at` |
 | `core/hash.hpp` | Streaming `Sha1`, `sha1_hex` |
-| `core/process.hpp` | `ProcessSpec{argv, cwd, env overrides, timeout, stdin}` and `run_process()` returning `ProcessResult{exit_code, out, err, timed_out, duration}`. POSIX uses fork/exec and poll; Windows uses `CreateProcessW` with a job object and pipe threads. Also MSVCRT-correct argument quoting (`quote_windows_arg`, `build_windows_command_line`). |
-| `core/json.hpp` | `Json` (nlohmann, keys kept sorted so dumps are deterministic), `parse_json`, compact and pretty dumps, accessors that turn missing fields into errors |
+| `core/process.hpp` | `ProcessSpec{argv, cwd, env overrides, timeout, stdin}` and `run_process()` returning `ProcessResult{exit_code, out, err, timed_out, duration}`. POSIX uses fork/exec and poll, with the child in its own process group; Windows uses `CreateProcessW` with a job object and pipe threads. Also MSVCRT-correct argument quoting (`quote_windows_arg`, `build_windows_command_line`). |
+| `core/json.hpp` | `Json` (nlohmann, keys kept sorted so dumps are deterministic), `parse_json`, compact and pretty dumps, accessors that turn missing fields into errors or defaults |
 | `core/strings.hpp` | `trim`, `split`, `parse_u64` (accepts `0x...`, `...h`, decimal), `hex`, `truncate_utf8`, `escape_c_string`, UTF-8/UTF-16 conversion on Windows |
 
-Still planned for `core`: a small thread pool, a cancellation hook for `run_process` (needed for
-Abort), and response files for long compiler command lines.
+Still planned for `core`: a small thread pool, and a cancellation hook for `run_process` so that Abort
+can end a running compile. (Response files for long compiler command lines are written by the compile
+driver in `matching`.)
 
 ### formats
 
 Readers for binary formats, all built on `ByteReader` and returning `Result`:
 
 - `pe::Image`: PE32 and PE32+ headers and sections; RVA/VA/file-offset conversion; exports; imports
-  mapped to IAT slot symbols (`__imp_` names); base relocations; the CodeView `RSDS` record (PDB path,
-  GUID, age); Rich header decoding (product IDs and build numbers of the tools that produced the
-  objects); `.pdata` entries.
-- `coff::Object`: sections, including COMDAT selection and associativity from the section-definition
-  auxiliary records; symbols and their auxiliary records; relocations; the string table.
-- `pdb::Reader` over raw_pdb: procedures (`S_GPROC32`/`S_LPROC32`) with code size and module, public
-  symbols (`S_PUB32`) for decorated names, section contributions (input for translation-unit
-  recovery in Phase 3), and a GUID/age check against the image. raw_pdb reads the PDB 7.0 format used
-  since Visual Studio .NET 2002 and by lld-link. VC6-era PDB 2.0 files (`NB10`) use an older container
-  that it does not read, so such targets rely on exports, map files (Phase 2), user symbols and
-  analysis.
-- `BinaryImage`: the interface the rest of the code uses (sections, bytes at a VA, image range,
-  relocation lookup), so that ELF can be added in Phase 7 without touching analysis or matching.
+  mapped to IAT slots; base relocations; the CodeView record (`RSDS` with PDB path, GUID and age, or
+  `NB10`); Rich header decoding (product IDs, build numbers and counts, with descriptions for the
+  VC6-to-VS2005 product IDs it knows); x64 `.pdata` entries.
+- `coff::Object`: regular and `/bigobj` objects; sections, including COMDAT selection and
+  associativity from the section-definition auxiliary records; symbols and their auxiliary records;
+  relocations; the string table.
+- `pdb::Reader` over raw_pdb: procedures (`S_GPROC32`/`S_LPROC32`) with code size and module, data
+  symbols, public symbols (`S_PUB32`) for decorated names, modules, section contributions (input for
+  translation-unit recovery in Phase 3), and a GUID/age check against the image. raw_pdb reads the
+  PDB 7.0 format used since Visual Studio .NET 2002 and by lld-link. VC6-era PDB 2.0 files (`NB10`)
+  use an older container that it does not read, so such targets rely on exports, map files (Phase 2),
+  user symbols and analysis.
+- `BinaryImage`: the interface the rest of the code uses (architecture, image base and size, entry
+  point, sections, bytes at a VA, relocation lookup), so that ELF can be added in Phase 7 without
+  touching analysis or matching.
 
 ### arch/x86
 
-Decoding and formatting, built on Zydis:
+Decoding and formatting, built on Zydis (`arch/x86/decoder.hpp`):
 
 ```cpp
-// Sketch.
-struct Field { u8 offset; u8 size; FieldKind kind; };     // disp | imm | rel
+// Abridged from arch/x86/decoder.hpp.
+struct Field {                  // a byte span that holds a displacement or an immediate
+    u8 offset; u8 size; FieldKind kind;   // disp | imm | rel
+    i8 operand;                 // index into Instruction::operands
+    i64 raw;                    // value as encoded
+    u64 absolute;               // address, or the destination of a relative/RIP-relative field
+    bool rip_relative;
+};
 struct Instruction {
-    u64 addr; u8 len; std::array<u8, 15> bytes;
-    Mnemonic mnemonic;
-    std::vector<Operand> operands;   // reg | mem{base, index, scale, disp, seg} | imm | rel
-    Flow flow;                       // none, jump, cjump, call, ret, ijump, icall, trap
-    std::optional<u64> target;       // direct branch or call destination
-    std::vector<Field> fields;       // byte spans that can hold an address
+    u64 address; u8 length; std::array<u8, 15> bytes;
+    std::string mnemonic, prefix;          // "jz"; "lock ", "rep " ...
+    std::vector<Operand> operands;         // reg | mem{segment, base, index, scale, disp} | imm | pointer
+    std::vector<Field> fields;
+    Flow flow;                             // none, jump, cond_jump, call, ret, indirect_jump, indirect_call, trap, halt
+    std::optional<u64> branch_target;      // direct branch or call destination
+    std::optional<u64> memory_target;      // absolute or RIP-relative memory operand
 };
 ```
 
-`fields` comes from Zydis' raw instruction data (`raw.disp.offset/size`, `raw.imm[i].offset/size/
-is_relative`). These spans are the only places an address can live, and the diff relies on them. The
-Intel-syntax formatter takes a symbolizer hook, so the same formatter prints raw listings, annotated
-listings and diff rows. `arch::Decoder` is the interface other ISAs implement later.
+`fields` come from Zydis' raw instruction data (displacement and immediate offsets and sizes, and
+whether an immediate is relative). These spans are the only places an address can live, and the diff
+relies on them. The Intel-syntax formatter (`x86::render`) takes a field renderer hook, so the same
+formatter prints raw listings, annotated listings and diff rows. `x86::Decoder` is a concrete class; an
+ISA-neutral decoder interface for other ISAs is planned (Phase 7).
 
 ### analysis
 
-- `SymbolDb`: `std::map<va, Symbol>` with `Symbol{name (decorated), demangled, kind: func | data |
-  string | float | import | label, size, source: pdb | export | import | user | agent, status}` and
-  both exact and containing-address lookups. It is populated from the PDB, exports, imports and
-  `symbols.txt`. The slice keeps one symbol per address; recording the aliases that
-  identical-COMDAT folding creates is an open item (see [matching.md](matching.md#opticf-folding)).
-- Demangling through LLVM's Demangle library (MSVC and Itanium schemes).
-- `find_bounds()`: the symbol size when known; otherwise recursive descent from the entry, stopping
-  at `ret`, `int3` and jumps that leave the function. Indirect jumps through tables
-  (`jmp [r*4+table]`) have their tables read as data, not decoded as code.
-- `Cfg`: basic blocks, edges, dominators and loop headers.
-- `Annotator` produces an `AnnotatedFunction`: `loc_N` labels, operands symbolized with demangled
-  signatures and calling conventions, comments for strings, floats and imports, `arg_N`/`var_N`
-  names derived from `ebp`/`esp`/`rsp` offsets, loop and if-structure hints, callers and callees. The
-  annotated listing is what the agent and the human read; there is no decompiler output.
+- `Program`: a loaded target (image, decoder and symbols). `Program::open()` loads the image and its
+  PDB (given, or found next to the image through the CodeView record or `<stem>.pdb`; a PDB whose GUID
+  and age do not match is ignored), builds the `SymbolDb`, and moves names off incremental-linking
+  thunks. It resolves names and addresses (`resolve()`), finds function extents and instructions, scans
+  cross-references on first use (`xrefs_to()`, `callers_of()`), and follows linker thunks
+  (`thunk_destination()`).
+- `SymbolDb`: `std::map<va, Symbol>` with `Symbol{name (decorated), display (demangled), pdb_name,
+  kind: function | data | string | float | import | label | unknown, size, source: analysis | import |
+  export | pdb_public | pdb | agent | user, is_static, aliases}` and both exact and containing-address
+  lookups. It is populated from the PDB, exports, imports, x64 `.pdata` and `symbols.txt`. A more
+  trusted source takes over the primary name at an address; the other names become aliases (see
+  [matching.md](matching.md#opticf-folding)). Function status is kept by `project`, not here.
+- Demangling through LLVM's Demangle library (MSVC and Itanium schemes), plus the undecorated and
+  qualified forms used for name equivalence.
+- `Program::function_extent()`: the symbol size when known; otherwise recursive descent from the
+  entry, bounded by the section and the next known function, stopping at `ret`, `int3` and jumps that
+  leave the function. Indirect jumps through tables (`jmp [r*4+table]` on x86; the clang and MSVC x64
+  patterns) have their tables read as data, not decoded as code.
+- `Cfg` (`build_cfg()`): basic blocks, edges, loop headers (targets of back edges) and loop depths.
+- `annotate_function()` produces an `AnnotatedFunction`: `loc_<address>` labels, operands symbolized
+  with demangled names, comments for strings, floats, imports, frame slots (`arg_N`/`var_N` derived
+  from `esp`/`ebp`/`rsp`/`rbp` offsets), switch tables, loop headers and back edges, tail calls, plus
+  callers, callees and data references. The annotated listing is what the agent and the human read;
+  there is no decompiler output.
 
 ### matching
 
 The compile and diff engine ([matching.md](matching.md) has the full design):
 
-- `Toolchain{name, kind: msvc | clang_cl | gcc | clang, compiler, wrapper argv, env set/prepend, base
-  flags, include dirs, obj format}` and `ToolchainRegistry`, which combines the user-level registry
-  with project overrides.
-- `compile()` returns `CompileOutput{obj, diagnostics[{file, line, col, severity, code, msg}], log}`.
-  It has diagnostic parsers for MSVC and for clang/gcc, and a compile cache keyed by a SHA-1 of the
-  toolchain, flags and source.
-- `TargetFunction` (bytes, instructions and address-bearing fields from the image), `ObjFunction`
-  (the same for a candidate object, with COFF relocations), `Normalizer` (canonical instruction
-  tokens and `SymRef` keys), `Differ` (alignment, row classification, verdicts, hints) and `Report`
-  (colored text and compact JSON).
+- `Toolchain{name, kind: msvc | clang_cl | gcc | clang, compiler, wrapper, flags, include_dirs, env,
+  env_prepend, description, timeout_seconds}` and `ToolchainRegistry`, which reads the user-level
+  registry and adds auto-detected clang-cl entries. Per-project overrides are planned.
+- `Compiler::compile()` returns `CompileResult{ok, object_data, diagnostics[{file, line, column,
+  severity, code, message}], output, command, duration, cached, timed_out}`. It has diagnostic parsers
+  for MSVC-style and GCC-style output, and a compile cache keyed by a SHA-1 of the toolchain, flags,
+  source and include directories.
+- `build_target_side()` (instructions and their address references from the image),
+  `build_candidate_side()` (the same for a candidate object, from its COFF relocations),
+  `diff_sides()` (alignment, row classification, verdicts, hints, bindings) and the reports
+  `to_text()`, `to_json()` and `summary_line()`. `compile_and_diff()` (`matching/match.hpp`) compiles a
+  source and diffs one function.
 
 ### events
 
 The backbone shared by the CLI, the GUI and the logs ([ui.md](ui.md#architecture) has the consumer
 side):
 
-- Typed events in a `std::variant`. Each one is stamped with a sequence number, a UTC time and
-  run, session and worker IDs. The categories are: run, session and turn lifecycle; stream deltas;
-  tool call start and end; compile start and end; diff results; usage and budget; rate limits and
-  retries; refusals; function status changes; files written; log lines. The individual event names
-  used in these docs (`TurnFinished`, `CompileFinished` and so on) are descriptive; `src/events/` is
-  authoritative.
-- `EventBus`: thread-safe publish from any thread and ordered delivery to subscribers.
-- `RunState`: a pure reducer that folds events into runs, then workers, sessions, turns and tool
-  calls, plus function statuses and counters.
-- The JSONL event log writer and replay. Replaying a log through the same reducer reproduces the
-  state, which is how past runs are opened and how the reducer is tested.
+- Typed events: a `std::variant` of plain structs, each stamped with a sequence number, a UTC time,
+  the run ID and, where it applies, a worker ID; payloads carry the session ID. The types are
+  `run_started`, `run_finished`, `session_started`, `session_finished`, `turn_started`,
+  `turn_finished`, `stream_delta`, `tool_call_started`, `tool_call_finished`, `compile_finished`,
+  `diff_computed`, `retry`, `refusal`, `guidance`, `status_changed`, `file_written` and `log`
+  ([ui.md](ui.md#events) lists their fields).
+- `EventBus`: thread-safe publishing from any thread. Sequence numbers are unique and increasing, and
+  subscribers are called synchronously on the publishing thread, so they must be quick.
+- `RunState`: a pure reducer that folds events into the run, its workers and sessions, and run totals.
+- `JsonlEventLog` writes `events.jsonl` (all events except `stream_delta`), and `read_event_log()` plus
+  `RunState::replay()` read a log back into the same state, which is how the reducer is tested and how
+  past runs will be opened.
+- `ProgressRenderer`: the CLI's live progress view.
 
 ### agent
 
 The built-in agent ([agent.md](agent.md) has the full design):
 
-- `HttpTransport` with `CurlTransport` (Linux, macOS), `WinHttpTransport` (Windows, no extra
+- `HttpTransport` with a libcurl transport (Linux, macOS), a WinHTTP transport (Windows, no extra
   dependency) and `ReplayTransport` (tests and `--replay`).
 - `SseParser`: incremental server-sent events parsing.
-- `anthropic::Client`: request building, retries with backoff, message assembly from the stream,
-  and capture of rate-limit headers.
+- `Client`: request headers, retries with backoff, message assembly from the stream
+  (`MessageAccumulator`), and capture of rate-limit headers.
 - `Conversation`: the append-only message history. It serializes the system prompt, tools and model
   once and reuses them byte-identically.
 - `ToolRegistry` with a JSON Schema validator, and `MatchSession`, which holds the per-function
-  state and implements the match tools.
-- `AgentLoop::run(MatchSession&)`, which returns a `MatchOutcome` (`matched`, `gave_up`,
-  `budget_exhausted`, `refused` or `error`).
-- `RunController`: thread-safe commands (start, pause, resume, stop/abort, skip, inject_message,
-  approve). The slice has a single-session version; Phase 1 adds the multi-worker queue.
-- `Prompts` (frozen system prompt and brief builder), `Transcript` and `CostMeter`.
+  state and implements the match tools, the brief and the status line.
+- `run_loop()`, which returns a `LoopOutcome`, and `LoopControl`, its thread-safe commands (pause,
+  resume, stop, abort, inject guidance).
+- `run_function()` (`agent/runner.hpp`): one session from start to finish, with events, the transcript
+  and project updates; its outcome is `matched`, `gave_up`, `refused`, `budget_exhausted`, `max_turns`,
+  `no_result`, `stopped`, `aborted` or `error`.
+- The frozen system prompt (`system_prompt()`), the price table and cost accounting (`agent/cost.hpp`).
+- Planned for Phase 1: a `RunController` with a work queue, several workers, skips and approvals.
 
 ### project
 
 - `Project`: loads and saves `decomp.json`, resolves paths, and finds the project from the current
-  directory (`fs::find_upwards`) or `--project`.
-- Symbol file I/O (`symbols.txt`, sorted, one symbol per line).
-- Function status and history (`.decomp/functions/<fn>/`), run summaries and the progress
-  computation behind `decomp status`.
+  directory (`fs::find_upwards`) or `-C/--project`; `Project::init()` creates one.
+- Symbol file I/O (`symbols.txt`, sorted, one symbol per line), applied on top of the derived symbols.
+- Function status and history (`.decomp/functions/<fn>/`) and the per-function counters behind
+  `decomp status`.
 - Writing verified sources. All writes are confined to project-managed paths
   ([project-format.md](project-format.md)).
 
 ### cli
 
-Commands built with CLI11: `init`, `info`, `funcs`, `disasm`, `diff`, `agent`, `status` and
-`toolchain list|test`. Global options are `--project <dir>` and `--json`. `agent` adds `--progress`
-(live view) and `--replay <file>`, and `diff` takes `--source <file>` or `--obj <file>`. Today
-`src/cli/main.cpp` only prints help and `--version`.
+Commands built with CLI11 (`src/cli/`): `init`, `info`, `funcs`, `disasm`, `diff`,
+`toolchain list|test|add`, `status` and `agent`. Global options, which go before the command name,
+are `--json`, `-v`/`--verbose` (repeat for trace), `-q`/`--quiet` and `-C`/`--project <dir>`, plus
+`--version`. `diff` takes `--source <file>` or `--obj <file>` (plus `--all` with `--obj`), and exits
+with 0 when byte-exact, 2 when the function differs and 3 when the compile failed. `agent` adds the
+live progress view, `--replay <file>`, `--interactive`, `--guidance`, budget overrides and model
+options, and exits with 0 when matched, 2 when not matched, 3 when refused and 1 on error or abort.
+Errors are printed as `error: <message>` with exit code 1.
 
 ### gui (Phase 1)
 
 `decomp-gui` is a separate application built with Dear ImGui (docking), ImPlot, GLFW/OpenGL 3 and
-ImGuiColorTextEdit. It renders `RunState` snapshots and sends commands through `RunController`. It
+ImGuiColorTextEdit. It renders `RunState` snapshots and sends commands through a `RunController`. It
 links `decomp_lib` like the CLI and contains no logic of its own beyond view models. The full
 specification is in [ui.md](ui.md).
 
 ## Key flow: `decomp agent <func>`
 
-1. `project` loads `decomp.json`, verifies the target's SHA-1 and resolves the toolchain by name.
-2. `formats` and `analysis` load the image, PDB and `symbols.txt` into a `SymbolDb`, find the
-   function's bounds and annotate it.
-3. `agent` builds the brief (annotated listing, referenced data, callers and callees, history), opens
-   a run directory under `.decomp/runs/`, and starts a session through `RunController`.
-4. `AgentLoop` sends the first request and streams the response. Stream deltas become events.
-5. For each tool call, `MatchSession` runs the tool. `compile_and_diff` writes the candidate to a
-   fresh build directory, runs the original compiler through `run_process`, extracts the function
-   from the object and diffs it. The attempt is appended to the function's history.
-6. All tool results go back in one message, followed by a status line and any supervisor guidance.
-   The loop repeats until `submit_result`, a budget, a refusal or an error ends it.
-7. On a verified match, `project` writes the source to `src/functions/` and updates `symbols.txt`.
-8. The run summary is written. Throughout, the event log and transcript are appended, and the CLI
-   progress view renders `RunState`.
+1. `project` loads `decomp.json`, and `Program::open()` loads the image and PDB (with a warning when
+   the target's SHA-1 differs); `symbols.txt` is applied and the function is resolved.
+2. The toolchain is resolved by name from the registry, and the agent settings are merged with the
+   command-line overrides. A missing `ANTHROPIC_API_KEY` stops here, unless `--replay` is given.
+3. The CLI creates a run ID and the run directory under `.decomp/runs/`, an `EventBus` with the JSONL
+   log and the progress view, and publishes `run_started`. Ctrl+C (and `--interactive` input) are
+   turned into `LoopControl` commands.
+4. `run_function()` marks the function `in_progress` in `symbols.txt`, builds the tools, the
+   conversation (system prompt and tool definitions) and the brief (annotated listing, referenced
+   symbols, callers, history), and runs the loop.
+5. `run_loop()` sends each request and streams the response; text and thinking deltas become
+   `stream_delta` events.
+6. For each tool call, `MatchSession` runs the tool. `compile_and_diff` writes the candidate to a fresh
+   build directory, runs the original compiler through `run_process` (or takes the result from the
+   cache), extracts the function from the object and diffs it. The attempt is appended to the
+   function's history.
+7. All tool results go back in one message, followed by any supervisor guidance and the status line.
+   The loop repeats until `submit_result`, a budget, a refusal, a stop or an error ends it.
+8. On a verified match, `MatchSession` writes the source to `src/functions/`. When the session ends,
+   `symbols.txt` gets the function's new status, best score, attempts and spend.
+9. The CLI publishes `run_finished` and writes `summary.json`. Throughout, the event log and the
+   transcript are appended, and the progress view renders the `RunState`.
 
 ## Threading model
 
+In the slice, `decomp agent` runs one session, and the loop runs on the CLI's main thread:
+
 | Thread | Runs | Notes |
 |---|---|---|
-| Main | The CLI command, or the GUI render loop | GLFW requires windowing on the main thread. The GUI only reads snapshots and sends commands. |
-| Session workers | One `AgentLoop` each: request building, HTTP streaming, tool execution | One worker in the slice; N in Phase 1. The HTTP call blocks the worker, not the UI. |
-| Thread pool (`core`) | Read-only tools of a turn in parallel, analysis jobs, background recompiles in the GUI | Small and fixed-size. |
-| Event dispatcher | Delivers events in order to the JSONL writer, the `RunState` reducer and the CLI renderer | Subscribers must not block. |
+| Main | The CLI command, including `run_loop()`: request building, HTTP streaming, tool execution | The HTTP call blocks it; Ctrl+C is handled elsewhere. |
+| Tool tasks | Consecutive read-only tool calls of one turn (`disassemble`, `read_memory`, `lookup_symbol`), started with `std::async` | Results are still reported in call order. |
+| Interrupt watcher | Turns Ctrl+C into a stop (first), then an abort (second) | Polls a counter set by the signal handler, which itself exits the process on a third Ctrl+C. |
+| Stdin reader | `--interactive` only: guidance and `:pause`, `:resume`, `:stop`, `:abort` | Detached; blocks on stdin. |
 
-Rules:
+Event subscribers (the JSONL writer, the progress view) run synchronously on whichever thread
+publishes the event.
 
+Rules that hold in the slice:
+
+- **Events are totally ordered.** `publish()` assigns unique, increasing sequence numbers, and
+  `read_event_log()` sorts by them, so the JSONL file is a faithful replay source.
+- **Commands are honored at safe points.** `LoopControl` holds the commands. The loop checks pause,
+  stop and abort before each request, and appends queued guidance to the next user message. Abort also
+  cancels the request in flight: the transports poll a cancellation callback (libcurl about once a
+  second while idle; WinHTTP when the next chunk arrives), and retry waits end early. A running compile
+  is not interrupted; the abort takes effect when the compile ends.
+
+Planned for Phase 1:
+
+- **Session workers.** One loop per worker, N workers, with the GUI render loop on the main thread
+  (GLFW requires windowing there). A small fixed-size thread pool in `core` for read-only tools,
+  analysis jobs and background recompiles.
+- **An event dispatcher.** A dispatcher thread that delivers events in sequence order to the writer,
+  the reducer and the renderers, so that subscribers never run on worker threads.
 - **Compiles are serialized per session and limited globally.** A compile gate (a counting semaphore)
-  bounds concurrent compiler processes across workers. Old compilers are CPU- and disk-heavy, and
+  will bound concurrent compiler processes across workers. Old compilers are CPU- and disk-heavy, and
   `mspdbsrv.exe` contention is real (see [matching.md](matching.md#isolating-parallel-compiles)).
-- **Events are totally ordered.** `publish()` assigns the sequence number under a short lock and
-  enqueues; the dispatcher delivers in sequence order. The JSONL file is therefore a faithful replay
-  source.
 - **The UI never blocks workers.** After applying a batch of events, the reducer publishes an
   immutable snapshot (`std::shared_ptr<const RunState>`, swapped atomically) at most once per frame
-  interval. The GUI loads the latest snapshot at the start of each frame. Large collections are shared
-  between snapshots rather than copied (completed turns and attempts are immutable). The exact
-  structure-sharing scheme is open.
-- **Commands are honored at safe points.** `RunController` queues commands. Workers check them before
-  each request and between tool calls (pause, stop, skip, guidance injection). Abort also trips a
-  cancellation token that the HTTP transport (through its progress callback) and the process runner
-  observe, so in-flight requests and compiles end immediately.
-- **Rate limits are shared (Phase 1).** Workers acquire from a shared limiter fed by the API's
+  interval, and the GUI loads the latest snapshot at the start of each frame. Large collections are
+  shared between snapshots rather than copied; the exact structure-sharing scheme is open.
+- **Abort reaches compiles.** A cancellation token that the process runner observes, so in-flight
+  compiles end immediately.
+- **Rate limits are shared.** Workers acquire from a shared limiter fed by the API's
   `anthropic-ratelimit-*` response headers. A 429 puts every worker into backoff until the
   `retry-after` time.
-- **The prompt cache is warmed once (Phase 1).** All sessions in a run share a byte-identical prefix
-  (tools and system prompt). A cache entry only becomes readable once the first response starts
-  streaming, so the runner starts the first session alone and starts the others after its first
-  streamed token. They then read the prefix from the cache instead of each writing it.
+- **The prompt cache is warmed once.** All sessions in a run share a byte-identical prefix (tools and
+  system prompt). A cache entry only becomes readable once the first response starts streaming, so the
+  runner starts the first session alone and starts the others after its first streamed token. They
+  then read the prefix from the cache instead of each writing it.
 
 ## Error handling conventions
 
 - Fallible functions return `Result<T>` (`std::expected<T, Error>`). `Error` carries an `ErrorCode`
   (`io`, `parse`, `not_found`, `invalid_argument`, `unsupported`, `process`, `timeout`, `network`,
   `api`, `cancelled`, `internal`) and a message. `with_context()` prefixes context while the error
-  propagates, so users see chains such as `loading GAME.EXE: reading PDB: GUID mismatch`.
+  propagates, so users see chains such as `<path>/decomp.json: unsupported decomp.json version 2`.
 - Errors propagate with `TRY` and `TRY_ASSIGN`:
 
   ```cpp
-  Result<AnnotatedFunction> annotate_at(const Project& p, u64 va) {
-      TRY_ASSIGN(auto image, pe::Image::load(p.target_path()));
-      TRY_ASSIGN(auto fn, analysis::find_bounds(image, p.symbols(), va));
-      return analysis::Annotator(image, p.symbols()).annotate(fn);
+  Result<AnnotatedFunction> annotate_at(const project::Project& p, std::string_view name) {
+      TRY_ASSIGN(auto program, p.open_program());
+      auto va = program.resolve(name);
+      if (!va) return make_error(ErrorCode::not_found, "unknown function '{}'", name);
+      return annotate_function(program, *va);
   }
   ```
 
@@ -341,12 +395,15 @@ Rules:
 - A process that cannot start is an error. A non-zero exit code or a timeout is data in
   `ProcessResult`, because a failing compile is a normal outcome.
 - In the agent, a tool failure becomes a `tool_result` with `is_error: true` so the model can recover.
-  Infrastructure failures (non-retryable API errors, I/O errors, an exhausted retry budget) end the
-  session with outcome `error`. User stops and aborts end it with `ErrorCode::cancelled`.
-- Errors are logged once, where they are handled, not where they are created. Log lines also reach
-  the event bus through a `log` sink, so the UI's Logs view and the event log see them.
-- The CLI prints `Error::describe()` and exits with a non-zero status. The exact exit-code scheme is
-  open.
+  Infrastructure failures (non-retryable API errors, an exhausted retry budget, an exhausted replay
+  script) end the session with outcome `error`. User stops and aborts end it with `stopped` and
+  `aborted`.
+- Errors are logged once, where they are handled, not where they are created. Log lines go to stderr
+  (and optionally a file); feeding them into the event bus as `log` events, so that a Logs view sees
+  them, is planned.
+- The CLI prints `error: <message>` and exits with 1. `decomp diff` uses 2 for "differs" and 3 for a
+  failed compile, and `decomp agent` uses 2 for "not matched" and 3 for "refused"; argument errors
+  are reported by CLI11 with its own exit codes.
 
 ## Build system and dependencies
 
@@ -394,16 +451,16 @@ dropping libcurl.
 ## Platform notes
 
 - **Windows** is the primary platform. Old MSVC toolchains run natively, the process runner uses
-  `CreateProcessW` with a job object (the compiler's whole process tree is killed on timeout or
-  abort) and MSVCRT-compatible argument quoting, and the HTTP transport is WinHTTP. Paths are
-  converted between UTF-8 and UTF-16 at the API boundary.
-- **Linux** is supported for development and CI. The process runner uses fork/exec with poll, and
-  the HTTP transport is libcurl. clang-cl and lld-link run natively, which is how the test fixtures
-  are built. MSVC on Linux through Wine, using the toolchain `wrapper` field, comes after the slice
-  ([matching.md](matching.md#environment-and-wrappers)).
+  `CreateProcessW` with a job object (the compiler's whole process tree is killed on timeout) and
+  MSVCRT-compatible argument quoting, and the HTTP transport is WinHTTP. Paths are converted between
+  UTF-8 and UTF-16 at the API boundary.
+- **Linux** is supported for development and CI. The process runner uses fork/exec with poll and kills
+  the child's process group on timeout, and the HTTP transport is libcurl. clang-cl and lld-link run
+  natively, which is how the test fixtures are built. MSVC on Linux through Wine, using the toolchain
+  `wrapper` field, is planned ([matching.md](matching.md#environment-and-wrappers)).
 - **macOS** may build (premake links libcurl there) but is not tested.
 - **C++23 baseline:** MSVC 19.40+ (VS 2022 17.10+), GCC 14+, Clang 19+. Decomp uses `std::expected`,
-  `std::print`/`std::format`, `std::span`, ranges, `std::byteswap` and `std::to_underlying`. It avoids
+  `std::print`/`std::format`, `std::span`, ranges and `std::byteswap`. It avoids
   modules, `std::flat_map`, `std::generator`, `std::stacktrace` and `std::mdspan`, whose support is
   uneven across these compilers.
 - **Text:** internal strings are UTF-8, and sources compile with `/utf-8` on MSVC. Files Decomp

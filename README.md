@@ -8,9 +8,12 @@ decompilation yields source that is mechanically proven equivalent to the origin
 what preservation, porting and research projects need. Doing it by hand is slow, and most of the time
 goes into that same edit-compile-compare loop, which Decomp automates while a person supervises.
 
-> **Status: early.** The first working slice is in progress. The repository currently contains the
-> build scaffold, the third-party dependencies and the `core` module. The commands in the quickstart
-> are the planned interface and are being implemented. See [docs/roadmap.md](docs/roadmap.md).
+> **Status: the first working slice is implemented.** The `decomp` command loads PE targets and their
+> PDBs, annotates disassembly, compiles candidates with the original toolchain, diffs them with
+> relocation awareness, and runs the built-in agent on one function at a time, with transcripts, event
+> logs and a live progress view. Linux CI is green; the Windows MSVC round trip in CI is being brought
+> up. The desktop GUI and the multi-function batch runner are Phase 1. See
+> [docs/roadmap.md](docs/roadmap.md).
 
 ## Key ideas
 
@@ -24,9 +27,10 @@ goes into that same edit-compile-compare loop, which Decomp automates while a pe
   no external agent framework. Each function gets one conversation with tools for compiling, diffing
   and reading the binary, plus budgets, retries, transcripts and cost accounting.
   See [docs/agent.md](docs/agent.md).
-- **Supervision.** Every request, thinking summary, tool call, compile, diff, file write and dollar is
-  recorded as an event. Live and past runs use the same views, and the user can pause, stop, steer,
-  approve or take over at any time. The CLI has a live progress view; the desktop GUI arrives in Phase 1.
+- **Supervision.** Every request, response, tool call, compile, diff, file write and dollar is recorded
+  in the run's event log and the session's transcript. The CLI shows a live progress view, and the
+  user can steer, pause, stop or abort a session (`--interactive`, Ctrl+C). The desktop GUI, with the
+  same views for live and past runs, approvals and manual take-over, arrives in Phase 1.
   See [docs/ui.md](docs/ui.md).
 - **No external applications.** Decomp does not depend on disassembler suites, build systems or
   scripting runtimes. Its libraries are vendored and built from source. The one external program is
@@ -57,8 +61,8 @@ Requirements: Visual Studio 2022 **17.10 or newer** (MSVC 19.40+) with the C++ d
 premake5 vs2022
 ```
 
-Open `build\Decomp.sln`, select `Release|x64` and build. From a Developer Command Prompt you can build
-without the IDE:
+Use `premake5 vs2026` for Visual Studio 2026. Open `build\Decomp.sln`, select `Release|x64` and build.
+From a Developer Command Prompt you can build without the IDE:
 
 ```bat
 msbuild build\Decomp.sln /m /p:Configuration=Release /p:Platform=x64
@@ -76,9 +80,10 @@ premake5 gmake
 make -C build config=release_x64 CC=gcc-14 CXX=g++-14 -j"$(nproc)"
 ```
 
-Use `config=debug_x64` for a debug build, or `CC=clang-19 CXX=clang++-19` for Clang. In premake
-beta8 the generator is called `gmake`; earlier betas called it `gmake2`. If no premake binary is
-available for your distribution, build it from source:
+Use `config=debug_x64` for a debug build, or `CC=clang-19 CXX=clang++-19` for Clang. Run
+`premake5 gmake` again after adding source files. In premake beta8 the generator is called `gmake`;
+earlier betas called it `gmake2`. If no premake binary is available for your distribution, build it
+from source:
 
 ```sh
 git clone --depth 1 --branch v5.0.0-beta8 https://github.com/premake/premake-core.git
@@ -94,62 +99,80 @@ bin/Release/decomp_tests                          # Windows: bin\Release\decomp_
 bin/Release/decomp_tests -tc="*quoting*"          # run matching test cases only
 ```
 
-Tests use committed fixtures under `tests/fixtures/` and need no compiler. Integration tests that need
-a real toolchain (such as the clang-cl round trip) are skipped when that toolchain is not installed.
+Most tests use committed fixtures under `tests/fixtures/` and need no compiler. Tests that compile
+real code (the clang-cl round trip and the agent tests that compile candidates) need clang-cl and
+lld-link (LLVM 18 is what CI installs) and are skipped when they are not installed. On Windows,
+`tests/integration/msvc_roundtrip.ps1 -Arch x86` (or `x64`), run from a Developer PowerShell after a
+Release build, builds the fixture program with the real `cl.exe` and `link.exe` and checks that every
+function diffs byte-exact.
 
-## Quickstart (planned CLI)
+## Quickstart
 
 ```sh
 # Inspect any binary; no project needed
 decomp info path/to/GAME.EXE
+decomp funcs path/to/GAME.EXE
 
-# Create a project in the current directory. This writes decomp.json and imports symbols
-# (PDB, exports, imports) into symbols.txt. Then set "toolchain" and "flags" in decomp.json.
-mkdir game && cd game
-decomp init ../GAME.EXE
-
-# Check the original compiler (registry format: docs/project-format.md)
+# Register the original compiler (registry format: docs/project-format.md).
+# An installed clang-cl is detected automatically as clang-cl-x86 and clang-cl-x64.
+decomp toolchain add vc6 --kind msvc --compiler 'C:\VS6\VC98\Bin\CL.EXE' \
+    --env 'INCLUDE=C:\VS6\VC98\Include' --env-prepend 'PATH=C:\VS6\Common\MSDev98\Bin;C:\VS6\VC98\Bin'
 decomp toolchain list
 decomp toolchain test vc6
 
+# Create a project in the current directory: decomp.json (target, toolchain, flags) and
+# symbols.txt (symbols from the PDB, exports and imports)
+mkdir game && cd game
+decomp init ../path/to/GAME.EXE --toolchain vc6 --flag /O2 --flag /Gy
+
 # Explore the target
-decomp funcs                                      # functions with size and status
+decomp funcs                                      # functions with address, size and symbol source
 decomp disasm sum_array                           # annotated disassembly of one function
 
 # Compile a candidate with the original toolchain and diff it against the target
-decomp diff sum_array --source sum_array.cpp
+decomp diff sum_array --source sum_array.cpp      # exit code 0 = byte-exact, 2 = differs, 3 = compile failed
 decomp diff sum_array --obj sum_array.obj         # diff an object compiled elsewhere
 
 # Let the agent match a function (needs ANTHROPIC_API_KEY, see below)
-decomp agent sum_array --progress
+decomp agent sum_array
 
-# Overall progress: bytes and functions matched, status buckets, spend
+# Overall progress: functions and code bytes matched, status buckets, spend
 decomp status
 ```
 
-Commands find the project by searching upward from the current directory for `decomp.json`, or take
-`--project <dir>`. Every command accepts `--json` for machine-readable output.
+Commands find the project by searching upward from the current directory for `decomp.json`. Global
+options go before the command name: `-C <dir>` (`--project <dir>`) starts the search in another
+directory, `--json` makes most commands print JSON (`decomp --json status`), and `-v` or `-q` change
+the log level. `decomp <command> --help` lists every option.
 
-To see the agent loop without an API key, replay a recorded session:
+To see the agent loop without an API key, replay a scripted session. The model's side is scripted,
+but the compiles are real, so this needs clang-cl. From the repository root:
 
 ```sh
-decomp agent <func> --replay tests/replay/match_add.jsonl --progress
+decomp init tests/fixtures/x86/basic.exe --dir /tmp/basic --toolchain clang-cl-x86 \
+    --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+decomp -C /tmp/basic agent add --replay tests/replay/agent_match_add.jsonl
+decomp -C /tmp/basic status
 ```
+
+The session ends `matched`, the verified source is in `/tmp/basic/src/functions/add_401060.cpp`, and
+the run's event log, transcript and summary are under `/tmp/basic/.decomp/runs/`.
 
 ## The agent and your API key
 
-`decomp agent` sends requests to the Claude API (`https://api.anthropic.com/v1/messages`) and reads the
-key from the `ANTHROPIC_API_KEY` environment variable:
+`decomp agent` sends requests to the Claude API (`https://api.anthropic.com/v1/messages`, or the base
+URL in `ANTHROPIC_BASE_URL`) and reads the key from the `ANTHROPIC_API_KEY` environment variable:
 
 ```sh
 export ANTHROPIC_API_KEY=<your key>               # PowerShell: $env:ANTHROPIC_API_KEY = "<your key>"
 ```
 
-The key stays in memory. It is never written to project files, transcripts, event logs or log files,
-and the UI only shows whether a key is present. Every other command works without a key, and
-`--replay` runs the agent offline. The default model is `claude-opus-5-5`, and budgets cap spend per
-function and per run. What is sent, what it costs and how to change the defaults is described in
-[docs/agent.md](docs/agent.md).
+Without a key, `decomp agent` stops with an error. The key stays in memory: it is only sent in the
+request header, and it is never written to project files, transcripts, event logs or log files. Every
+other command works without a key, and `--replay` runs the agent offline. The default model is
+`claude-opus-5-5`; per-function budgets cap turns, spend, tokens and time, and Ctrl+C stops a session
+after the current turn (twice: aborts). What is sent, what it costs and how to change the defaults is
+described in [docs/agent.md](docs/agent.md).
 
 ## Documentation
 
@@ -158,7 +181,7 @@ function and per run. What is sent, what it costs and how to change the defaults
 | [docs/architecture.md](docs/architecture.md) | Goals, pipeline, modules, data flow, threading, errors, build, platforms |
 | [docs/matching.md](docs/matching.md) | What "matched" means, the relocation-aware diff, MSVC specifics, driving compilers |
 | [docs/agent.md](docs/agent.md) | The built-in agent: API usage, tools, loop, budgets, refusals and fallbacks, cost |
-| [docs/ui.md](docs/ui.md) | The supervision UI, view by view, and its event-driven architecture |
+| [docs/ui.md](docs/ui.md) | The supervision UI (Phase 1), view by view, its event-driven architecture, and CLI parity |
 | [docs/project-format.md](docs/project-format.md) | Project files, symbol file, history, toolchain registry |
 | [docs/roadmap.md](docs/roadmap.md) | First slice checklist, Phases 1-7 with exit criteria, risks |
 
@@ -167,9 +190,15 @@ function and per run. What is sent, what it costs and how to change the defaults
 ```
 premake5.lua, premake/   build scripts (third-party projects in premake/deps.lua)
 src/core/                errors (Result, TRY), logging, files, bytes, SHA-1, processes, JSON
-src/formats/ arch/x86/ analysis/ matching/ events/ agent/ project/   (first slice, in progress)
+src/formats/             PE, COFF and PDB readers
+src/arch/x86/            x86 and x64 decoding over Zydis
+src/analysis/            symbols, bounds, CFG, annotation, demangling
+src/matching/            toolchains, compile driver and cache, the diff
+src/events/              events, event bus, RunState, progress view
+src/agent/               the built-in agent: transports, client, conversation, tools, loop
+src/project/             decomp.json, symbols.txt, history
 src/cli/                 the decomp command
-src/gui/                 decomp-gui (Phase 1)
+src/gui/                 decomp-gui (Phase 1; not present yet)
 tests/                   unit, integration, fixtures, replay
 external/                third-party code
 docs/                    design documentation

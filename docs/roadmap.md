@@ -19,47 +19,55 @@ repository at the time of writing; tick the others as they land.
   Builds with g++-14 through `premake5 gmake`.
 - [x] **2. core.** Error and `Result`, logging, file system helpers, `ByteReader`, SHA-1, processes,
   JSON helpers. Tests cover process exit codes, output capture and timeouts, and Windows argument
-  quoting as a pure function on all platforms. The Windows process implementation is written; it is
-  verified once CI exists (step 13).
-- [ ] **3. Fixtures.**
+  quoting as a pure function on all platforms. The Windows process implementation has its own tests,
+  which run in the Windows CI job (step 13).
+- [x] **3. Fixtures.**
   - `tests/fixtures/src/basic.cpp` covers arithmetic, a loop, a switch with a real jump table (the
     cases need different side effects, or the compiler emits a lookup table instead), globals, a
-    string literal, a float constant, calls and a `thiscall` method.
-  - `build_fixtures.sh` builds it with clang-cl and lld-link: `/O2 /Gy /GS- /GR- /Z7 /Brepro`, linked
-    with `/nodefaultlib /entry:entry /subsystem:console /debug`. The source defines
-    `extern "C" int _fltused = 0;`.
-  - Committed for x86 and x64: `basic.exe`, `basic.pdb`, and precompiled candidate objects (exact
-    copies and deliberate mutations), so unit tests need no compiler.
-- [ ] **4. formats.** PE, COFF and PDB readers. Tests compare against expected values that were
-  captured once with llvm-readobj and llvm-pdbutil when the fixtures were built, and stored as JSON.
-- [ ] **5. arch/x86.** The Zydis decoder and the symbolizing formatter. Tests decode known byte
+    string literal, float constants, calls, an import, an export and a `thiscall` method;
+    `src/other.cpp` is a second translation unit. `candidates/mutated.cpp` changes one thing per
+    function.
+  - `build_fixtures.sh` builds them with clang-cl and lld-link: `/O2 /Gy /GS- /GR- /EHs-c- /Zl /Z7
+    /Brepro`, linked with `/nodefaultlib /entry:entry /subsystem:console /debug /Brepro`. The source
+    defines `extern "C" int _fltused = 0;`.
+  - Committed for x86 and x64: `basic.exe`, `basic.pdb`, `basic_fixed.exe` (linked `/FIXED`, without
+    base relocations), the objects `basic.obj` and `other.obj` (exact candidates) and `mutated.obj`,
+    and an import library for `kernel32`, so unit tests need no compiler.
+- [x] **4. formats.** PE, COFF and PDB readers. Tests check the fixtures' headers, sections, imports,
+  exports, base relocations, Rich header, `.pdata`, PDB records, and COFF sections, symbols and
+  relocations against expected values written into the tests.
+- [x] **5. arch/x86.** The Zydis decoder and the symbolizing formatter. Tests decode known byte
   sequences for x86 and x64 and check text, flow and fields.
-- [ ] **6. analysis.** Demangling, `SymbolDb` import (PDB, exports, imports), bounds, CFG and the
-  annotator. CLI: `info`, `funcs`, `disasm`.
-- [ ] **7. matching (diff).** `ObjFunction`, `TargetFunction`, `Normalizer`, `Differ`, scoring and
-  reports. Tests: exact candidates are `exact` and `byte_exact`; each mutation (operand, opcode,
-  reorder, encoding-only, wrong symbol) produces the expected row kinds and hints. CLI: `diff --obj`.
-- [ ] **8. matching (toolchains).** Registry, compile driver and cache, diagnostics parsers. CLI:
-  `diff --source`, `toolchain list` and `toolchain test`. An integration round trip compiles the
-  fixture source with clang-cl, matches every function and requires `byte_exact`. It is skipped when
-  the toolchain is missing.
-- [ ] **9. project.** `decomp init <binary>` (writes `decomp.json`, imports symbols into
-  `symbols.txt`); commands resolve the project from the current directory or `--project`; function
-  status and history; `decomp status` (progress by bytes and functions, status buckets, spend from run
-  summaries).
-- [ ] **10. Events backbone.** Event types, `EventBus`, the `RunState` reducer, the JSONL event log,
-  and the CLI live `--progress` renderer (ANSI, or plain lines when not a TTY). Tests: the reducer
-  folds synthetic event sequences into the expected state, and log, then replay, gives an identical
-  state.
-- [ ] **11. agent.**
+- [x] **6. analysis.** Demangling, `SymbolDb` import (PDB, exports, imports, x64 `.pdata`), bounds,
+  jump tables, linker thunks, cross-references, CFG and the annotator. CLI: `info`, `funcs`, `disasm`.
+- [x] **7. matching (diff).** The target and candidate sides, `diff_sides` (alignment, row kinds,
+  scoring, verdicts, hints, bindings) and the text and JSON reports. Tests: every fixture function is
+  `exact` and `byte_exact` against its own object; each mutation (immediate, opcode, wrong global,
+  extra instructions, string literal, float constant) produces the expected row kinds and hints;
+  unnamed target addresses produce bindings. CLI: `diff --obj`, with `--all`.
+- [x] **8. matching (toolchains).** Registry with auto-detected clang-cl, compile driver and cache,
+  diagnostics parsers. CLI: `diff --source`, `toolchain list`, `toolchain test` and `toolchain add`.
+  An integration round trip builds the fixture program with the installed clang-cl and lld-link,
+  compiles the fixture sources again, matches every function and requires `byte_exact`. It is skipped
+  when LLVM is missing.
+- [x] **9. project.** `decomp init <binary>` (writes `decomp.json`, imports symbols into
+  `symbols.txt`); commands resolve the project from the current directory or `-C/--project`; function
+  status and history; `decomp status` (progress by bytes and functions, status buckets, spend from
+  `symbols.txt`).
+- [x] **10. Events backbone.** Event types, `EventBus`, the `RunState` reducer, the JSONL event log,
+  and the CLI live progress view (ANSI, or plain lines when not a TTY). Tests: the reducer folds
+  synthetic event sequences into the expected state, and log, then replay, gives the same state (the
+  log omits stream deltas).
+- [x] **11. agent.**
   - Transports and the SSE parser, tested on recorded streams with thinking, signatures, partial tool
     JSON and error events.
   - Client retries, tested on replayed 429 and 529 responses.
   - The append-only `Conversation`. A test asserts that every request extends the previous one
     byte-for-byte and that system and tools never change.
   - Tool registry and validator, match tools, the loop (which emits events), the single-session
-    `RunController`, transcripts.
-  - CLI: `agent <func> [--replay <file>] [--progress]`. Verified sources and history are written to
+    `LoopControl`, the runner and transcripts.
+  - CLI: `agent <func> [--replay <file>]`, with the live progress view, `--interactive`,
+    `--guidance`, budget overrides and Ctrl+C handling. Verified sources and history are written to
     the project.
   - Scripted replays:
     - wrong source, diff, corrected source, `submit_result`, then `matched`;
@@ -67,23 +75,27 @@ repository at the time of writing; tick the others as they land.
     - budget exhaustion;
     - supervisor guidance injected mid-run keeps the history append-only.
 - [x] **12. Docs.** `README.md`, `docs/architecture.md`, `docs/matching.md`, `docs/agent.md`,
-  `docs/ui.md`, `docs/project-format.md` and `docs/roadmap.md` (this set).
-- [ ] **13. CI.** `.github/workflows/ci.yml` on ubuntu (g++-14) and windows-latest (VS 2022,
-  `premake5 vs2022`, msbuild) builds and runs the unit tests. Windows also runs the round-trip test
-  with the real `cl.exe`. Iterate until green.
+  `docs/ui.md`, `docs/project-format.md` and `docs/roadmap.md` (this set), reconciled with the
+  implementation.
+- [ ] **13. CI.** `.github/workflows/ci.yml` on ubuntu (g++-14) and windows-latest (Visual Studio 2022
+  or 2026 through `premake5 vs2022` or `vs2026`, msbuild) builds and runs the unit tests. Linux also
+  runs a CLI smoke test that includes a scripted agent run. Windows also runs the MSVC round trip
+  (`tests/integration/msvc_roundtrip.ps1`, x86 and x64) with the real `cl.exe`, including a scripted
+  agent run. Status: Linux green; Windows MSVC round trip being brought up.
 
 **Slice exit criteria**
 
 - On Linux, the build with g++-14 succeeds and `bin/Release/decomp_tests` passes, including the
-  clang-cl integration test.
+  clang-cl integration tests.
 - CLI smoke tests pass:
   - `decomp info tests/fixtures/x86/basic.exe` works;
-  - `decomp disasm ... sum_array` works;
-  - `decomp diff ... --source <exact.cpp>` reports 100% and `byte_exact`, and a mutated source
-    produces classified rows;
-  - `decomp agent ... --replay tests/replay/match_add.jsonl --progress` shows the live view, ends
-    `matched` and writes the source to the project, and the run's `events.jsonl` replays into the same
-    `RunState`.
+  - `decomp disasm sum_array tests/fixtures/x86/basic.exe` works;
+  - `decomp diff --binary tests/fixtures/x86/basic.exe --obj tests/fixtures/x86/basic.obj --all`
+    reports every function byte-exact, `decomp diff ... --source <exact.cpp>` reports 100% and
+    `byte_exact`, and a mutated candidate produces classified rows;
+  - in a project for `tests/fixtures/x86/basic.exe`, `decomp agent add --replay
+    tests/replay/agent_match_add.jsonl` shows the live view, ends `matched` and writes the source to
+    the project, and the run's `events.jsonl` replays into the same `RunState`.
 - CI is green on ubuntu and windows, including the Windows round trip with the real `cl.exe`.
 - Live (by the user, on Windows, with `ANTHROPIC_API_KEY`): `decomp agent <func>` on a fixture
   function matches within budget, and the transcript shows `cache_read_input_tokens > 0` from the
@@ -130,11 +142,16 @@ repository at the time of writing; tick the others as they land.
 **Scope**
 
 - MSVC `.map` import.
-- x64 `.pdata` bounds.
-- A compiler table that maps Rich header entries to compiler versions and toolchain suggestions.
-- A cross-reference index.
-- MSVC in-`.text` jump tables, including two-level tables.
-- Resolution of incremental-linking and import thunks.
+- x64 `.pdata` bounds: merging chained unwind entries. (The slice already turns `.pdata` entries
+  without symbols into functions.)
+- A compiler table that maps Rich header entries to compiler versions and toolchain suggestions. (The
+  slice describes the VC6 to Visual Studio 2005 product IDs.)
+- A full cross-reference index. (The slice scans functions with known sizes for callers and data
+  references.)
+- MSVC in-`.text` jump tables for PDB-less targets, including two-level tables. (The slice reads
+  single-level tables.)
+- The `dllimport` hint for import calls. (The slice already follows incremental-linking and import
+  thunks.)
 - MSVC RTTI and vtables mapped to class names.
 - COFF `.lib` reading, plus CRT and library signature matching that marks functions as `library`.
 
@@ -239,9 +256,9 @@ repository at the time of writing; tick the others as they land.
 **Scope**
 
 - End-to-end support for ELF64 built by GCC or Clang: an ELF `BinaryImage`, symbols from `.symtab`,
-  bounds from `.eh_frame`, ELF relocations in the diff, and the `gcc`/`clang` toolchain kinds with
-  their diagnostics.
-- Other ISAs through additional `arch::Decoder` implementations.
+  bounds from `.eh_frame`, ELF relocations in the diff, and ELF objects from the `gcc`/`clang`
+  toolchain kinds (whose command lines and diagnostics the slice already handles).
+- Other ISAs through an ISA-neutral decoder interface and additional decoders.
 
 **Exit criteria**
 
@@ -254,16 +271,16 @@ repository at the time of writing; tick the others as they land.
 
 | Risk | Mitigation |
 |---|---|
-| Old MSVC environments (VC6 needs `PATH` including `MSDev98\Bin`, plus `INCLUDE` and `LIB`) | Toolchain `env` and `decomp toolchain test`. On Linux, a `wrapper` (Wine) later. |
+| Old MSVC environments (VC6 needs `PATH` including `MSDev98\Bin`, plus `INCLUDE` and `LIB`) | Toolchain `env` and `env_prepend`, and `decomp toolchain test`. On Linux, a `wrapper` (Wine) later. |
 | Non-code nondeterminism (timestamps in object headers) | Compare code and data only; `/Brepro` in the fixtures |
-| Stripped relocations | Heuristic address detection is marked as such, and mismatches are flagged only where the candidate has a relocation at that field |
+| Stripped relocations | Heuristic address detection (in-image values of 4 bytes or more). Comparing such fields as plain values where the candidate has no relocation is planned. |
 | Jump tables inside `.text` (MSVC x86) | Treated as data by bounds and disassembly, and compared as index lists |
-| LLM cost and refusals | Budgets, configurable effort, cache verification, fallbacks on by default. Refused functions are marked and skipped, never worked around. |
+| LLM cost and refusals | Budgets, configurable effort, cache reads recorded per turn, fallbacks on by default. Refused functions are marked and never worked around; skipping them in batch runs comes with Phase 1. |
 | Append-only violations causing 400s | Enforced by `Conversation` and tested |
 | Agent safety | Candidate code is compiled, never run, and writes are confined to project paths |
-| No API key, Windows machine or display in the development container | Replay-driven tests; Windows verified by CI; the GUI tested through the reducer and a headless smoke test; live runs done by the user |
-| Targets built with link-time code generation (`/GL`) | Detected from the Rich header and reported; out of scope for per-function matching |
+| No API key, Windows machine or display in the development container | Replay-driven tests; Windows verified by CI; the GUI tested through the reducer and a headless smoke test (Phase 1); live runs done by the user |
+| Targets built with link-time code generation (`/GL`) | Visible in the Rich header (`decomp info`); a warning is planned. Out of scope for per-function matching. |
 | VC6-era PDB 2.0 files, which raw_pdb does not read | Fall back to exports, map files (Phase 2), user symbols and analysis |
-| API and model changes | API code isolated in `anthropic::Client` with a model capability table; replay tests pin the protocol; prices are configurable |
+| API and model changes | API code isolated in `agent::Client` and `Conversation`; replay tests pin the protocol. A model capability table and configurable prices are planned (prices live in `agent/cost.cpp`). |
 | Code sent to a third-party API | `docs/agent.md` documents exactly what is sent. Only `decomp agent` sends anything, and only when started explicitly. |
-| Toolchain drift between machines | The version banner is recorded by the health check, included in the cache key, and shown with every verification |
+| Toolchain drift between machines | Planned: the health check records the compiler's version banner, which is added to the cache key and shown with every verification. Today the cache key covers the toolchain's definition. |

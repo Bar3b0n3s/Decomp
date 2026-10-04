@@ -9,18 +9,19 @@ turns both sides into canonical instructions whose address operands are symbolic
 classifies every difference. It then reports a match percentage, an `exact` flag and a `byte_exact`
 flag, plus targeted hints for the agent. A function is **matched** only when it is `byte_exact`. This
 document defines the verdicts, describes the algorithm, lists the MSVC-specific cases, and covers how
-Decomp drives compilers deterministically.
+Decomp drives compilers.
 
-Status: designed for the first slice (steps 7-8 in the [roadmap](roadmap.md#first-working-slice)), with
-the extensions noted per section. Field names in examples are illustrative until the code lands.
+Status: implemented in the first slice (steps 7-8 in the [roadmap](roadmap.md#first-working-slice)).
+The code is in `src/matching/` (`diff.cpp`, `match.cpp`, `toolchain.cpp`) and `src/analysis/`.
+Extensions are marked per section as planned, with their phase where one is set.
 
 ## What "matching" means
 
 | Verdict | Definition | Used for |
 |---|---|---|
-| `match_percent` | 0-100 score computed from weighted row differences | Progress, ranking attempts, choosing the best attempt |
-| `exact` | Every row is `equal` after canonicalization, referenced data compares equal (strings, floats, jump tables), and every symbol binding is consistent | An intermediate signal |
-| `byte_exact` | `exact`, and every byte is equal once each relocated field (already proven symbolically equivalent) is replaced with the target's bytes | The only verdict that marks a function `matched` |
+| `match_percent` | 0-100 score: a credit per aligned row ([below](#6-verdicts-and-score)) over the length of the longer listing. Exactly 100.0 only when `byte_exact`, otherwise at most 99.9. | Progress, ranking attempts, choosing the best attempt |
+| `exact` | Every instruction pairs with one that has the same mnemonic and operands after canonicalization, and every address operand refers to the same thing: the same symbol, label, string or constant, or a jump table with the same targets | An intermediate signal |
+| `byte_exact` | `exact`, and every pair of instructions has the same length and identical bytes outside the fields that hold an address operand (those are already proven equivalent symbolically) | The only verdict that marks a function `matched` |
 
 Both flags exist because each hides something the other shows. Canonical text hides encoding choices:
 `83 C0 01` and `05 01 00 00 00` both read `add eax, 1`, yet a different compiler version or flag
@@ -29,8 +30,8 @@ zeros or addends while the target's hold final addresses. `byte_exact` combines 
 comparison proves the relocated fields equivalent, and the remaining bytes must be identical.
 
 **What is compared:** the function's code bytes on both sides, the instructions they decode to, and,
-by content, the data the function references directly: string literals, floating-point constants and
-jump tables. Named globals and functions are compared by name.
+by content, the data the function references directly: string literals, floating-point and SSE
+constants, and jump tables. Named globals and functions are compared by name.
 
 **What is not compared** (in the slice): object-file metadata (timestamps, symbol order, debug
 sections, `.drectve`); the function's address and its alignment padding; the contents of referenced
@@ -39,255 +40,278 @@ relinking come in Phase 5.
 
 ## Inputs
 
-- **`TargetFunction`**: the byte range `[start, end)` from the image, as determined by `find_bounds()`
-  ([architecture.md](architecture.md#analysis)), together with its decoded instructions, its
-  address-bearing fields with resolved targets, the jump tables it uses, and the `SymbolDb` for
-  naming.
-- **`ObjFunction`**: the candidate function's bytes and instructions from the compiled object,
-  together with the COFF relocations inside its range (offset, type, symbol name, embedded addend)
-  and the object's own data sections, which hold string literals, constants and jump tables.
+Both sides become a `Side`: the function's name, address and size, and its instructions, each with a
+`Ref` for every address-bearing field and a canonical text.
+
+- **Target** (`build_target_side`): the byte range `[start, end)` from `Program::function_extent()`
+  ([architecture.md](architecture.md#analysis)): the symbol's size when known, otherwise recursive
+  descent. Jump tables inside the range are excluded from decoding. The `SymbolDb` names addresses.
+- **Candidate** (`build_candidate_side`): the function's bytes and instructions from its section in the
+  compiled COFF object, the relocations inside its range (offset, type, symbol), and the object's other
+  sections, which hold string literals, constants and jump tables.
+
+`diff_function()` builds both sides and compares them with `diff_sides()`; `compile_and_diff()` compiles
+a source first ([Driving compilers](#driving-compilers)).
 
 ## The relocation-aware symbolic diff
 
 ### 1. Target side
 
-The function's bytes come from the image. The **address-bearing fields** (the displacement,
-immediate and relative fields reported by the decoder that actually hold an address) come from these
-sources:
+The function's bytes come from the image. The decoder reports every displacement, immediate and
+relative field of an instruction; these fields count as **address operands**:
 
-| Source | Fields | Confidence |
-|---|---|---|
-| Base relocations (`.reloc`: `HIGHLOW` on x86, `DIR64` on x64) | Absolute addresses in immediates and displacements | Certain |
-| Relative branches and calls (`rel8`/`rel32`, Zydis `raw.imm[i].is_relative`) | Destination = end of instruction + displacement | Certain |
-| RIP-relative displacements (x64) | Destination = end of instruction + displacement | Certain |
-| Stripped `.reloc` (common in older EXEs, which were usually linked `/FIXED`) | Immediates and displacements whose value lies inside `[ImageBase, ImageBase + SizeOfImage)` | **Heuristic**, marked as such |
-| Image-relative fields (RVAs, which never get base relocations) | Interpreted only where the candidate has a `DIR32NB`/`ADDR32NB` relocation at the aligned field, or a known pattern applies (x64 jump tables) | Candidate-guided |
+| Source | Fields |
+|---|---|
+| Relative branches and calls (`rel8`/`rel32`) | Always. Destination = end of instruction + displacement. |
+| RIP-relative displacements (x64) | Always. Destination = end of instruction + displacement. |
+| Base relocations (any non-`ABSOLUTE` `.reloc` entry: `HIGHLOW` on x86, `DIR64` on x64) | Displacements and immediates of at least 4 bytes that carry a base relocation |
+| No relocation information (`.reloc` stripped or absent, as in EXEs linked `/FIXED`) | **Heuristic:** displacements and immediates of at least 4 bytes whose value lies inside the image's sections, at or above `ImageBase + 0x1000` |
+| MSVC x64 jump-table loads (`mov r, [base + i*4 + table_rva]` with `base` = `__ImageBase`) | The displacement, read as the table's RVA |
 
-Heuristic fields are only reported as mismatches when the candidate has a relocation at that field. If
-the candidate holds a plain constant with the same bytes, the field is equal. Integers that happen to
-look like addresses are therefore harmless.
+Other fields of fewer than 4 bytes are never address operands. A heuristic field becomes an address
+operand even when the candidate holds a plain constant there, so on images without relocations an
+integer that looks like an address shows up as a difference; comparing such fields as plain values
+when the candidate has no relocation at that field is planned.
 
-Each resolved address is named through the `SymbolDb`, in order:
+Each resolved address becomes a reference (`Ref`), in this order:
 
-1. An address inside the function becomes an internal label (step 3).
-2. An exact symbol, or a containing symbol plus offset (`g_table+8`).
-3. An import slot becomes its `__imp_` name.
-4. A string or float is identified by content, when the candidate's aligned operand is a literal or
-   constant.
-5. Anything else stays `unk_<va>`.
+1. An address where one of the function's jump tables starts becomes that table; any other address
+   inside the function becomes an internal label (step 3).
+2. An address without a symbol that holds a linker thunk is replaced by the thunk's destination: an
+   incremental-linking `jmp rel32` (followed through chains) or an import stub `jmp [IAT slot]`
+   ([thunks](#incremental-linking-and-import-thunks)).
+3. An exact symbol, or a containing symbol plus offset (`g_table+0x8`). A string-literal symbol
+   (`??_C@...`) at offset 0 becomes the string's bytes, and a constant symbol (`__real@`, `__xmm@`,
+   `__ymm@`) at offset 0 becomes the constant's bytes. Any other symbol is compared by name, with its
+   PDB name as an alternative.
+4. Anything else stays unknown, `unk_<hex address>`.
 
 ### 2. Candidate side
 
 The candidate object is parsed with `coff::Object`. Decomp locates the function by the target's
-decorated name, which the candidate must define exactly, together with its section and offset:
+decorated name; if the object does not define it, by any function symbol with an equivalent name (the
+same qualified name, such as a static function's undecorated PDB name `helper` and the candidate's
+mangled name), or by the name given with `decomp diff --symbol`. When nothing fits, the error lists the
+functions the object defines.
 
-- With `/Gy` (function-level linking, implied by `/O1` and `/O2`), each function is a COMDAT section
-  of its own, and the range is the symbol's offset to the section end.
-- Without `/Gy`, functions share `.text`, and the range runs from the symbol to the next function
-  symbol in the section (COFF type `0x20`) or to the section end.
-- In both cases, trailing alignment padding (`int3`/`nop` runs) is trimmed, and a jump table at the
-  end of the range is split off as data (see [jump tables](#jump-tables-inside-text-x86)).
+- The range runs from the symbol to the next defined symbol of its section (labels excepted) or to the
+  section end. With `/Gy` (function-level linking, implied by `/O1` and `/O2`), each function is a
+  COMDAT section of its own, and the range is the rest of that section.
+- A jump table at the end of the range is split off as data: the first relocated reference from an
+  indirect jump into the function's own section, past the jump, marks the end of the code (see
+  [jump tables](#jump-tables-inside-text-x86)).
+- Without `/Gy`, functions share `.text`, and two things do not work yet (planned): the alignment
+  padding before the next function is not trimmed, so it shows as extra `nop` or `int3` rows, and a
+  call to another function of the same section is not recognized as a symbol reference (it falls
+  through to the anonymous-data rules below). Objects built without `/Gy` therefore do not match yet.
 
-Relocations inside the range give the candidate's address-bearing fields. COFF relocations have no
-explicit addend: the field's existing contents are the addend. For example, `mov eax, [g_table+8]` is
-a `DIR32` relocation to `g_table` with 8 stored in the field. Below, P is the address of the field.
+A relocation at the offset of an instruction's field makes that field an address operand. COFF
+relocations have no explicit addend: the field's existing contents are the addend. For example,
+`mov eax, [g_table+8]` is a `DIR32` relocation to `g_table` with 8 stored in the field. The relocation
+type does not matter for instruction fields; the relocation's symbol decides what the operand becomes:
 
-| Machine | Type | Field | Value | Target-side counterpart |
-|---|---|---|---|---|
-| I386 | `DIR32` | 32-bit | VA of symbol + addend | `HIGHLOW` base relocation, or heuristic |
-| I386 | `DIR32NB` | 32-bit | RVA of symbol + addend | None; read as RVA (candidate-guided) |
-| I386 | `REL32` | 32-bit | symbol + addend - (P + 4) | Relative branch or call |
-| I386 | `SECREL` | 32-bit | Offset of symbol in its section (thread-local variables) | Offset into `.tls` |
-| I386 | `SECTION` | 16-bit | Section index of symbol (mostly debug data) | Section of the target address |
-| AMD64 | `ADDR64` | 64-bit | VA of symbol + addend | `DIR64` base relocation |
-| AMD64 | `ADDR32NB` | 32-bit | RVA of symbol + addend | None; read as RVA (candidate-guided) |
-| AMD64 | `REL32` | 32-bit | symbol + addend - (P + 4) | Relative branch, call or RIP-relative operand |
-| AMD64 | `REL32_1` ... `REL32_5` | 32-bit | symbol + addend - (P + 4 + N), where N immediate bytes follow the field | RIP-relative operand of an instruction with a trailing immediate |
+| Relocation symbol | Becomes |
+|---|---|
+| Undefined (external) | That symbol plus the addend |
+| Inside the function's own code | An internal label |
+| In another code section | The named symbol defined at that offset |
+| A string literal (`??_C@...`), named or through its COMDAT's section symbol | The string's bytes |
+| A constant (`__real@`, `__xmm@`, `__ymm@`), named or through its section symbol | The constant's bytes; the size follows from the name (4, 8, 16 or 32 bytes) |
+| Any other named symbol outside the function's section | That symbol plus the addend |
+| Anonymous data: a section symbol, or a label in the function's own section (MSVC's `$LN` table labels) | A jump table when the data holds relocations back into the function; otherwise a string when it holds a NUL-terminated string of at least 2 bytes (such as an older compiler's `$SG` literal in `.data`); otherwise the named symbol at that offset; otherwise `<section>+<offset>` |
 
-`ABSOLUTE` entries are ignored, and AMD64 `SECREL` (thread-local variables) is handled like I386
-`SECREL`. Any other type is reported in the diff header as unsupported, and that field is compared as
-raw bytes.
+Relocation types matter for jump-table entries only: their size, and whether they are PC-relative
+(clang's x64 `REL32` entries, which are adjusted back to the label they point to). Thread-local
+variables (`SECREL`) are not supported yet: the target's field is a plain offset into `.tls`, so such
+an operand shows as a difference (planned).
 
 ### 3. Canonicalization
 
-The `Normalizer` turns each instruction into a mnemonic (with prefixes such as `rep` and `lock`) and a
-list of operand tokens. Registers are tokens. Immediates are values normalized to the operand size.
-Memory operands are tokenized as `size seg:[base + index*scale + disp]`, and when the base is
-`esp`/`ebp` (x86) or `rsp`/`rbp` (x64) the operand is classed as a *stack* operand. Every
-address-bearing operand becomes a **`SymRef` key**:
+Each instruction is rendered in Intel syntax (`x86::render`), and its address operands are replaced by
+their references. For alignment, every address operand is masked to a placeholder, so the key of an
+instruction is its prefix and mnemonic plus these operand templates. References have a kind
+(`RefKind`):
 
-| `SymRef` kind | Example key | Compared by |
-|---|---|---|
-| Named symbol (+ offset) | `?g_table@@3PAHA+8` | Exact decorated name and offset |
-| Import slot | `__imp__MessageBoxA@16` | Name |
-| String literal | `str:"Hello\n"`, `wstr:"Name"` | Bytes up to and including the terminator |
-| Float constant | `f32:0x3f800000`, `f64:0x4008000000000000`, `x128:...` | Exact bit pattern |
-| Internal label | `L12` | Through the alignment (below) |
-| Jump table | `jt[L3,L7,L7,L9]` | Element-wise, through the alignment |
-| Thread-local | `tls:?t_count@@3HA` | Name |
-| Unknown address | `unk_004a3f20` | Binding (below) |
+| Kind | Key | Equal when | Shown as |
+|---|---|---|---|
+| `symbol` | Name and offset | The offsets are equal and the names are equivalent: identical, or with the same qualified name. The target's PDB name also counts. | Qualified name, `g_table+0x8` |
+| `label` | `L<index>`, the destination's position in that side's listing | The two destinations are aligned with each other | `loc_<offset in the function>` |
+| `string` | The bytes up to the terminator | Identical bytes. When the target has no string symbol there, the string at the target address is read and compared. | An escaped C string, first 48 bytes |
+| `float32`, `float64`, `vector` | The constant's bytes | Identical bit patterns, read at the target address when the target has no constant symbol there | `1.5f`, `0.75`, `const:<hex>` |
+| `table` | The targets of every entry, as labels | Same length, and every entry's labels aligned | `switch_table` |
+| `unknown` | `unk_<va>` on the target, `<section>+<offset>` on the candidate | Never | The address in hex |
 
-**Names compare by their exact decorated form.** That form encodes the calling convention and the
-parameter types, so a wrong declaration in the candidate shows up as a symbol mismatch. When two
-names differ but demangle to the same qualified name, the report says so (see the
-[`signature` hint](#7-hints)).
+**Names compare by equivalence, not by exact decorated form.** Two names are equal when they are
+identical or when their qualified names are: `?add@@YAHHH@Z` and `add` are equivalent, and so are
+`__imp__ExitProcess@4` and `__imp_ExitProcess`. That lets static functions and data, whose PDB records
+carry undecorated names, match the candidate's mangled names. It also means that a callee or global
+declared with the wrong parameter types or calling convention still compares equal when its name is
+right, and so does the matched function itself: check its decorated name against the brief. A
+`signature` hint for this case is planned.
 
 **Strings and floats compare by content.** MSVC names string literals by an encoding of their content
 (`??_C@_0...`), and floats by their bit pattern (`__real@...`). Older compilers without string pooling
 emit anonymous `$SG...` symbols. The target only has addresses, possibly pooled or merged by the
 linker. So on the candidate side, Decomp reads the literal or constant from the object's data section.
-On the target side, it reads the same number of bytes at the referenced address (for strings, up to
-the terminator, narrow or wide according to the candidate). The two compare equal when the bytes are
-identical. Floats compare by bits, never numerically, so `-0.0`, `0.0` and NaN payloads stay distinct.
+On the target side, it reads the bytes at the referenced address. The two compare equal when the bytes
+are identical. Floats compare by bits, never numerically, so `-0.0`, `0.0` and NaN payloads stay
+distinct. Strings are read as NUL-terminated byte strings; reading wide (UTF-16) literals as such is
+planned.
 
 **Internal branch targets become instruction indices.** A branch whose destination lies inside the
-function is written `jcc L<index>`, where the index is the destination instruction's position in that
-side's listing. Because an insertion earlier in the function shifts every later index, branch operands
-are not compared textually. After alignment (step 4), a target branch to `Li` and a candidate branch to
-`Lj` are equal exactly when rows `i` and `j` are aligned with each other. A destination that falls
-inside an instruction is flagged.
+function is keyed `L<index>`, where the index is the destination instruction's position in that side's
+listing. Because an insertion earlier in the function shifts every later index, branch operands are
+not compared textually. After alignment (step 4), a target branch to `Li` and a candidate branch to
+`Lj` are equal exactly when rows `i` and `j` are aligned with each other. A destination that is not the
+start of an instruction gets an offset key (`off+<hex>`) instead.
 
-**Jump tables compare as lists of indices.** A table referenced by an indirect jump
-(`jmp [reg*4 + table]`, or the x64 `__ImageBase`-relative form) is decoded on both sides into its
-destinations, mapped to instruction indices, and compared element by element through the alignment.
-Two-level MSVC switches add a byte-sized index table (`movzx reg, byte ptr [reg + index_table]`),
-which compares as raw bytes. Table length is part of the comparison.
+**Jump tables compare as lists of indices.** A table is decoded on both sides into its destinations,
+mapped to instruction indices, and compared element by element through the alignment. Table length is
+part of the comparison. Three table forms are recognized on the target:
 
-**Bindings.** When the target address has no symbol (`unk_<va>`, or a placeholder name created by
-analysis) and the candidate references a named symbol at the aligned position, the pair is a binding,
-for example "candidate uses `?g_player@@3PAVPlayer@@A` where the target uses `0x004A3F20`". Bindings
-are collected over the whole function. They are **consistent** when each candidate symbol always pairs
-with the same address, each address always pairs with the same symbol, and the address does not
-already belong to another named symbol. Consistent bindings count as equal for the verdicts and are
-listed in the report as binding suggestions. Inconsistent bindings make `operand(sym)` rows. When a
-function is accepted as matched, its consistent bindings are recorded in `symbols.txt` with
-`source=agent`. *Policy (proposed, open):* in Phase 1 the approval policy may require the user to
-confirm new bindings before they are written.
+| Form | Dispatch | Entries |
+|---|---|---|
+| x86 (MSVC, clang-cl) | `jmp [reg*4 + table]` | Absolute addresses |
+| clang x64 | `lea base, [rip + table]; movsxd r, [base + i*4]; add r, base; jmp r` | 32-bit offsets from the table |
+| MSVC x64 | `lea base, [rip + __ImageBase]; mov r, [base + i*4 + table_rva]; add r, base; jmp r` | 32-bit RVAs |
+
+Entries are read until one points outside the function or into non-code, or until another symbol
+starts (at most 4096). Two-level MSVC switches add a byte-sized index table
+(`movzx reg, byte ptr [reg + index_table]`); recognizing that table as data is planned (Phase 2).
+
+**Bindings.** When the target address has no symbol (`unknown`) and the candidate references a named
+symbol at the aligned operand, the pair is recorded as a binding, for example "the candidate uses
+`?g_player@@3PAVPlayer@@A` where the target uses `0x004A3F20`". Bindings are listed in the report
+(each pair once) and produce a hint that suggests the name. They do not count as equal: the row stays
+an `operand` difference, so the function cannot be `exact` until the address is named. Adding a line
+for the address to `symbols.txt` ([project-format.md](project-format.md#symbolstxt)) does that. Checking
+that bindings are consistent across the function and recording consistent bindings automatically when a
+function matches are planned. *Policy (proposed, open):* in Phase 1 the approval policy may require the
+user to confirm new bindings before they are written.
 
 ### 4. Alignment
 
-1. **Myers diff on mnemonics.** The two mnemonic sequences are diffed. Runs of equal mnemonics become
-   paired rows; operands may still differ there. Everything else forms replace hunks (deletions from
-   the target, insertions from the candidate).
-2. **Pairing inside replace hunks.** Each hunk is aligned with a small dynamic program (weighted edit
-   distance). The cost of pairing two instructions is the weight of the row kind they would produce
-   (step 5), and a gap costs the insert/delete weight. Hunks are short, so the quadratic cost is
-   negligible. Unpaired instructions become `insert` or `delete` rows.
-3. **Second pass for branch operands.** With the alignment fixed, branch-target and jump-table
-   operands are compared through the alignment map, as described above.
+The two instruction sequences are aligned globally (Needleman-Wunsch) on their keys. Pairing two
+instructions costs 0 when their keys are equal, 1 when only their mnemonics are equal, and 3 otherwise;
+a gap costs 2. For very large functions (more than 25,000,000 cells, n × m) the listings are paired
+by position instead. Paired instructions with different mnemonics become `opcode` rows; unpaired ones
+become `insert` (candidate only) or `delete` (target only) rows. With the alignment fixed, branch
+targets and jump tables are compared through the map from target to candidate instruction indices, as
+described above.
 
 ### 5. Row kinds
 
-| Row kind | Meaning | Default weight |
+| Row kind | Meaning | Credit |
 |---|---|---|
-| `equal` | Same mnemonic and operands after canonicalization | 0 |
-| `operand(stack)` | Only a stack displacement differs | 1 |
-| `operand(reg)` | Only register names differ | 5 |
-| `operand(imm)` | An immediate differs | 10 |
-| `operand(mem)` | A non-stack memory operand differs (base, index, scale or displacement) | 10 |
-| `operand(sym)` | An address operand refers to a different symbol or content, or the binding is inconsistent | 20 |
-| `opcode` | Paired instructions with different mnemonics | 50 |
-| `insert` | Instruction only in the candidate | 100 |
-| `delete` | Instruction only in the target | 100 |
+| `equal` | Same mnemonic and operands after canonicalization, and the same bytes outside address fields | 1.0 |
+| `encoding` | Same text, but a different length or different bytes outside address fields | 0.9 |
+| `operand` | Same mnemonic, at least one operand differs | 0.75 when every differing operand is `register` or `stack`, otherwise 0.5 |
+| `opcode` | Paired instructions with different mnemonics (prefixes included) | 0 |
+| `insert` | Instruction only in the candidate | 0 |
+| `delete` | Instruction only in the target | 0 |
 
-A row with several differing operands takes the sum of their weights, capped at the `opcode` weight.
-The weights follow the spirit of asm-differ's scorer: cheap for differences that usually come from
-local layout or register choice, expensive for structural ones. They are initial values and will be
-tuned against the fixtures.
+An `operand` row lists each differing operand with a category:
+
+| Category | Meaning |
+|---|---|
+| `register` | Both operands are registers, and they differ |
+| `immediate` | Both operands are immediates, and they differ |
+| `stack` | Both are memory operands on `esp`/`ebp` (x86) or `rsp`/`rbp` (x64) with the same base and index, and they differ (usually in the displacement) |
+| `memory` | Any other difference in shape, including a different number of operands |
+| `symbol` | Same shape, but an address operand refers to something else, or a binding was found |
+
+The credits are initial values and will be tuned against the fixtures.
 
 ### 6. Verdicts and score
 
 ```
-match_percent = 100 * max(0, 1 - total_weight / (100 * max(n_target, n_candidate)))
+match_percent = 100 * (sum of row credits) / max(n_target, n_candidate)
 ```
 
-The score is shown floored to one decimal, so `100.0` appears only for `exact` functions.
+The score is capped at 99.9 unless the function is `byte_exact`, so `100.0` appears only for matched
+functions. Text reports show one decimal, and the JSON report rounds to one decimal.
 
-- `exact`: every row is `equal`, all referenced data compares equal, and all bindings are consistent.
-- `byte_exact`: only checked when `exact`. Rows pair one-to-one, so for each pair Decomp copies the
-  target's bytes over every relocated field of the candidate instruction (the field must sit at the
-  same offset with the same size), then requires the instruction bytes and lengths to be identical.
-  Jump tables in the range compare as table data, not as code bytes.
+- `exact`: there are no `opcode`, `operand`, `insert` or `delete` rows (`encoding` rows are allowed),
+  and the listings are not empty.
+- `byte_exact`: `exact`, and there are no `encoding` rows either. For each pair, the bytes of every
+  field that holds an address operand on either side are masked, and the rest must be identical, with
+  equal instruction lengths. Jump tables in the range compare as tables, not as code bytes.
+
+The one-line summary reads, for example,
+`match 57.9% (27/57 equal; 11 operand, 3 opcode, 16 extra, 4 missing) - not matching`. Its verdict is
+`MATCHING (byte-exact)`, `equivalent but bytes differ` (exact only) or `not matching`; `extra` counts
+`insert` rows, `missing` counts `delete` rows, and `encoding` rows appear as `N encoding`.
 
 ### 7. Hints
 
-Hints are short, structured explanations for the agent and the user. They name the rows they refer to.
+Hints are short sentences for the agent and the user. A `byte_exact` function has none. Instructions
+are referred to by their target index (`target #4`).
 
-| Hint | Detected when | Usually means |
-|---|---|---|
-| `regalloc` | All differing rows are `operand(reg)` and the register mapping is a consistent permutation | Declaration order, expression shape or variable types; not compiler flags |
-| `stack_layout` | All differing rows are `operand(stack)` with a consistent offset mapping | Local variable order, sizes or types (an array versus scalars, for example) |
-| `branch_polarity` | A conditional jump pairs with its inverse and the taken and fall-through blocks are swapped | Negate the condition or swap the `if`/`else` bodies |
-| `reorder` | Inserted and deleted instructions form the same multiset within a window | Statement order or evaluation order |
-| `encoding` | `exact` but not `byte_exact` | Compiler version or flags, not the source |
-| `binding` | Consistent bindings exist | Name suggestions for unnamed target addresses |
-| `unresolved` | Inconsistent or conflicting symbol pairings | The candidate references the wrong global or function |
+| Detected when | Hint |
+|---|---|
+| Every differing row is an `operand` row with `register` differences only | "Only register allocation differs. Try reordering declarations or statements, changing variable lifetimes, introducing or removing temporaries, or changing an expression's evaluation order." |
+| Every differing row is an `operand` row with `stack` differences only | "Only stack offsets differ: local variable order, sizes or types differ (MSVC lays out locals by declaration order and size)." |
+| There are `encoding` rows | "N instruction(s) are identical in text but encoded differently (e.g. operand form or immediate size); often a different operand type, signedness, or compiler flag." |
+| An `opcode` row pairs a conditional jump with its inverse (the first one) | "Branch condition inverted at target #i (jle vs jnle): swap the if/else bodies or negate the condition." |
+| Both listings have the same instructions in a different order | "Same instructions in a different order: statement order or the evaluation order of an expression differs." |
+| The instruction counts differ | "Candidate has N more (or fewer) instruction(s) than the target." |
+| A branch target differs | "Branch at target #i lands on code that differs between the versions (around loc_30)." or "... goes to a different place (A vs B): the control flow around it differs." |
+| A target address has no symbol where the candidate has one | "Target #i references 0x403000, which has no symbol; the candidate uses `?g_counter@@3HA` there. If that is the same object, name the address `?g_counter@@3HA`." |
+| Any other address operand differs | "String literal (Constant, Callee or Reference) differs at target #i: target A vs candidate B." |
 
-Additional detectors, planned after the core set: `signature` (names differ but demangle to the same
-qualified name, which points to parameter types or calling convention); `gs_cookie`, `chkstk`,
-`dllimport` and `eh_frame` (see [MSVC specifics](#msvc-specifics)).
+Reference hints stop after about a dozen. Additional detectors are planned: `signature` (names that
+are equivalent but decorated differently, which points to parameter types or the calling convention),
+and `gs_cookie`, `chkstk`, `dllimport` and `eh_frame` (see [MSVC specifics](#msvc-specifics)).
 
 ### 8. Output formats
 
-`Report` renders the same result two ways.
+The report renders the same result two ways (`to_text`, `to_json`). `decomp diff` takes `--compact`
+(only differing rows, with `--context` rows of context around each; default 3), `--bytes`
+(instruction bytes) and the global `--json`, and is colored on a TTY. Reports are capped at 400 rows.
 
-**Text, for humans** (`decomp diff`; colored on a TTY). The example below is a register-allocation-only
-difference in a fixture function:
+**Text, for humans and the agent.** The agent's `compile_and_diff` result uses the compact form with 2
+rows of context and at most 80 rows. Row markers are ` ` equal, `e` encoding, `~` operand, `!` opcode,
+`+` insert and `-` delete; offsets are relative to the function start. The example below compares the
+x86 fixture's `scale` with a deliberately mutated candidate:
 
 ```
-sum_array  ?sum_array@@YAHPBHH@Z  0x00401030  23 bytes
-match 97.0%  exact: no  byte_exact: no   equal 4  operand 6  opcode 0  insert 0  delete 0
-
-  #  off  target                |  off  candidate
-  0  00   mov  ecx, [esp+8]    ~|  00   mov  edx, [esp+8]    reg
-  1  04   xor  eax, eax        =|  04   xor  eax, eax
-  2  06   test ecx, ecx        ~|  06   test edx, edx        reg
-  3  08   jle  L9              =|  08   jle  L9
-  4  0a   mov  edx, [esp+4]    ~|  0a   mov  ecx, [esp+4]    reg
-  5  0e   add  eax, [edx]      ~|  0e   add  eax, [ecx]      reg
-  6  10   add  edx, 4          ~|  10   add  ecx, 4          reg
-  7  13   dec  ecx             ~|  13   dec  edx             reg
-  8  14   jne  L5              =|  14   jne  L5
-  9  16   ret                  =|  16   ret
-
+match 87.5% (3/4 equal; 1 operand) - not matching
+target ?scale@@YAMM@Z (17 bytes) | candidate ?scale@@YAMM@Z (17 bytes)
+     0: fld dword ptr [esp+0x4]                       |    0: fld dword ptr [esp+0x4]
+~    4: fmul dword ptr [1.5f]                         |    4: fmul dword ptr [2.5f]  (op0 symbol)
+     a: fadd dword ptr [0.25f]                        |    a: fadd dword ptr [0.25f]
+    10: ret                                           |   10: ret
 hints:
-  regalloc  Only register allocation differs: candidate edx/ecx are target ecx/edx (rows 0, 2, 4-7).
+- Constant differs at target #1: target 1.5f vs candidate 2.5f.
 ```
 
-Options select raw bytes, relocation markers and differing rows only.
-
-**Compact JSON, for the agent** (the `compile_and_diff` result; `decomp diff --json` emits the full
-form). It contains the header, the hints, the bindings, and the differing rows with 2 rows of context
-on each side. The output is capped in length, and `omitted_rows` counts what was cut. Keys are sorted,
-so the output is deterministic.
+**JSON** (`decomp --json diff`). It contains the summary, the verdicts, the counts, the visible rows
+(`t`/`c` are the target and candidate texts, `ti`/`ci` their indices), the hints and the bindings. Keys
+are sorted, so the output is deterministic. A mutated string literal (the output is indented; it is
+shown compacted here):
 
 ```json
 {
   "bindings": [],
   "byte_exact": false,
-  "counts": {"delete": 0, "equal": 4, "insert": 0, "opcode": 0, "operand": 6},
+  "candidate": {"instructions": 2, "name": "?message@@YAPBDXZ", "size": 6},
+  "counts": {"encoding": 0, "equal": 1, "extra": 0, "missing": 0, "opcode": 0, "operand": 1},
   "exact": false,
-  "function": "?sum_array@@YAHPBHH@Z",
   "hints": [
-    {"kind": "regalloc", "rows": [0, 2, 4, 5, 6, 7],
-     "text": "Only register allocation differs: candidate edx/ecx are target ecx/edx."}
+    "String literal differs at target #0: target \"hello world\" vs candidate \"hello there\"."
   ],
-  "match_percent": 97.0,
-  "omitted_rows": 0,
+  "match_percent": 75.0,
   "rows": [
-    {"c": "mov edx, [esp+8]", "i": 0, "kind": "operand", "sub": "reg", "t": "mov ecx, [esp+8]"},
-    {"i": 1, "kind": "equal", "t": "xor eax, eax"},
-    {"c": "test edx, edx", "i": 2, "kind": "operand", "sub": "reg", "t": "test ecx, ecx"},
-    {"i": 3, "kind": "equal", "t": "jle L9"},
-    {"c": "mov ecx, [esp+4]", "i": 4, "kind": "operand", "sub": "reg", "t": "mov edx, [esp+4]"},
-    {"c": "add eax, [ecx]", "i": 5, "kind": "operand", "sub": "reg", "t": "add eax, [edx]"},
-    {"c": "add ecx, 4", "i": 6, "kind": "operand", "sub": "reg", "t": "add edx, 4"},
-    {"c": "dec edx", "i": 7, "kind": "operand", "sub": "reg", "t": "dec ecx"},
-    {"i": 8, "kind": "equal", "t": "jne L5"},
-    {"i": 9, "kind": "equal", "t": "ret"}
-  ]
+    {"c": "mov eax, \"hello there\"", "ci": 0, "kind": "operand",
+     "operands": [{"diff": "symbol", "operand": 1}], "t": "mov eax, \"hello world\"", "ti": 0},
+    {"c": "ret", "ci": 1, "kind": "equal", "t": "ret", "ti": 1}
+  ],
+  "summary": "match 75.0% (1/2 equal; 1 operand) - not matching",
+  "target": {"address": 4198768, "instructions": 2, "name": "?message@@YAPBDXZ", "size": 6}
 }
 ```
+
+Bindings appear as `{"candidate_symbol": "?g_counter@@3HA", "target_va": 4206592}`.
 
 ## MSVC specifics
 
@@ -296,38 +320,43 @@ so the output is deterministic.
 With `/Gy`, every function is emitted into its own COMDAT section (`IMAGE_SCN_LNK_COMDAT`). The
 section-definition auxiliary record carries the length, a checksum and the selection kind: no
 duplicates for ordinary functions, "any" for inline functions and pooled literals. Associative COMDATs
-attach data to the function, such as x64 `.pdata`/`.xdata` and debug symbols. Extraction uses the
-symbol's own section when it is a COMDAT. Otherwise the range runs to the next function symbol, as
-described in [step 2](#2-candidate-side). `/O1` and `/O2` imply `/Gy` in all supported versions.
+attach data to the function, such as x64 `.pdata`/`.xdata` and debug symbols. Extraction runs from the
+function's symbol to the next symbol of its section or the section end, which for a COMDAT is the
+whole function ([step 2](#2-candidate-side)). `/O1` and `/O2` imply `/Gy` in all supported versions.
+Objects built without `/Gy`, where all functions share `.text`, do not match yet (planned).
 
 ### String literals (`??_C@`)
 
 With string pooling (`/GF`, which `/O1` and `/O2` imply), literals become COMDATs named `??_C@_0...`
 (narrow) or `??_C@_1...` (wide). The name encodes the length, a hash and a prefix of the content.
 Without pooling, older compilers place literals in `.data` or `.rdata` under anonymous `$SG<n>` local
-symbols. Decomp compares both by content. A wrong literal is therefore an `operand(sym)` row that shows
-both strings. A literal placed in a different section, for example because of a `const` mismatch, is
-caught in Phase 5 when data placement is verified.
+symbols. Decomp compares both by content. A wrong literal is therefore an `operand` row (category
+`symbol`) with a hint that shows both strings. Wide literals are read as byte strings for now, which
+stops at their first zero byte (planned). A literal placed in a different section, for example because
+of a `const` mismatch, is caught in Phase 5 when data placement is verified.
 
 ### Floating-point constants (`__real@`, `__xmm@`)
 
 MSVC materializes float and double constants as COMDATs named after their bit pattern
 (`__real@3f800000` is `1.0f`, `__real@4008000000000000` is `3.0`). 16-byte SSE constants are named
-`__xmm@...`. Decomp reads 4, 8 or 16 bytes at the target address, according to the candidate's
-constant, and compares bit patterns. A float-versus-double mix-up shows as `f32:...` against
-`f64:...`.
+`__xmm@...` (and 32-byte ones `__ymm@...`). Decomp reads as many bytes at the target address as the
+candidate's constant has, and compares bit patterns. A float-versus-double mix-up shows as a constant
+difference (`1.5f` against `1.5`).
 
 ### Jump tables inside `.text` (x86)
 
 MSVC x86 places a switch's jump table, and for sparse switches a byte index table, directly after the
 function's code in `.text`. In the object they sit inside the function's COMDAT, with `DIR32`
-relocations pointing back into the function. On the target, the entries are absolute addresses
-covered by `HIGHLOW` base relocations, when relocations are present. Bounds detection must stop
-decoding before the table. Disassembly shows the table as data, and the diff compares it as index
-lists (see [step 3](#3-canonicalization)). MSVC x64 tables hold 32-bit image-relative entries
-(`ADDR32NB`) indexed through `__ImageBase`. The slice detects tables from the indirect-jump pattern.
-Phase 2 hardens this for PDB-less MSVC targets, where the table's end also has to be found without a
-symbol size.
+relocations pointing back into the function and a `$LN` label on the table. On the target, the entries
+are absolute addresses covered by `HIGHLOW` base relocations, when relocations are present. A table
+inside the function's range is excluded from decoding: disassembly shows it as data (`switch:` comments
+and `switch_table_<address>` operands), and the diff compares it as index lists (see
+[step 3](#3-canonicalization)). On the candidate side, the first relocated reference from an indirect
+jump into the function's own section marks the end of the code. The byte index table of a two-level
+switch is not recognized yet (planned, Phase 2). MSVC x64 tables hold 32-bit image-relative entries
+(`ADDR32NB`) indexed through `__ImageBase`, and clang x64 tables hold offsets from the table. The slice
+detects tables from the indirect-jump pattern; without a symbol size, recursive descent finds the
+table's end by reading entries. Phase 2 hardens this for PDB-less MSVC targets.
 
 ### `/OPT:ICF` folding
 
@@ -335,10 +364,12 @@ Identical COMDAT folding makes the linker keep one copy of byte-identical functi
 data), so several names can share one address. Consequences:
 
 - The PDB may list several procedures at one address. The function is matched once; the other names
-  are aliases. The slice's `SymbolDb` keeps one symbol per address, and recording aliases is an open
-  item that Phase 5 needs, because relinking has to produce every alias.
-- A call in the target may land on a body whose primary name differs from the callee the source
-  used. Canonicalization must accept any alias name for a call target.
+  are aliases. The `SymbolDb` keeps one primary name per address and records the other names as
+  aliases, which name lookups find; `symbols.txt` stores only the primary name. Phase 5 needs the
+  aliases, because relinking has to produce every alias.
+- A call in the target may land on a body whose primary name differs from the callee the source used.
+  Today a reference compares against the primary name and the PDB name only; accepting any alias is
+  planned.
 - Folded bodies are identical by definition, so matching any one of them verifies the code at that
   address.
 
@@ -347,11 +378,18 @@ data), so several names can share one address. Consequences:
 Binaries linked with `/INCREMENTAL` (typical for debug builds) route calls through an incremental
 linking table of `jmp rel32` thunks. Calls to imported functions take one of two forms. With
 `__declspec(dllimport)`, the call is indirect through the IAT slot (`call [__imp__Foo@4]`). Without it,
-the call goes to a linker-generated stub, `jmp [__imp__Foo@4]`. On the target side, Decomp follows a
-single `jmp` thunk to name the call's real destination, so `call ILT+0x120` reads as
-`call ?Update@Player@@QAEXM@Z`. If the target calls through the IAT and the candidate calls the stub,
-or the reverse, the `dllimport` hint names the declaration to fix. Imports themselves compare by their
-`__imp_` names from the slice onward. Thunk resolution is Phase 2.
+the call goes to a linker-generated stub, `jmp [__imp__Foo@4]`.
+
+- `Program::thunk_destination()` follows an unnamed `jmp rel32` (through up to four chained jumps) to
+  a named function, or a `jmp [IAT slot]` to its import. A call through such a thunk reads as a call
+  to the destination, in the annotated listing ("via thunk at ...") and in the diff, so
+  `call ILT+0x120` reads as `call ?Update@Player@@QAEXM@Z`.
+- `fold_linker_thunks()` moves names off ILT entries when a program is opened: when an export, the
+  entry point or an analysis-found function starts with a 5-byte `jmp rel32` to code, and that jump
+  sits in a table of such jumps or leads to a function with an equivalent name, the symbol moves to the
+  jump's destination. Functions are then named by the code the compiler produced.
+- Imports compare by their `__imp_` names. A `dllimport` hint for an IAT call on one side and a stub
+  call on the other is planned (Phase 2).
 
 ### SEH and C++ EH prologs
 
@@ -360,12 +398,13 @@ On x86, functions with C++ exception handling register a frame in the prolog: `p
 `__ehhandler$<fn>` routine is a compiler-generated companion that passes a `__ehfuncinfo$<fn>` table
 to `__CxxFrameHandler`. Structured exception handling (`__try`) uses a scope table and
 `__except_handler3` or `__except_handler4`. A companion of the function being matched can only exist
-in the candidate object under its own name, while the target has only an address. In the slice,
-references to these companions bind structurally: a companion whose name embeds the matched
-function's name may bind to the aligned target address. Comparing the companion bodies and the
-`FuncInfo`/scope tables is part of data matching in Phase 5. An EH prolog present on only one side
-produces the `eh_frame` hint: exception-handling flags, objects with destructors, or `try` blocks.
-x64 has no prolog registration (handling is table-based, through `.pdata`/`.xdata`).
+in the candidate object under its own name, while the target has only an address. The slice has no
+special handling: such a reference compares like any other symbol, so it is equal when the target has
+a symbol with an equivalent name (from a PDB, for example) and otherwise a binding suggestion. Binding
+companions structurally, and comparing the companion bodies and the `FuncInfo`/scope tables as part of
+data matching, are planned (Phase 5). An EH prolog present on only one side will produce the planned
+`eh_frame` hint: exception-handling flags, objects with destructors, or `try` blocks. x64 has no prolog
+registration (handling is table-based, through `.pdata`/`.xdata`).
 
 ### `/GS` security cookies
 
@@ -374,15 +413,15 @@ function with vulnerable local buffers loads `__security_cookie`, XORs it with t
 stores it below the locals, and checks it before returning with a call to `__security_check_cookie`.
 The compiler's buffer heuristics decide which functions get a cookie. A cookie on only one side
 therefore points either to the flags or to the local declarations (an array versus a struct, for
-example), and the `gs_cookie` hint says which. VC6 predates `/GS`.
+example); the planned `gs_cookie` hint will say which. VC6 predates `/GS`.
 
 ### `__chkstk`
 
 Frames larger than a page are allocated through a stack probe. On x86 this is `mov eax, <size>`
 followed by `call __chkstk` (the CRT routine is also known as `_alloca_probe`). On x64 it is
 `mov eax, <size>`, `call __chkstk`, `sub rsp, rax`. Without a probe, the frame is allocated with
-`sub esp, <size>`. A probe on only one side means the total size of the locals differs, and the
-`chkstk` hint reports both sizes.
+`sub esp, <size>`. A probe on only one side means the total size of the locals differs; the planned
+`chkstk` hint will report both sizes.
 
 ### Rich header compiler IDs
 
@@ -390,54 +429,66 @@ Images produced by Microsoft linkers usually carry a Rich header between the DOS
 header. It is XOR-masked and is located through its `Rich` and `DanS` markers. Each entry records a
 product ID, a build number and a count: which compiler front ends, linkers and assemblers built how
 many of the objects. That identifies the exact MSVC version and service pack, separately for C and
-C++ objects, and reveals objects built with link-time code generation. The slice decodes and displays
-the entries. Phase 2 maps them to toolchain suggestions through a compiler table, and Phase 6 probes
-candidate compilers when the header is absent.
+C++ objects, and reveals objects built with link-time code generation. The slice decodes the entries,
+and `decomp info` shows them, with a description for the product IDs it knows (VC6 to Visual Studio
+2005). Phase 2 maps them to toolchain suggestions through a complete compiler table, and Phase 6
+probes candidate compilers when the header is absent.
 
 ### x64 `.pdata`
 
 On x64, every non-leaf function has a `RUNTIME_FUNCTION` entry in `.pdata` (begin RVA, end RVA,
-unwind info RVA). These entries give exact bounds without symbols, and Phase 2 uses them for bounds.
-Leaf functions that neither allocate stack nor save registers may have no entry. Functions split by
-the optimizer appear as chained unwind entries and are merged into one function. Comparing the unwind
-data itself (`.xdata`) belongs to data matching in Phase 5.
+unwind info RVA). These entries give exact bounds without symbols. The slice already uses them: an
+entry without a symbol becomes a function named `sub_<hex address>` with the entry's size. Leaf
+functions that neither allocate stack nor save registers may have no entry. Functions split by the
+optimizer appear as chained unwind entries; merging them into one function is planned (Phase 2).
+Comparing the unwind data itself (`.xdata`) belongs to data matching in Phase 5.
 
 ### Whole-program optimization (`/GL`)
 
 Objects compiled with `/GL` contain intermediate code, and the machine code is generated at link time
 (`/LTCG`), where cross-function inlining and calling-convention changes happen. Per-function
-compile-and-diff cannot reproduce those decisions. The Rich header shows LTCG objects, and Decomp
-warns when the target contains them. Targets built that way are out of scope for the slice.
+compile-and-diff cannot reproduce those decisions. The Rich header shows LTCG objects (`decomp info`
+labels the Visual Studio 2005 LTCG product IDs); a warning when the target contains them is planned.
+Targets built that way are out of scope for the slice.
 
 ## Driving compilers
 
 ### Toolchains and the registry
 
-A `Toolchain` describes how to run one compiler:
-`{name, kind: msvc | clang_cl | gcc | clang, compiler, wrapper argv, env set/prepend, base flags,
-include dirs, obj format}`. Toolchains live in a user-level registry, because paths differ per
-machine: `%APPDATA%\decomp\toolchains.json` on Windows and `~/.config/decomp/toolchains.json` on
-Linux. Projects reference them by name and may override entries. The file format and example entries
-for VC6, VS2008, clang-cl and Wine are in [project-format.md](project-format.md#toolchain-registry).
+A `Toolchain` describes how to run one compiler: `{name, kind: msvc | clang_cl | gcc | clang,
+compiler, wrapper, flags, include_dirs, env, env_prepend, description, timeout_seconds}`. Toolchains
+live in a user-level registry, because paths differ per machine: `%APPDATA%\decomp\toolchains.json`
+on Windows and `~/.config/decomp/toolchains.json` on Linux (`DECOMP_TOOLCHAINS` overrides the
+location). Projects reference them by name; per-project overrides are planned. When clang-cl is
+installed, two auto-detected entries, `clang-cl-x86` and `clang-cl-x64`, are always available. The
+file format and example entries for VC6, VS2008, clang-cl and Wine are in
+[project-format.md](project-format.md#toolchain-registry).
 
-`decomp toolchain list` shows the registry. `decomp toolchain test` runs a health check per toolchain:
-the compiler starts with its environment, its version banner is recorded (for example the
-`Version 12.00.8804` line of VC6's `cl.exe`), a small known TU compiles, and the resulting object
-parses. A failed check names the missing piece, such as a DLL not on `PATH` or an empty `INCLUDE`.
+`decomp toolchain add` creates or replaces an entry, and `decomp toolchain list` shows the registry.
+`decomp toolchain test <name>` compiles a probe function (`int decomp_probe(int x) { return x * 3 + 1;
+}`) in a temporary directory and prints `OK` or `FAILED`, the command line, the duration, whether the
+output parses as a COFF object (with its architecture and function count), and the compiler's output.
+It exits with 0 when the compile succeeded. A failed probe shows the compiler's own error, such as a
+DLL that is not on `PATH`. Recording the compiler's version banner (for example the
+`Version 12.00.8804` line of VC6's `cl.exe`) is planned.
 
 ### Invocation
 
 For MSVC-style compilers (`msvc`, `clang_cl`), the command line is:
 
 ```
-[wrapper...] <compiler> <base flags> <project flags> /I<include dir>... /c /Fo<dir>\candidate.obj <dir>\candidate.cpp
+[wrapper...] <compiler> /nologo /c <toolchain flags> <project flags> /I<toolchain include dir>... /I<project include dir>... /Fo<dir>/candidate.obj <dir>/candidate.cpp
 ```
 
-Project flags come after the toolchain's base flags so that they take precedence. clang-cl selects the
-target with `--target=i686-pc-windows-msvc` or `--target=x86_64-pc-windows-msvc` in its base flags.
-GCC and Clang (`-c -o`) follow in Phase 7. On Windows, long command lines go through a response file.
-Every compile has a timeout. On Windows the compiler runs inside a job object, so a timeout or Abort
-kills its whole process tree.
+Project flags come after the toolchain's base flags so that they take precedence. `<dir>` is the
+compile's working directory, passed as a full path. clang-cl selects the target with
+`--target=i686-pc-windows-msvc` or `--target=x86_64-pc-windows-msvc` in its base flags. `gcc` and
+`clang` toolchains get `-c <flags> -I<dir>... -o <dir>/candidate.o <dir>/candidate.cpp`, but their
+objects cannot be diffed before Phase 7. When an MSVC-style command line is longer than 4000
+characters, the arguments after the compiler go into a response file, `@<dir>/args.rsp`. Every compile
+has a timeout (`timeout_seconds`, 120 by default). The compiler runs in its own process group on POSIX
+and inside a job object on Windows, so a timeout kills its whole process tree. Abort does not reach a
+running compile yet (planned); it takes effect when the compile ends.
 
 ### Environment and wrappers
 
@@ -445,32 +496,36 @@ Old compilers depend on their environment. VC6's `cl.exe` needs `PATH` to includ
 (for `mspdb60.dll`) and `VC98\Bin`, and needs `INCLUDE` and `LIB`. VS2008 needs `Common7\IDE` on
 `PATH` (for `mspdb80.dll`). Toolchain entries express this with:
 
-- `env.set`: replaces a variable (a `null` value unsets it);
-- `env.prepend`: puts entries in front of the inherited value, joined with the host's path separator.
+- `env`: sets a variable;
+- `env_prepend`: puts a value in front of the inherited value, joined with the host's path separator.
 
-These become `ProcessSpec.env` overrides, so the parent environment is otherwise inherited. Decomp
-always removes `CL` and `_CL_`, which MSVC reads as extra command-line options, so a developer's shell
-settings cannot change codegen.
+These become `ProcessSpec.env` overrides, so the parent environment is otherwise inherited. Unsetting
+a variable from a toolchain entry is not supported. Decomp does not yet remove `CL` and `_CL_`, which
+MSVC reads as extra command-line options; removing them so that a developer's shell settings cannot
+change codegen is planned.
 
 `wrapper` prefixes the command line. Its main use is running MSVC under Wine on Linux
 (`["wine"]`). With Wine, the Windows-side search path is extended through `WINEPATH`, `WINEPREFIX`
 selects the prefix, and the file paths Decomp passes must be translated to Windows form (`Z:\...`).
-The field is part of the toolchain model from the slice onward. Wine support itself (path translation
-and testing) comes after the slice.
+The field is part of the toolchain model and is passed through today. Wine support itself (path
+translation and testing) is planned.
 
 ### Isolating parallel compiles
 
-Each compile runs in a fresh directory under `.decomp/build/`, with fixed file names
-(`candidate.cpp`, `candidate.obj`), so that nothing leaks between attempts or workers. When the flags
-include `/Zi`, the PDB goes into the same directory (`/Fd`). Newer MSVC versions write PDBs through the
-`mspdbsrv.exe` server, which concurrent compilers would otherwise share, so Decomp also sets a unique
-`_MSPDBSRV_ENDPOINT_` per worker, which gives each worker its own server instance. `/Z7` (debug
-information in the object) needs neither. A global compile gate bounds the number of concurrent
-compiler processes ([architecture.md](architecture.md#threading-model)).
+Each compile runs in a fresh directory under `.decomp/build/` (named after the cache key and a
+counter), with fixed file names (`candidate.cpp`, `candidate.obj`), so that nothing leaks between
+attempts. The compiler's working directory is that directory, so a PDB written by `/Zi` lands there
+too. Newer MSVC versions write PDBs through the `mspdbsrv.exe` server, which concurrent compilers
+would otherwise share, so for `msvc` toolchains Decomp sets `_MSPDBSRV_ENDPOINT_` per compile, which
+gives each compile its own server instance. `/Z7` (debug information in the object) needs neither. A
+successful compile's directory is deleted; a failed one is kept for inspection. Outside a project,
+`decomp diff --source` compiles under the system's temporary directory. A global compile gate that
+bounds concurrent compiler processes comes with the Phase 1 batch runner
+([architecture.md](architecture.md#threading-model)).
 
 ### Diagnostics
 
-Compiler output is parsed into `{file, line, col, severity, code, msg}`:
+Compiler output is parsed into `{file, line, column, severity, code, message}`:
 
 | Producer | Form |
 |---|---|
@@ -479,24 +534,30 @@ Compiler output is parsed into `{file, line, col, severity, code, msg}`:
 | clang-cl | `candidate.cpp(12,5): error: use of undeclared identifier 'x'` |
 | GCC, Clang | `candidate.cpp:12:5: error: 'x' was not declared in this scope` |
 
-Unrecognized lines are kept in the raw log. The agent receives the first errors, capped in count and
-length. The diff viewer makes each diagnostic clickable.
+Severities are `error`, `fatal error`, `warning` and `note`. Unrecognized lines are dropped from the
+list but kept in the raw output. The agent receives up to 20 diagnostics, formatted as
+`line 12:5: error C2065: 'x': undeclared identifier` (notes are dropped once 10 are shown), or the
+first 4000 bytes of the raw output when nothing was recognized. `decomp diff --source` prints the raw
+output. Clickable diagnostics in the diff viewer are Phase 1.
 
 ### Compile cache
 
 Compilers are deterministic for identical inputs, so results are cached. The key is the SHA-1 of:
 
-- the toolchain fingerprint: name, kind, compiler path, the version recorded by the health check, the
-  wrapper and the environment overrides;
-- the complete flag list and include directories;
+- the toolchain definition as JSON (kind, compiler path, wrapper, flags, include directories,
+  environment, description and timeout; not its name);
+- the project flags;
 - the source bytes;
-- the contents of the project's include directories. Until dependency tracking exists, all of them
-  are hashed, which is cheap and never stale.
+- for every project include directory, its path and the path, size and modification time of every
+  file in it. Until dependency tracking exists, all of them are hashed, which is cheap and never stale.
 
-The value is the object file plus the `CompileOutput` metadata, including failed compiles with their
-diagnostics. Entries are content-addressed under `.decomp/cache/`, and deleting the directory clears
-the cache. A hit launches no process and is reported as cached in the compile events, so the UI and
-transcripts show which attempts actually ran the compiler.
+The compiler's version is not part of the key; recording it is planned (see
+[Determinism](#determinism)). The value is the object file plus a small JSON file with the result
+(`ok` and the compiler output). Failed compiles are cached too, timeouts are not. In a project, entries
+are stored flat under `.decomp/cache/objects/` as `<sha1>.obj` and `<sha1>.json`, and deleting the
+directory clears the cache; `decomp diff --source` outside a project and `decomp toolchain test` do not
+cache. A hit launches no process and is reported as cached in the `compile_finished` event and in the
+tool result (`compile: ok (cached)`), so the transcripts show which attempts actually ran the compiler.
 
 ## Determinism
 
@@ -504,34 +565,38 @@ transcripts show which attempts actually ran the compiler.
   carry paths and signatures. None of that is compared.
 - **Reproducible fixtures.** The test fixtures are built with `/Brepro` (clang-cl and lld-link) and
   committed, so unit tests need no compiler and produce stable results.
-- **Stable file names.** `__FILE__` (and therefore `assert`) embeds the source path in string
-  literals, which *are* compared. Compiles use fixed relative names in a fresh directory. If the
-  target contains source paths, the agent sees them in the referenced strings, and the compile name
-  can be chosen to match. How that is configured is open.
-- **Environment hygiene.** `CL` and `_CL_` are removed, the toolchain's environment is applied
-  explicitly, and nothing depends on the caller's current directory.
+- **File names.** `__FILE__` (and therefore `assert`) embeds the source path in string literals, which
+  *are* compared. The candidate is always named `candidate.cpp`, but it is passed to the compiler by
+  its full path, which contains the compile directory and changes from compile to compile, so a
+  function that uses `__FILE__` cannot match yet. Choosing the compile name to match source paths
+  found in the target is planned.
+- **Environment hygiene.** The toolchain's environment is applied explicitly, and the compiler runs in
+  its own directory, so nothing depends on the caller's current directory. Removing `CL` and `_CL_` is
+  planned.
 - **Source encoding.** Old MSVC versions read source in the system code page. Candidate files are
   written as UTF-8 without a BOM, so non-ASCII bytes in string literals should be written as escapes
   (`"\xE9"`). Both sides compare as bytes, so mistakes surface as string mismatches rather than
   passing silently.
-- **Toolchain drift.** The same toolchain name on two machines can mean two service packs. The health
-  check records the version banner. It is part of the cache key and shown in the UI, so a
-  verification made with a different build is visible.
+- **Toolchain drift.** The same toolchain name on two machines can mean two service packs. Recording
+  the compiler's version banner, adding it to the cache key and showing it with every verification is
+  planned. Today the cache key covers the toolchain's definition (including the compiler's path), not
+  the compiler binary itself.
 - **Deterministic outputs.** Reports and JSON files are sorted and stable. Timestamps appear only in
-  event logs and history records, never in diffs or project files.
-- **Isolation.** Parallel compiles share no files, PDBs or PDB servers.
+  run logs, run summaries and notes, never in diffs, `decomp.json` or `symbols.txt`.
+- **Isolation.** Compiles share no working files, and concurrent MSVC compiles with different inputs
+  get different PDB servers.
 
 ## First slice versus later phases
 
 | Area | First slice | Later |
 |---|---|---|
 | Target formats | PE32, PE32+ | ELF64 (Phase 7) |
-| Candidate objects | COFF from MSVC and clang-cl | ELF objects (Phase 7) |
-| Address fields | Base relocations, relative branches, RIP-relative operands, stripped-`.reloc` heuristic, candidate-guided RVAs | - |
-| Symbol sources | PDB 7.0, exports, imports, `symbols.txt` | MSVC `.map`, `.pdata` bounds, RTTI names, library signatures (Phase 2) |
-| Data compared | Strings, floats, jump tables | Global initializers, EH and unwind tables, string and float pools, section placement (Phase 5) |
-| Thunks | Imports by `__imp_` name | ILT and import-stub resolution (Phase 2) |
-| Jump tables | Indirect-jump tables read as data and compared as index lists | Robust in-`.text` bounds for PDB-less MSVC targets (Phase 2) |
-| Hints | `regalloc`, `stack_layout`, `branch_polarity`, `reorder`, `encoding`, `binding`, `unresolved` | `signature`, `gs_cookie`, `chkstk`, `dllimport`, `eh_frame` |
-| Toolchains | Registry, health check, cache, MSVC and clang diagnostics; clang-cl round trip (Linux and Windows CI), `cl.exe` round trip (Windows CI) | Wine wrapper on Linux; flag search and compiler identification (Phase 6) |
+| Candidate objects | COFF from MSVC and clang-cl (including `/bigobj`), built with `/Gy` | Objects without `/Gy` (padding, same-section calls); ELF objects (Phase 7) |
+| Address fields | Base relocations, relative branches, RIP-relative operands, stripped-`.reloc` heuristic, MSVC x64 RVA table loads | Candidate-guided comparison of heuristic fields |
+| Symbol sources | PDB 7.0 (publics, procedures, data), exports, imports, x64 `.pdata`, `symbols.txt` | MSVC `.map`, RTTI names, library signatures (Phase 2) |
+| Data compared | Narrow strings, floats and SSE constants, jump tables | Wide strings; global initializers, EH and unwind tables, string and float pools, section placement (Phase 5) |
+| Thunks | ILT and import thunks followed; names moved off ILT entries | `dllimport` hint (Phase 2) |
+| Jump tables | x86 absolute, clang x64 relative and MSVC x64 RVA tables, compared as index lists | Two-level (byte index) tables; robust in-`.text` bounds for PDB-less MSVC targets (Phase 2) |
+| Hints | Register-only, stack-only, encoding, inverted branch, reordering, instruction count, branch target, binding, and reference (string, constant, callee) hints | `signature`, `gs_cookie`, `chkstk`, `dllimport`, `eh_frame` |
+| Toolchains | Registry with auto-detected clang-cl, `toolchain add`/`list`/`test`, compile cache, MSVC and GCC-style diagnostics; clang-cl round trip (Linux CI), `cl.exe` round trip (Windows CI, being brought up) | Version banner, project overrides, `CL`/`_CL_` removal, Wine wrapper on Linux; flag search and compiler identification (Phase 6) |
 | Verification scope | Single functions | Whole translation units and relinking with a SHA-1 check of the result (Phase 5) |

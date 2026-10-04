@@ -10,60 +10,75 @@ request defaults, prompt caching, streaming, refusal handling, the append-only c
 loop, the tool schemas, the prompts, transcripts, cost accounting, safety and configuration, and how to
 run the agent live or from offline replays.
 
-Status: being implemented in step 11 of the [first slice](roadmap.md#first-working-slice), and tested
-offline with replays. The multi-worker runner comes in Phase 1. API details reflect the Claude API as
-of October 2026; check them against the current API documentation before changing defaults.
+Status: implemented in step 11 of the [first slice](roadmap.md#first-working-slice) and tested
+offline with replays. `decomp agent` runs one session for one function; the multi-worker runner comes
+in Phase 1. API details reflect the Claude API as of October 2026; check them against the current API
+documentation before changing defaults.
 
 ## Components
 
-| Component | Role |
-|---|---|
-| `HttpTransport` | Sends one HTTP request and streams the response body. Implementations: `CurlTransport` (Linux, macOS), `WinHttpTransport` (Windows) and `ReplayTransport` (tests, `--replay`). |
-| `SseParser` | Incremental server-sent-events parser |
-| `anthropic::Client` | Builds requests, applies retries and backoff, assembles messages from the stream, captures rate-limit headers |
-| `Conversation` | The append-only history. It serializes the frozen prefix once and produces each request body. |
-| `ToolRegistry` | Tool definitions, the input validator, and dispatch to handlers |
-| `MatchSession` | Per-function state: target function, toolchain, attempts, best attempt, notes. Implements the match tools. |
-| `AgentLoop` | `run(MatchSession&) -> MatchOutcome` (`matched`, `gave_up`, `budget_exhausted`, `refused`, `error`) |
-| `RunController` | Thread-safe commands: start, pause, resume, stop/abort, skip, inject_message, approve |
-| `Prompts` | The frozen system prompt (compiled into the binary) and the per-function brief builder |
-| `Transcript`, `CostMeter` | Session transcripts; usage-to-dollars accounting and budget checks |
+| Component | Header | Role |
+|---|---|---|
+| `HttpTransport` | `agent/http.hpp` | Sends one HTTP request and streams the response body. Implementations: libcurl (Linux, macOS), WinHTTP (Windows) and `ReplayTransport` (tests, `--replay`). |
+| `SseParser` | `agent/sse.hpp` | Incremental server-sent-events parser |
+| `Client` | `agent/client.hpp` | Builds requests, applies retries and backoff, assembles messages from the stream (`MessageAccumulator` in `agent/messages.hpp`), captures response headers |
+| `Conversation` | `agent/conversation.hpp` | The append-only history. It serializes the frozen prefix once and produces each request body. |
+| `ToolRegistry` | `agent/tools.hpp` | Tool definitions, the input validator, and dispatch to handlers |
+| `MatchSession` | `agent/match_session.hpp` | Per-function state: target function, toolchain setup, attempts, best attempt and source. Implements the six tools and builds the brief and the status line. The frozen system prompt lives next to it. |
+| `run_loop` | `agent/loop.hpp` | The tool-use loop. Returns a `LoopOutcome` whose status is `finished`, `end_turn_without_finish`, `refused`, `budget_exhausted`, `max_turns`, `aborted`, `stopped` or `error`. |
+| `LoopControl` | `agent/loop.hpp` | Thread-safe commands for a running loop: pause, resume, stop, abort, and injected guidance |
+| `run_function` | `agent/runner.hpp` | Runs one session: wires the session, tools, conversation and loop together, publishes events, writes the transcript and updates the project |
+| Price table | `agent/cost.hpp` | Usage-to-dollars accounting (`price_for`, `response_cost`) |
+
+A `RunController` with a work queue, several workers, skips and approvals is Phase 1.
 
 ## Transport
 
-Every request is `POST https://api.anthropic.com/v1/messages` with these headers:
+Every request is `POST https://api.anthropic.com/v1/messages` (the base URL can be changed with the
+`ANTHROPIC_BASE_URL` environment variable), with these headers:
 
 | Header | Value |
 |---|---|
-| `x-api-key` | Read from `ANTHROPIC_API_KEY` at startup; held in memory only |
+| `x-api-key` | Read from `ANTHROPIC_API_KEY`; held in memory only |
 | `anthropic-version` | `2023-06-01` |
 | `content-type` | `application/json` |
+| `accept` | `text/event-stream` (requests are streamed) |
+| `user-agent` | `decomp/<version>` |
 | `anthropic-beta` | `server-side-fallback-2026-07-01` (while fallbacks are enabled) |
 
-The transport streams the body to the SSE parser as it arrives and exposes the response headers. The
-client keeps `retry-after` and the `anthropic-ratelimit-*` headers for retries, for the shared rate
-limiter (Phase 1) and for the UI's rate-limit gauge. The transport observes a cancellation token, so
-Abort ends an in-flight request immediately.
+The transport streams the body to the SSE parser as it arrives and exposes the response headers.
+The client keeps the `request-id`, `retry-after` and `anthropic-ratelimit-*` headers of each response;
+the transcript records the request ID. A shared rate limiter and a rate-limit gauge that use these
+headers are Phase 1. Bodies of non-2xx responses are kept (up to 64 KiB) for the error message.
+
+- **libcurl** (Linux, macOS): one handle per request. Proxies come from the usual environment
+  variables, and `CURL_CA_BUNDLE` or `SSL_CERT_FILE`, and `SSL_CERT_DIR`, override the CA store.
+  Redirects are not followed. While a stream is idle, libcurl calls back about once a second, so
+  Abort cancels even a silent request promptly.
+- **WinHTTP** (Windows): automatic proxy discovery, falling back to the WinHTTP proxy setting; TLS 1.2
+  and 1.3; redirects disabled. Requests run synchronously, so Abort takes effect when the next chunk
+  arrives. The API sends `ping` events while the model works, so that happens soon.
 
 ## Request defaults
-
-All of these are configurable ([Configuration](#configuration)):
 
 | Parameter | Default | Why |
 |---|---|---|
 | `model` | `claude-opus-5-5` | |
-| `stream` | `true` | Turns can be long; streaming avoids HTTP timeouts and feeds the live UI. |
+| `stream` | `true` | Turns can be long; streaming avoids HTTP timeouts and feeds the live progress view. |
 | `max_tokens` | `64000` | Thinking counts toward the limit; leave room for it plus a full translation unit. |
 | `thinking` | `{type: "adaptive", display: "summarized"}` | Thinking cannot be disabled on this model. Summaries (and the short progress notes between tool calls) go to the transcript for supervision. The raw reasoning is never returned. |
-| `output_config.effort` | `"high"` | This model's API default is `medium`, so Decomp sets the effort explicitly. Effort is fixed for a run (see [caching](#prompt-caching)). |
-| `tool_choice` | `{type: "auto"}` | Forced tool choice (`any`/`tool`) is rejected with a 400 by this model. The prompt steers the model toward tools, and the loop checks that a call happened. |
-| `tools` | The [six slice tools](#tools), sorted by name, each with `strict: true` and `eager_input_streaming: true` | `strict` keeps inputs schema-valid. Eager streaming sends large inputs, such as a full translation unit, as they are generated, so the UI can show a candidate being written. |
+| `output_config.effort` | `"high"` | This model's API default is `medium`, so Decomp sets the effort explicitly. Effort is fixed for a session (see [caching](#prompt-caching)). |
+| `tool_choice` | `{type: "auto"}` | Forced tool choice (`any`/`tool`) is rejected with a 400 by this model. The prompt steers the model toward tools, and the loop nudges it when a turn ends without a call. |
+| `tools` | The [six tools](#tools), sorted by name, each with `strict: true` and `eager_input_streaming: true` | `strict` keeps inputs schema-valid. Eager streaming sends large inputs, such as a full translation unit, as they are generated. |
 | `system` | One text block (the frozen system prompt) with `cache_control: {type: "ephemeral"}` | An explicit cache breakpoint at the end of the shared prefix |
 | `cache_control` (top level) | `{type: "ephemeral"}` | Automatic caching of the growing conversation |
 | `fallbacks` | `"default"` | Server-side refusal fallbacks ([below](#refusals-and-fallbacks)) |
 
-A first request looks like this. Decomp serializes JSON with sorted keys; descriptions and schemas
-are abbreviated here:
+`model`, `effort` and `fallbacks` are configurable ([Configuration](#configuration)); `max_tokens` and
+the thinking display are fixed in this version.
+
+A first request looks like this. Decomp serializes JSON with sorted keys; descriptions, schemas and
+the system prompt are abbreviated here:
 
 ```json
 {
@@ -71,13 +86,13 @@ are abbreviated here:
   "fallbacks": "default",
   "max_tokens": 64000,
   "messages": [
-    {"content": [{"text": "<per-function brief>", "type": "text"}], "role": "user"}
+    {"content": [{"text": "# Target function\nfunction: int __cdecl add(int, int)\n...", "type": "text"}], "role": "user"}
   ],
   "model": "claude-opus-5-5",
   "output_config": {"effort": "high"},
   "stream": true,
   "system": [
-    {"cache_control": {"type": "ephemeral"}, "text": "<frozen system prompt>", "type": "text"}
+    {"cache_control": {"type": "ephemeral"}, "text": "You are an expert reverse engineer ...", "type": "text"}
   ],
   "thinking": {"display": "summarized", "type": "adaptive"},
   "tool_choice": {"type": "auto"},
@@ -90,67 +105,72 @@ are abbreviated here:
 }
 ```
 
-Request parameters are model-specific. The request builder keeps a small capability table. For
-example, Claude Haiku 4.5 takes extended thinking with a token budget and no `effort`, and fallbacks
-are only sent to models that support them. An unknown model gets the default shape and a warning.
+Request parameters are model-specific, but Decomp sends this shape to every model. A model that does
+not accept adaptive thinking or `effort` (Claude Haiku 4.5, for example, takes a thinking token budget
+instead) fails with a 400; a per-model capability table is planned.
 
 ## Prompt caching
 
 The API renders `tools`, then `system`, then `messages`, and caching is a byte-prefix match. Decomp
 lays requests out so that the expensive part is shared:
 
-- **Shared prefix (tools and system).** The explicit breakpoint on the last system block caches the
-  tools and the system prompt together. Both are byte-identical for every function in a run, as are
-  the model and the thinking and effort settings, so every session after the first reads that prefix
-  from the cache.
+- **Shared prefix (tools and system).** The explicit breakpoint on the system block caches the tools
+  and the system prompt together. Both are constants compiled into Decomp, so with the same model,
+  thinking and effort settings every session can read that prefix from the cache while it is alive.
 - **Growing tail (the conversation).** The top-level automatic `cache_control` places a breakpoint on
   the last cacheable block and moves it forward each turn. Each request reads everything up to the
   previous turn and writes only what the last turn appended. Together these use two of the four
   breakpoint slots.
 - **TTL.** The default 5-minute TTL is used, and each read refreshes it. Turns normally take well under
   5 minutes. A session paused for longer pays one cache write when it resumes. The 1-hour TTL costs
-  twice the input price to write and is not used by default.
+  twice the input price to write and is not used.
 - **Minimum size.** On `claude-opus-5-5` the minimum cacheable prefix is 512 tokens. The tools and
-  system prompt are far larger.
-- **Verification.** `usage.cache_read_input_tokens` is tracked per turn and shown in the UI. It must
-  be greater than zero from the second turn of a session, and from the first turn of every session
-  after the first in a run. A drop to zero means something invalidated the prefix.
+  system prompt are larger.
+- **Verification.** `cache_read_input_tokens` is recorded per turn, in the `turn_finished` events and
+  the transcript's `response` records, and the progress view shows the run's cache-hit rate. It must
+  be greater than zero from the second turn of a session, and from the first turn of a session that
+  starts while an earlier session's prefix is still cached. A drop to zero means something invalidated
+  the prefix.
 - **What would break it, and is avoided by design:** timestamps or IDs in the system prompt;
   nondeterministic tool serialization; changing tools, system, model, thinking or effort within a
-  run (an effort change invalidates the conversation cache, and on some models also the system and
+  session (an effort change invalidates the conversation cache, and on some models also the system and
   tools cache); editing earlier messages.
 - **Concurrency (Phase 1).** A cache entry becomes readable only once the first response that writes
-  it starts streaming. The runner therefore starts the first session alone and starts the other
-  workers after its first streamed token.
+  it starts streaming. The batch runner will therefore start the first session alone and start the
+  other workers after its first streamed token.
 
 ## Streaming
 
-`SseParser` handles events split across network chunks, multi-line `data:` fields and both line-ending
-styles. The client handles each event as follows:
+`SseParser` follows the WHATWG event-stream rules: events may be split anywhere across network chunks
+(even inside `\r\n`), lines end with `\n`, `\r\n` or `\r`, multi-line `data:` fields are joined, and
+comment lines are skipped. The client handles each event as follows:
 
 | Event | Handling |
 |---|---|
 | `message_start` | Message ID, serving model, initial usage (input, cache write, cache read) |
-| `content_block_start` | Opens a block: `text`, `thinking`, `tool_use` (ID and name) or `fallback` (a model switch point) |
-| `content_block_delta` | `text_delta` appends text. `thinking_delta` appends to the thinking summary. `signature_delta` sets the block's opaque signature, stored verbatim. `input_json_delta` appends to the tool input buffer. |
-| `content_block_stop` | Closes the block. For `tool_use`, the accumulated input is parsed **strictly** and then validated against the tool's schema. |
-| `message_delta` | `stop_reason`, `stop_details`, final usage (`usage.iterations` when a fallback ran) |
-| `message_stop` | The message is complete. |
-| `ping` | Ignored, apart from resetting the idle timer |
-| `error` | The stream failed (for example `overloaded_error`). The partial response is discarded and the error is classified for [retry](#retries-and-timeouts). |
+| `content_block_start` | Opens a block: `text`, `thinking`, `tool_use`, `fallback` (a model switch point), or any other type, which is kept verbatim |
+| `content_block_delta` | `text_delta` appends text. `thinking_delta` appends to the thinking summary. `signature_delta` appends to the block's opaque signature, stored verbatim. `input_json_delta` appends to the tool input buffer. `citations_delta` appends a citation. Unknown deltas are ignored. |
+| `content_block_stop` | Closes the block. For `tool_use`, the accumulated input is parsed **strictly** as a JSON object (empty input means `{}`); the schema check follows when the tool is dispatched. |
+| `message_delta` | `stop_reason`, `stop_details`, final usage (`usage.iterations` when a fallback ran). Usage counts are cumulative and replace earlier values. |
+| `message_stop` | The message is complete. A connection that drops after this event still delivered a complete message. |
+| `ping` | Ignored; like any data it resets the transport's stall timer |
+| `error` | The stream failed. `overloaded_error` and `api_error` are [retried](#retries-and-timeouts) after discarding the partial response; other types end the request with an error. |
 
-Each delta becomes a stream event for the live UI. Deltas may be coalesced before they reach the event
-log; the final content is identical either way.
+Text and thinking deltas become `stream_delta` events for the live progress view. They are not
+written to `events.jsonl`; the transcript's `response` record has the final content.
 
 With `eager_input_streaming`, the API no longer buffers and validates tool input, so a tool input can
 arrive truncated (at `max_tokens`) or as invalid JSON. Decomp never runs a tool on input that fails the
 strict parse or the schema check. The model instead receives an error result that carries the raw text,
-built with the JSON library so quotes are escaped:
+built with the JSON library so quotes are escaped (a schema violation adds an `"error"` member naming
+the offending field):
 
 ```json
-{"content": "{\"INVALID_JSON\": \"<the input as received>\"}", "is_error": true,
+{"content": "{\"INVALID_JSON\":\"<the input as received>\"}", "is_error": true,
  "tool_use_id": "toolu_...", "type": "tool_result"}
 ```
+
+In the echoed assistant message, such a `tool_use` block carries `{}` as its input.
 
 ## Refusals and fallbacks
 
@@ -180,8 +200,9 @@ blocks instead.
   `fallback_message`.
 - The top-level `model` names the model that produced the message.
 
-Decomp records the serving model per turn (the Agent session view shows it as a badge) and prices
-each attempt at its own model's rates ([Cost](#cost-accounting)).
+Decomp records the serving model and whether a fallback block appeared (`had_fallback`) in each
+`response` record of the transcript, and prices each attempt at its own model's rates
+([Cost](#cost-accounting)). A serving-model badge in the Agent session view is Phase 1.
 
 **Thinking across models.** A fallback model cannot read Claude Opus 5.5's thinking blocks. The API
 drops them before that model sees them, and they are not billed. Decomp still sends every block back
@@ -194,45 +215,52 @@ treats the serving model as a per-turn fact, never as session state.
 **Echoing a mid-output fallback.** If a model declines after producing partial output, the response
 contains the partial content, a `fallback` block, and the fallback model's continuation. Before that
 assistant message is sent back, Decomp omits the `thinking`, `redacted_thinking` and `tool_use` blocks
-(and any other model-internal block types it does not recognize) that appear before the last
-`fallback` block. Text blocks and everything after the boundary are kept, and the `fallback` block
-itself is kept as an audit marker. This happens once, when the turn is committed to the
-`Conversation`, so every later request repeats the same bytes. The transcript keeps the raw response.
+(and server-tool blocks without their pair, and any other block type it does not recognize) that
+appear before the last `fallback` block, so their tool calls never run. Text blocks, paired
+server-tool blocks and everything after the boundary are kept. The `fallback` blocks themselves, which
+the API treats as ignorable audit markers, are not echoed. This happens once, when the turn is
+committed to the `Conversation`, so every later request repeats the same bytes. The transcript keeps
+the raw response.
 
 **When the whole chain refuses.** If the final response still has `stop_reason: "refusal"`, the
-function is marked `refused`, its best attempt is kept, and the session ends. No tool calls from that
-response run. The `stop_details` category is recorded for information only; Decomp branches on
-`stop_reason`. **Decomp does not rephrase, retry or otherwise work around a refusal.** Later runs
-skip refused functions unless the user requeues them.
+session ends with outcome `refused`, the function is marked `refused`, and its history and best
+attempt are kept. No tool calls from that response run, and nothing from it is appended to the
+conversation. The `stop_details` category and explanation are recorded (in the outcome detail and a
+`refusal` event) for information only; Decomp branches on `stop_reason`. **Decomp does not rephrase,
+retry or otherwise work around a refusal.** `decomp agent` exits with code 3. Skipping refused
+functions in later runs is part of the Phase 1 batch runner.
 
-**Turning fallbacks off.** Set `agent.fallbacks` to `"off"` in `decomp.json` (or use the Settings view
-in Phase 1). Decomp then omits the parameter and the beta header, and any decline ends the session as
-`refused`.
+**Turning fallbacks off.** Set `agent.fallbacks` to `false` in `decomp.json`, or pass
+`--no-fallbacks`. Decomp then omits the parameter and the beta header, and any decline ends the
+session as `refused`.
 
 ## The append-only conversation
 
-Rules enforced by `Conversation`:
+Rules enforced by `Conversation` and the loop:
 
-1. `system`, `tools` and `model` (and the thinking and effort settings) are serialized once per run
-   and reused byte-identically by every request of every session in the run. Tools are sorted by
-   name.
-2. Assistant messages are stored exactly as received: thinking blocks with their signatures
-   (including blocks whose thinking text is empty), text, and `tool_use` blocks. The only exception is
-   the fallback echo rule above, applied once at commit time.
+1. `system`, `tools`, `model` and the thinking and effort settings are serialized once per session and
+   reused byte-identically by every request. They are built from constants, so they are identical for
+   every session with the same settings. Tools are sorted by name.
+2. Assistant messages are stored as received: thinking blocks with their signatures (including blocks
+   whose thinking text is empty), text, and `tool_use` blocks. The exceptions are the fallback echo
+   rule above and the `{}` input of a `tool_use` block whose input was not valid JSON, both applied
+   once at commit time.
 3. Nothing earlier is ever edited, reordered or removed. Old tool results are not trimmed, and no
    per-request text is injected into earlier turns.
 4. Every user message after the brief contains, in order: the `tool_result` blocks for all `tool_use`
-   blocks of the previous assistant message (in the same order), then a status text block, then any
-   supervisor guidance as text blocks. They stay in the history for good.
+   blocks of the previous assistant message (in the same order), or a nudge text block when that
+   message had no tool call; then one text block holding any supervisor guidance followed by the
+   status line. They stay in the history for good. Two exceptions: guidance queued before the first
+   request (such as `--guidance`) is sent as its own user message right after the brief, and the
+   results appended when the session ends carry no status line.
 5. A response that is not committed (a failed or retried stream) leaves no trace. The retry resends
-   the identical request.
+   the identical request body.
 
 **Why.** Each thinking block's signature binds it to the exact prefix that produced it: the system
 prompt, the tools and every earlier message. Editing an earlier turn invalidates every later thinking
 block, and the API rejects such a request with a 400 for accounts that enforce the check. The same
-discipline keeps the prompt cache warm, because a cache entry is a byte prefix. A 400 that names a
-thinking block is therefore treated as a bug: the session ends with `error`, and the diagnostic is
-logged.
+discipline keeps the prompt cache warm, because a cache entry is a byte prefix. A 400, like any other
+non-retryable API error, ends the session with outcome `error` and the API's message.
 
 A session's message sequence looks like this:
 
@@ -241,299 +269,392 @@ user       brief
 assistant  [thinking] [text] [tool_use compile_and_diff #1]
 user       [tool_result #1] [status]
 assistant  [thinking] [tool_use disassemble #2] [tool_use read_memory #3]
-user       [tool_result #2] [tool_result #3] [status] [supervisor guidance]
-assistant  [thinking] [tool_use compile_and_diff #4]
-user       [tool_result #4] [status]
-assistant  [thinking] [tool_use submit_result #5]
+user       [tool_result #2] [tool_result #3] [supervisor guidance + status]
+assistant  [thinking] [text]                            (no tool call)
+user       [nudge] [status]
+assistant  [thinking] [tool_use submit_result #4]
+user       [tool_result #4]                             (appended at the end; never sent)
 ```
 
-**Tested:** a replay test asserts that across consecutive requests the serialized `system`, `tools`
-and every earlier message are byte-identical, and that each request only appends messages. That
-includes a scenario in which supervisor guidance is injected mid-run.
+**Tested:** unit tests assert that every request of a session extends the previous one byte for byte
+(the serialized `system`, `tools` and every earlier message are unchanged), including a session in
+which supervisor guidance is injected mid-run.
 
 ## The loop
 
 ```
-AgentLoop::run(MatchSession& s) -> MatchOutcome
-    conversation = frozen prefix + brief(s)
+run_loop(client, conversation, tools, config, control, observer) -> LoopOutcome
     loop:
-        honor RunController: stop -> error(cancelled); pause -> wait; queued guidance -> pending
-        if a budget is exhausted: return budget_exhausted
-        response = client.send(conversation)            # retries happen inside
-        if response failed: return error
-        record usage and cost; emit turn events
-        switch response.stop_reason:                    # checked before reading content
-            refusal:    mark refused; return refused     # no tools run
-            max_tokens: commit; run complete tool calls; answer a cut-off call with is_error
-                        ("cut off at the output limit; send a smaller call"); no call -> nudge
-            tool_use:   commit; run all tool calls; append results + status + guidance
-                        if submit_result was accepted: return matched or gave_up
-            end_turn:   commit; if nudges == 2: return gave_up("ended without submit_result")
-                        append nudge (+ status, guidance)
-            other:      return error                    # pause_turn only occurs with server tools
+        control: abort -> aborted; stop -> stopped; pause -> wait until resumed (or stopped/aborted)
+        if turns == max_turns: return max_turns
+        if the wall-clock budget is spent: return budget_exhausted
+        append the pending user message: tool results or nudge, then guidance + status line
+        response = client.create_message(request)          # retries happen inside
+        if response failed: return aborted (after Abort) or error
+        add usage and cost
+        if stop_reason == "refusal": return refused         # nothing appended, no tools run
+        append the echoed assistant content
+        if the response has tool calls:
+            run them; cut-off or invalid calls get an is_error result instead
+            if a result ends the session (submit_result): return finished
+        else if 2 nudges were already used: return end_turn_without_finish
+        if a budget is spent: return budget_exhausted (tokens, USD, wall clock) or max_turns
+        if there was no tool call: queue a nudge
 ```
 
-**Tool execution.** Each input is parsed strictly and validated. The read-only tools (`disassemble`,
-`read_memory`, `lookup_symbol`) run in parallel on the thread pool. `compile_and_diff`, `record_note`
-and a `submit_result` that claims a match run serially, in the order the model issued them, because
-they share the session's build directory, attempt counter and notes. If `submit_result` appears with
-other calls, it is processed last. Results always go back in **one** user message, in the order of
-the `tool_use` blocks, whatever order they completed in.
+`run_function` turns the loop's status into the session outcome: `finished` becomes `matched` or
+`gave_up` (from `submit_result`), `end_turn_without_finish` becomes `no_result`, and `refused`,
+`budget_exhausted`, `max_turns`, `stopped`, `aborted` and `error` keep their names.
 
-**Verification of `submit_result`.** For `outcome: "matched"`, Decomp compiles the submitted source
-(or, when `source` is omitted, takes the session's best byte-exact attempt), diffs it, and requires
-`byte_exact`. On success it writes the source to `src/functions/<fn>.cpp`, records consistent symbol
-bindings, sets the status to `matched` and ends the session without another request. On failure the
-model gets an `is_error` result containing the diff, and the loop continues. `give_up` requires a
-`reason` and ends the session.
+**Stop reasons.** Only `refusal` is special. Any other stop reason (`tool_use`, `end_turn`,
+`max_tokens`, `pause_turn`) is handled by whether the response contains tool calls. A tool call that
+was still being written when `max_tokens` hit is answered with an `is_error` result asking for a
+smaller call ("Your output was cut off at max_tokens while you were writing this tool call, so it was
+not executed. Send it again as a smaller call ..."). A `max_tokens` response without any tool call gets
+the nudge "Your previous response was cut off at max_tokens. Continue with shorter steps, and call
+`submit_result` when you are done."
+
+**Tool execution.** Each input is parsed strictly and validated. Calls run in the order the model
+issued them, and every call of the turn runs, even after a `submit_result` that ends the session.
+Consecutive read-only calls (`disassemble`, `read_memory`, `lookup_symbol`) run concurrently.
+`compile_and_diff`, `record_note` and `submit_result` run one at a time, because they share the
+session's attempt counter, best source and notes. Results always go back in **one** user message, in
+the order of the `tool_use` blocks, whatever order they completed in.
+
+**Verification of `submit_result`.** For `outcome: "matched"`, Decomp compiles the submitted `source`
+again, diffs it (this counts as an attempt) and requires `byte_exact`. On success it writes the source
+to `src/functions/<fn>.cpp`, and the session ends without another request; the function becomes
+`matched` when the runner updates the project. On failure the model gets an `is_error` result
+containing the diff, and the loop continues. `give_up` ends the session; its `reason` (which may be
+empty) becomes the outcome detail.
 
 **Outcomes and function status.**
 
-| `MatchOutcome` | Function status | Kept |
+| Outcome | Function status afterwards | `decomp agent` exit code |
 |---|---|---|
-| `matched` | `matched` | Verified source, bindings, history |
-| `gave_up` | `gave_up` | Best attempt, reason, notes |
-| `budget_exhausted` | `nonmatching` (unchanged if nothing compiled) | Best attempt |
-| `refused` | `refused` | Best attempt, refusal category |
-| `error` | Previous status (`nonmatching` if an attempt compiled) | Error, best attempt. User stop and abort use `ErrorCode::cancelled`. |
+| `matched` | `matched` | 0 |
+| `gave_up` | `gave_up` | 2 |
+| `refused` | `refused` | 3 |
+| `budget_exhausted`, `max_turns`, `no_result`, `stopped` | `nonmatching` if any attempt of this or an earlier session scored above 0%, otherwise the previous status (`unstarted` instead of `in_progress`) | 2 |
+| `aborted`, `error` | As above | 1 |
+
+A function that was `matched` before stays `matched`. In every case the attempts, the best source, the
+notes and the transcript are kept, and `symbols.txt` gets the function's new best score, attempt count
+and spend ([project-format.md](project-format.md#function-status)).
 
 ### Budgets
 
-A *turn* is one model response, including any retries needed to get it. Budgets apply per function
-(session) and per run:
+A *turn* is one request and its response, including any retries needed to get it. Budgets apply per
+function (session):
 
-| Budget | Measured as |
-|---|---|
-| Turns | Model responses in the session |
-| Tokens | Sum of input, output, cache-write and cache-read tokens |
-| USD | `CostMeter` total from usage and the price table |
-| Wall clock | Time since the session (or run) started |
+| Budget | Measured as | Default |
+|---|---|---|
+| Turns | Requests sent in the session | 40 |
+| USD | Cost of all responses, from usage and the [price table](#cost-accounting) | 5.00 |
+| Tokens | Sum of input, output, cache-write and cache-read tokens over all turns | unlimited (`0`) |
+| Wall clock | Time since the session started | 30 minutes |
 
-Budgets are checked before every request. A turn already in flight is never cut short for budget
-reasons; only Abort does that. When a budget runs out, the session ends with `budget_exhausted`. The
-status line tells the model how many turns remain and what it has spent, and on the last allowed turn
-it asks the model to submit or give up. Reaching 80% and 100% of a run budget raises notifications.
+The turn limit and the wall clock are checked before every request; tokens, USD, wall clock and turns
+are checked again after every response, once its tool calls have run. A turn already in flight is
+never cut short for budget reasons; only Abort does that. When a budget runs out, the session ends
+with `budget_exhausted` (`max_turns` for the turn limit). The status line tells the model how many
+turns remain, how many attempts it made and its best score. Run budgets, live budget changes and
+budget notifications come with the Phase 1 batch runner.
 
 ### Retries and timeouts
 
 | Condition | Retried? |
 |---|---|
-| HTTP 408, 409, 429, 500, 502, 503, 504, 529 and other 5xx | Yes |
-| Network failures (DNS, connect, TLS, reset) and stream idle timeouts | Yes |
-| An `error` event in an open stream (for example `overloaded_error`) | Yes, after discarding the partial response |
-| 400, 401, 403, 404, 413 and other 4xx | No. The session ends with `error`. A 401 or 403 also stops the run and raises an authentication notification. |
+| HTTP 408, 409, 429 and 500-599 (including 529) | Yes, unless the response has `x-should-retry: false` |
+| Any other HTTP error with `x-should-retry: true` | Yes |
+| Network failures (DNS, connect, TLS, reset), a stalled transfer, and a stream that ends before `message_stop` | Yes |
+| An `error` event in an open stream of type `overloaded_error` or `api_error` | Yes, after discarding the partial response |
+| 400, 401, 403, 404, 413 and other 4xx | No. The session ends with `error` and the API's error type and message. |
 | HTTP 200 with `stop_reason: "refusal"` | No. This is a content outcome ([above](#refusals-and-fallbacks)). |
 
-Backoff is exponential with full jitter: a 1 s base, doubling, capped at 60 s, and at most 6 retries
-(initial defaults). A `retry-after` header takes precedence. Every retry emits an event, and many 429s
-in a short window raise a rate-limit-storm notification. The connect timeout is 30 s. The stream idle
-timeout is 120 s: the API sends periodic pings, so silence means a dead connection. There is no limit
-on total request time, because long thinking turns are normal at high effort. Backoff waits use an
-injectable clock, so tests never sleep.
+Backoff is exponential with jitter: 1 s doubled per retry, capped at 60 s, then multiplied by a random
+factor between 0.5 and 1, with at most 4 retries. A `retry-after-ms` header, or a `retry-after` header
+in seconds (HTTP dates are not supported), sets a minimum for the delay, itself capped at 15 minutes.
+Waits end early on Abort. Every retry emits a `retry` event and a `retry` record in the transcript.
+The connect timeout is 30 s. The stall timeout is 120 s: a transfer fails when no byte moves for that
+long, and the API sends periodic pings, so silence means a dead connection. There is no limit on total
+request time, because long thinking turns are normal at high effort. Backoff waits go through an
+injectable sleep function, so tests never sleep.
 
 ## Tools
 
 Conventions shared by all tools:
 
 - The definitions are part of the frozen prefix. They are declared in the first request of every
-  session and never change within a run, because adding a tool later would change the prefix.
-- Every schema is a JSON object schema with `additionalProperties: false` and `required`, and every
-  tool sets `strict: true` and `eager_input_streaming: true`.
-- Strict schemas cannot express numeric ranges or string lengths, so Decomp's validator enforces those
-  rules (listed per tool). A violation produces an `is_error` result, and the tool does not run.
-- Results are a single text block holding compact, key-sorted JSON. `is_error: true` is used when the
-  call produced nothing usable: invalid input, a failed compile, or a missing symbol.
-- Results are capped in size and say when they were truncated. All limits below are initial values.
-- The definitions below are shown with keys in a readable order. On the wire, like all of Decomp's
-  JSON, they are serialized with sorted keys.
+  session and never change within it, because adding a tool later would change the prefix.
+- Every schema is a JSON object schema with `additionalProperties: false`, and every property is
+  listed in `required` (strict tool use has no optional fields). Every tool sets `strict: true` and
+  `eager_input_streaming: true`.
+- Decomp's validator checks each input against the schema before the tool runs: types, required
+  properties, unexpected properties and enums. The schemas declare no numeric ranges or string
+  lengths; the tools apply their own limits, listed per tool. Input that fails the strict parse or the
+  schema check gets an `INVALID_JSON` error result ([Streaming](#streaming)), and the tool does not
+  run.
+- Results are plain text. `is_error: true` marks a call that produced nothing usable: invalid input,
+  an empty argument, an unknown function or address, or a rejected `submit_result`. A failed compile
+  is a normal result, not an error.
+- Large results are capped: listings at 400 lines, diffs at 80 rows, memory reads at 4096 bytes,
+  symbol searches at 25 matches, raw compiler output at 4000 bytes.
+- The definitions below are shown exactly as they are sent: keys sorted, like all of Decomp's JSON.
+  Tools are sent sorted by name.
 
 ### `compile_and_diff`
 
-Compiles a complete translation unit with the target's toolchain and flags, extracts the function
-being matched, and diffs it against the target ([matching.md](matching.md)). Every call is recorded as
-an attempt in the function's history.
+Compiles a complete translation unit with the target's toolchain, flags and include directories,
+extracts the function being matched, and diffs it against the target ([matching.md](matching.md)).
+Every call is an attempt: it is recorded in `attempts.jsonl`, and an attempt that scores at least the
+best so far becomes `best.cpp`.
 
 ```json
 {
-  "name": "compile_and_diff",
-  "description": "Compile a complete, self-contained C++ translation unit with the target's original compiler and flags, extract the function being matched from the object file, and diff it against the target. Returns compiler diagnostics if compilation fails; otherwise the match percentage, exact and byte_exact flags, differing instructions with context, symbol bindings and hints. Every call is recorded as an attempt.",
-  "strict": true,
+  "description": "Compile a complete candidate translation unit with the target's original toolchain and flags, and diff the target function against the result. Returns compiler errors, or the match percentage, the differing instructions side by side (target | candidate) and hints. Call this for every candidate you want checked.",
   "eager_input_streaming": true,
   "input_schema": {
-    "type": "object",
+    "additionalProperties": false,
     "properties": {
       "source": {
-        "type": "string",
-        "description": "The complete translation unit: all declarations it needs and the definition of the function being matched, whose decorated name must equal the target symbol. No inline assembly."
+        "description": "Complete C/C++ translation unit defining the target function",
+        "type": "string"
       }
     },
-    "required": ["source"],
-    "additionalProperties": false
-  }
+    "required": [
+      "source"
+    ],
+    "type": "object"
+  },
+  "name": "compile_and_diff",
+  "strict": true
 }
 ```
 
-Validator: `source` is at most 256 KB. Here are three example results. In the first, `diff` is the
-compact diff from [matching.md](matching.md#8-output-formats), abbreviated:
+An empty `source` is an `is_error` result. Otherwise the result starts with `compile: ok` (plus
+`(cached)` for a [cache](matching.md#compile-cache) hit) or `compile: FAILED`, followed by the
+compiler diagnostics (up to 20), the reason no diff was produced, or the compact text diff (2 rows of
+context, at most 80 rows; [matching.md](matching.md#8-output-formats)), and ends with the attempt
+number and the best score so far. Three results from scripted sessions with clang-cl (in the last
+two, an earlier session had already matched the function, hence the best score):
 
-```json
-{"attempt": 4, "best_percent": 97.0, "cached": false, "compile_ms": 812,
- "diff": {"byte_exact": false, "exact": false, "match_percent": 97.0}}
+```
+compile: ok
+match 68.8% (2/4 equal; 1 operand, 1 opcode) - not matching
+target ?add@@YAHHH@Z (15 bytes) | candidate ?add@@YAHHH@Z (15 bytes)
+~    0: mov eax, dword ptr [esp+0x8]                  |    0: mov eax, dword ptr [esp+0x4]  (op1 stack)
+!    4: add eax, dword ptr [esp+0x4]                  |    4: sub eax, dword ptr [esp+0x8]
+     8: add eax, dword ptr [g_counter]                |    8: add eax, dword ptr [g_counter]
+     e: ret                                           |    e: ret
+
+attempt 1: best so far 68.8%
 ```
 
-```json
-{"attempt": 3,
- "diagnostics": [{"code": "C2065", "col": 0, "file": "candidate.cpp", "line": 12,
-                  "msg": "'n' : undeclared identifier", "severity": "error"}],
- "error": "compilation failed"}
+```
+compile: FAILED
+line 1:40: error: use of undeclared identifier 'nope'
+
+attempt 1: best so far 100.0%
 ```
 
-```json
-{"attempt": 5, "defined_functions": ["?sum_array@@YAHPAHH@Z"],
- "error": "symbol ?sum_array@@YAHPBHH@Z is not defined by the candidate"}
+```
+compile: ok
+diff: the candidate object does not define '?add@@YAHHH@Z' (it defines: ?plus@@YAHHH@Z)
+attempt 2: best so far 100.0%
 ```
 
-The last two are `is_error` results. In the third, the candidate defined `int sum_array(int *, int)`
-instead of `int sum_array(const int *, int)`; the decorated names show the difference.
+None of these is an `is_error` result. The candidate's function is found by its decorated name or by
+an equivalent name ([matching.md](matching.md#2-candidate-side)); in the last result the candidate
+defined a function with a different name.
 
 ### `disassemble`
 
 ```json
 {
-  "name": "disassemble",
-  "description": "Return the annotated disassembly of a function or code address in the target: labels, operands symbolized with demangled signatures, string and float comments, frame variable names, loop and branch hints, and jump tables.",
-  "strict": true,
+  "description": "Annotated disassembly of any function in the target program (callers, callees, helpers). Use it to learn signatures, calling conventions and structure layouts.",
   "eager_input_streaming": true,
   "input_schema": {
-    "type": "object",
+    "additionalProperties": false,
     "properties": {
       "target": {
-        "type": "string",
-        "description": "A function name (decorated or demangled) or a hex address such as 0x401000."
-      },
-      "max_instructions": {
-        "type": "integer",
-        "description": "Maximum number of instructions to return. Default 400; values above 2000 are capped."
+        "description": "Function name or address (e.g. \"add\", \"?add@@YAHHH@Z\", \"0x401060\")",
+        "type": "string"
       }
     },
-    "required": ["target"],
-    "additionalProperties": false
-  }
+    "required": [
+      "target"
+    ],
+    "type": "object"
+  },
+  "name": "disassemble",
+  "strict": true
 }
 ```
 
-Validator: `max_instructions` must be at least 1 and is clamped to 2000. The output is capped at
-24 KB.
+`target` is a decorated, readable or PDB name, or an address (`0x401060`, `401060h`). The result is
+the annotated listing that `decomp disasm --no-bytes` prints, cut to 400 lines with a note on how
+many were omitted. An unknown target is an `is_error` result: "unknown function 'nope'; try
+lookup_symbol".
 
 ### `read_memory`
 
 ```json
 {
-  "name": "read_memory",
-  "description": "Read initialized data from the target image and format it. Use it for globals, tables, strings and constants that the function references.",
-  "strict": true,
+  "description": "Read data from the target image: string contents, tables, constants, initial values of globals. Use it when the disassembly references data you need to reproduce exactly.",
   "eager_input_streaming": true,
   "input_schema": {
-    "type": "object",
+    "additionalProperties": false,
     "properties": {
       "address": {
-        "type": "string",
-        "description": "Hex address (0x4A3F20) or symbol name, optionally with an offset (g_table+0x10)."
+        "description": "Address or symbol name, optionally +offset (e.g. \"0x402010\", \"g_table+0x8\")",
+        "type": "string"
       },
       "count": {
-        "type": "integer",
-        "description": "Number of elements of the chosen format to read; for string formats, the maximum number of characters."
+        "description": "Number of elements to read (bytes for \"bytes\"; ignored for \"string\")",
+        "type": "integer"
       },
       "format": {
-        "type": "string",
-        "enum": ["hex", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "ptr", "string", "wstring"],
-        "description": "Element format. 'ptr' prints pointer-sized values with symbol names; 'string' and 'wstring' read NUL-terminated narrow or UTF-16 text."
+        "description": "How to interpret the memory",
+        "enum": [
+          "bytes",
+          "string",
+          "u8",
+          "u16",
+          "u32",
+          "u64",
+          "i8",
+          "i16",
+          "i32",
+          "i64",
+          "f32",
+          "f64",
+          "pointer"
+        ],
+        "type": "string"
       }
     },
-    "required": ["address", "count", "format"],
-    "additionalProperties": false
-  }
+    "required": [
+      "address",
+      "count",
+      "format"
+    ],
+    "type": "object"
+  },
+  "name": "read_memory",
+  "strict": true
 }
 ```
 
-Validator: `count` is at least 1, and at most 4096 bytes are read. Reads of uninitialized data
-(`.bss`) return zeros marked as uninitialized. Addresses outside the image are an error.
+`count` is clamped to 1-4096, and at most 4096 bytes are read. `bytes` prints a hex dump, 16 bytes per
+line; `string` reads a NUL-terminated string of up to 4096 characters and prints it escaped; the
+integer and float formats print one indexed value per line; `pointer` prints pointer-sized values with
+the symbol each one points to. The result starts with the address's symbol and value, for example
+`int *g_table+0x8 (0x40300c):`. An address outside the image, or an unknown symbol, is an `is_error`
+result. Bytes that are not backed by the file (such as `.bss`) read as zero, with the note
+"(uninitialized data reads as zero)".
 
 ### `lookup_symbol`
 
 ```json
 {
-  "name": "lookup_symbol",
-  "description": "Look up symbols in the target by address, decorated name, or part of a demangled name. Returns address, kind, size, decorated and demangled names with calling convention, the symbol's source, and the status for functions.",
-  "strict": true,
+  "description": "Find symbols by exact name, partial name or address; returns addresses, kinds, sizes and readable signatures. Use it to get the exact declaration of something the function references.",
   "eager_input_streaming": true,
   "input_schema": {
-    "type": "object",
+    "additionalProperties": false,
     "properties": {
       "query": {
-        "type": "string",
-        "description": "An address (0x...), a decorated name (?Update@Player@@QAEXM@Z), or part of a demangled name (Player::Update). An address inside a symbol returns the containing symbol and the offset."
+        "description": "Name, part of a name, or address",
+        "type": "string"
       }
     },
-    "required": ["query"],
-    "additionalProperties": false
-  }
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  },
+  "name": "lookup_symbol",
+  "strict": true
 }
 ```
 
-Validator: `query` is non-empty. At most 20 matches are returned.
+A query that resolves to an address (an address, or an exact name) returns the symbol at or around
+that address. Otherwise the query is matched, ignoring case, as a substring of the decorated, readable
+and PDB names, and up to 25 matches are listed (then "... more matches; refine the query"). Each match
+is one line: address, kind, size, readable name and decorated name, for example
+`0x403000 data     size 4     int g_counter  [?g_counter@@3HA]`. An empty query is an `is_error`
+result.
 
 ### `record_note`
 
 ```json
 {
-  "name": "record_note",
-  "description": "Save a short note about this function: what was tried, what the hints suggested, what remains open. Notes are kept with the function's history and shown in future attempts.",
-  "strict": true,
+  "description": "Save a short note for future attempts on this function (what you learned, what did not work). Notes persist across sessions.",
   "eager_input_streaming": true,
   "input_schema": {
-    "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "text": {"type": "string", "description": "The note, in a few sentences."}
+      "text": {
+        "description": "Short note for future attempts on this function",
+        "type": "string"
+      }
     },
-    "required": ["text"],
-    "additionalProperties": false
-  }
+    "required": [
+      "text"
+    ],
+    "type": "object"
+  },
+  "name": "record_note",
+  "strict": true
 }
 ```
 
-Validator: `text` is non-empty and at most 4 KB. Notes are appended to
-`.decomp/functions/<fn>/notes.md` with a timestamp and the session ID.
+An empty `text` is an `is_error` result. Notes are appended to `.decomp/functions/<fn>/notes.md` as
+`- YYYY-MM-DD HH:MM: <text>` and shown in the briefs of later sessions; the result is "noted". Without
+a project, notes are not saved.
 
 ### `submit_result`
 
 ```json
 {
-  "name": "submit_result",
-  "description": "Finish the session. Use outcome 'matched' only after compile_and_diff reported byte_exact; Decomp re-verifies the source and saves it, or returns the diff as an error if it does not match. Use 'give_up' with a reason when further attempts are unlikely to help.",
-  "strict": true,
+  "description": "Finish this function. Use outcome \"matched\" with the exact source once compile_and_diff reported a byte-exact match (it is re-verified), or \"give_up\" with your best source and the reason when stuck.",
   "eager_input_streaming": true,
   "input_schema": {
-    "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "outcome": {"type": "string", "enum": ["matched", "give_up"]},
-      "source": {
-        "type": "string",
-        "description": "For 'matched': the matching translation unit. If omitted, the best byte-exact attempt of this session is used."
+      "outcome": {
+        "description": "matched (re-verified) or give_up",
+        "enum": [
+          "matched",
+          "give_up"
+        ],
+        "type": "string"
       },
       "reason": {
-        "type": "string",
-        "description": "For 'give_up': why the function could not be matched and what was learned."
+        "description": "Why you are giving up (empty when matched)",
+        "type": "string"
+      },
+      "source": {
+        "description": "The matching source, or your best attempt when giving up",
+        "type": "string"
       }
     },
-    "required": ["outcome"],
-    "additionalProperties": false
-  }
+    "required": [
+      "outcome",
+      "reason",
+      "source"
+    ],
+    "type": "object"
+  },
+  "name": "submit_result",
+  "strict": true
 }
 ```
 
-Validator: `reason` is required for `give_up`. For `matched`, either `source` is present or the
-session has a byte-exact attempt.
+For `matched`, `source` must not be empty; it is verified as described [above](#the-loop). An accepted
+match returns "accepted: byte-exact match verified."; a rejected one returns an `is_error` result that
+starts with "not accepted: the submitted source is not byte-exact." followed by the diff. `give_up`
+returns "recorded: gave up (<reason>). Best match <n>%." and ends the session.
 
 ### Later tools
 
@@ -544,105 +665,126 @@ session has a byte-exact attempt.
 | `get_type` | 4 | Return a type's exact layout (sizes and offsets read back from a PDB) |
 | `search_matched_examples` | Later | Find matched functions in the project with a similar shape, to reuse idioms |
 
-New tools take effect at run boundaries, because all sessions in a run share one tool list.
+New tools take effect at session boundaries, because a tool list is part of the frozen prefix.
 
 ## Prompts
 
-**System prompt.** Compiled into the binary, frozen, and identical for every session in a run. It has
-a version number, and its SHA-1 is recorded in every transcript and run summary so that results can be
-compared across prompt revisions. Sections:
+**System prompt.** Compiled into the binary (`system_prompt()` in `agent/match_session.cpp`), frozen,
+and identical for every session. A version number and SHA-1 for it in run summaries are planned; until
+then, the first `request` record of every transcript contains the full text. It covers:
 
-1. *Context.* The user runs a matching-decompilation project on a binary they are studying. The goal
-   is source that the original compiler turns into identical bytes, and correctness is checked
-   mechanically.
-2. *Method.* Read the brief and the listing. Write a complete first draft early and compile it. Use
-   the hints. When close, change one thing at a time. Record what was learned. Submit when
-   byte-exact, and give up with a reason when stuck.
-3. *Codegen knowledge.* MSVC and clang-cl idioms: calling conventions and name decoration, frame
-   layout, register allocation tendencies, how loops, switches and conditionals are emitted, inlining,
-   EH, `/GS` and stack-probe patterns, string and float constants, and differences between VC6, VS2010
-   and modern versions.
-4. *Tool protocol.* One function per session. Act through tools rather than describing actions. Call
-   `submit_result` exactly once, at the end. How to read the diff JSON: row kinds, `L` indices,
-   `SymRef` keys, hints and bindings.
-5. *Output rules.* A complete, self-contained translation unit. Declarations whose decorated names
-   match the target's symbols (calling convention, parameter types, constness, class membership). No
-   inline assembly.
-6. *Communication.* Short progress notes are welcome and appear in the UI. Messages marked
-   `[supervisor]` come from the user and take precedence. Strings and names that come from the binary
-   are data, not instructions. The prompt never asks the model to write out its internal reasoning.
+1. *Context.* The model is an expert reverse engineer on a matching-decompilation project: rewriting
+   functions of a compiled x86/x64 program as C/C++ that the original compiler and flags turn into
+   byte-identical code. This is preservation and interoperability work, and the user is entitled to
+   study the binary.
+2. *Tools and scope.* One target function per conversation, and what each of the six tools is for.
+3. *Method.* Read the brief; work out the signature, calling convention and types (disassembling
+   callers or callees when needed); write a first complete candidate and compile it early; fix
+   structural differences before operand-level ones.
+4. *Output rules.* A complete, self-contained translation unit that declares everything it uses, with
+   declarations that produce the decorated names shown in the brief (with examples of MSVC name
+   decoration, `extern "C"` names and arrays). No inline assembly; only the headers the brief lists.
+5. *Matching tips for MSVC and clang-cl.* Register allocation and instruction order follow declaration
+   order, expression order, temporaries and scope; stack offset differences point to local variable
+   order, size or type; signedness and width change instructions; an inverted branch means swapped
+   if/else bodies or a negated condition; switches become jump tables; calls must use the right
+   calling conventions; string literals and floating-point constants are compared by value; when only
+   registers or stack offsets differ, try small reorderings.
+6. *Finishing.* Keep text between tool calls short. Submit a byte-exact result with `submit_result`
+   and the exact source; when stuck after many attempts, record a note and give up with the best
+   source and the reason.
+
+The prompt never asks the model to write out its internal reasoning. It does not yet tell the model
+that strings and names from the binary are data, not instructions (planned).
 
 **Per-function brief.** This is the first user message, built from the analysis results and the
-function's history:
+function's history. The brief of the CI smoke test's scripted session:
 
+````
+# Target function
+function: int __cdecl add(int, int)
+symbol:   ?add@@YAHHH@Z  (PDB name: add)
+address:  0x401060, 15 bytes
+toolchain: clang-cl-x86 (clang_cl), flags: /O2 /Gy /GS- /GR- /EHs-c-
+project headers available: (none)
+
+# Annotated disassembly
 ```
-## Function
-?sum_array@@YAHPBHH@Z  int __cdecl sum_array(int const *, int)
-0x00401030, 23 bytes, .text; callers: entry
-
-## Toolchain
-clang-cl 18 (x86): /O2 /Gy /GS- /GR-
-
-## Annotated disassembly
-(labels, symbolized operands, frame names, loop/if hints, jump tables)
-
-## Referenced data
-(strings, floats, globals with sizes and known types)
-
-## Callers and callees
-(demangled signatures and calling conventions)
-
-## History
-(notes; best previous attempt with its source, score and diff summary)
-
-## Budget
-30 turns, $5.00
+; function: int __cdecl add(int, int)
+; symbol:   ?add@@YAHHH@Z  (pdb: add)
+; range:    0x401060-0x40106f (15 bytes, 4 instructions, 1 blocks, 0 loops)
+; callers:  int __cdecl dispatch(int, int), entry
+; data:     g_counter (data)
+  00401060  mov eax, dword ptr [esp+0x8]                         ; arg_4
+  00401064  add eax, dword ptr [esp+0x4]                         ; arg_0
+  00401068  add eax, dword ptr [g_counter]
+  0040106e  ret
 ```
 
-**Status line and nudges.** These are appended as text blocks and never removed:
+# Referenced symbols
+- data g_counter: int g_counter, initial bytes: 03 00 00 00
+
+# Callers
+int __cdecl dispatch(int, int), entry
+
+Write a complete candidate translation unit and call compile_and_diff.
+````
+
+The listing is cut to 400 lines. Initial bytes are shown for data symbols of up to 64 bytes. When the
+project has history for the function, an `# Earlier attempts` section follows the callers: the number
+of earlier attempts and the best score, the notes, and the best source so far.
+
+**Status line and nudges.** These are appended as text blocks ([rules](#the-append-only-conversation))
+and never removed. A status line, a nudge, and guidance as the model sees them:
 
 ```
-[decomp] turn 7 of 30; best 97.0% (attempt 4); spent $1.84 of $5.00
-[decomp] No tool was called. Continue with compile_and_diff, or finish with submit_result.
-[supervisor] Try declaring the loop counter before the pointer.
+[status] turns left: 37; attempts: 2; best match: 100.0%
+You ended your turn without calling `submit_result`. Continue working on the task, and call `submit_result` when you are done.
+[Supervisor guidance] Try declaring the loop counter before the pointer.
 ```
+
+The status line does not mention spend; the budgets are enforced by the loop.
 
 ## Transcripts and event logs
 
-Run data lives in the project's `.decomp/` directory ([project-format.md](project-format.md)):
+Run data lives in the project's `.decomp/` directory ([project-format.md](project-format.md)), or under
+`--log-dir`:
 
 ```
-.decomp/runs/<run-id>/events.jsonl          every event of the run, in order
-.decomp/runs/<run-id>/sessions/<fn>.jsonl   the full transcript of one session
-.decomp/runs/<run-id>/summary.json          totals: outcomes, tokens by type, USD, durations
-.decomp/functions/<fn>/attempts.jsonl       every compile_and_diff attempt (fed into future briefs)
+.decomp/runs/<run-id>/events.jsonl          every event of the run except stream deltas, in order
+.decomp/runs/<run-id>/sessions/<fn>.jsonl   the transcript of one session
+.decomp/runs/<run-id>/summary.json          totals: status, model, effort, cost, per-function outcome and usage
+.decomp/functions/<fn>/attempts.jsonl       every compile attempt (fed into future briefs)
 ```
 
 A transcript is one JSON object per line, distinguished by `type`:
 
 | `type` | Contents |
 |---|---|
-| `session` | Run and session IDs, function, model, request parameters, beta headers, prompt version and SHA-1, the tool definitions and system prompt (the frozen prefix, once) |
-| `message` | Each appended message exactly as sent: the brief, committed assistant responses, tool results with status and guidance, nudges |
-| `response` | Per turn: message ID, request ID, serving model, `stop_reason`, `stop_details`, usage (with iterations), cost, time to first token, total latency, retries, rate-limit headers |
-| `raw` | The raw assistant response, only when the fallback echo rule changed it |
-| `tool` | Per tool call: name, validated input, result, `is_error`, duration, attempt number |
-| `outcome` | `MatchOutcome`, reason, best attempt, totals |
+| `request` | The first request body in full (`turn` 1): model, settings, system prompt, tools and the brief |
+| `request_delta` | For every later turn: the messages appended since the previous request. History is append-only, so these reconstruct each request body exactly. |
+| `response` | Per turn: message `id`, serving `model`, `stop_reason`, `stop_details`, the raw `content` (thinking blocks with signatures, `fallback` blocks), the raw `usage` (with `iterations`), `had_fallback`, `cost_usd`, `latency_ms`, `request_id` |
+| `tool` | Per tool call: `turn`, `id`, `name`, `input` (the raw text when it was not valid JSON), `is_error`, `result`, `elapsed_ms` |
+| `retry` | A retried request: `turn`, `attempt`, `error`, `delay_ms` |
+| `guidance` | Supervisor guidance as it was sent: `turn`, `text` |
+| `paused`, `resumed` | Pause and resume points (`turn`) |
+| `outcome` | `outcome`, `detail`, `best_match`, `turns`, `cost_usd`, `usage` |
 
-The `session` and `message` records reconstruct every request body exactly, which the replay tests rely
-on. **Never recorded:** the API key and credential headers. Trace-level HTTP logging redacts
-`x-api-key`.
+**Never recorded:** the API key and the request headers. The scripted-replay transport also masks
+`x-api-key` in the requests it records.
 
 ## Cost accounting
 
-`CostMeter` converts usage into dollars with a configurable price table. The defaults (USD per million
-tokens, list prices as of October 2026) are:
+`response_cost` converts usage into dollars with a price table compiled into Decomp
+(`agent/cost.cpp`). The prices, in USD per million tokens, are:
 
 | Model | Input | Output | Cache write (5 min) | Cache read |
 |---|---|---|---|---|
 | `claude-opus-5-5` | 4.00 | 20.00 | 5.00 | 0.20 |
-| `claude-sonnet-5-5` | 2.00 | 10.00 | 2.50 | 0.20 |
 | `claude-opus-5` | 5.00 | 25.00 | 6.25 | 0.50 |
+| `claude-opus-4-8` | 5.00 | 25.00 | 6.25 | 0.50 |
+| `claude-sonnet-5-5` | 2.00 | 10.00 | 2.50 | 0.20 |
+| `claude-fable-5-1` | 10.00 | 50.00 | 12.50 | 0.25 |
 | `claude-haiku-4-5` | 1.00 | 5.00 | 1.25 | 0.10 |
 
 ```
@@ -651,78 +793,73 @@ usd = (input_tokens * input + output_tokens * output
 ```
 
 - When `usage.iterations` is present (a fallback ran), each attempt is priced at the rates of the model
-  that ran it. Otherwise the top-level usage is priced at the response's `model`.
+  that ran it (an entry without a model at the configured model's rates), and the turn's usage is the
+  sum of all attempts. Otherwise the top-level usage is priced at the response's `model`.
+- A model ID matches its table row exactly, or through the longest row that is a prefix followed by
+  `-` or `@` (dated or platform variants such as `claude-opus-5-5-20270101`).
+- A serving model without a row is priced at the configured model's rates. If the configured model
+  has no row either, everything is priced at the `claude-opus-5-5` row and a warning is logged.
 - Thinking is billed as output and is included in `output_tokens`. `input_tokens` covers only the
   uncached part of the prompt; the full prompt size is input plus cache write plus cache read.
 - Decomp uses the 5-minute cache TTL, so 1-hour cache writes (twice the input price) are not in the
   table.
-- A fallback can be served by a model without a row (for Claude Opus 5.5, possibly Claude Opus 4.8).
-  Its usage is priced at the highest rates in the table for budget purposes and flagged in the UI
-  until a row is added.
-- Prices change. The table lives in configuration (`agent.prices`, or the Settings view), and the
-  defaults should be checked against current pricing.
+- Prices change. The table is code; making it configurable is planned.
 
 Example: a turn with 2,000 uncached input tokens, 30,000 cache-read tokens, 3,500 cache-write tokens
-and 9,000 output tokens on `claude-opus-5-5` costs 0.008 + 0.006 + 0.0175 + 0.18 = **$0.2115**. Totals
-roll up per turn, session, function, run and day. "$ per match" is run spend divided by functions
-matched.
+and 9,000 output tokens on `claude-opus-5-5` costs 0.008 + 0.006 + 0.0175 + 0.18 = **$0.2115**. Costs
+roll up per turn (`turn_finished` events), per session (the outcome, `summary.json`), per function
+(`cost=` in `symbols.txt`, which `decomp status` sums) and per run (`summary.json`).
 
 ## Safety
 
 - **Compiled, never executed.** No tool runs target or candidate code. Decomp contains no emulator
   and never launches the target.
 - **Writes are confined to the project.** The agent has no general file-writing tool. Decomp itself
-  writes only to `src/functions/<fn>.cpp` (verified sources), `symbols.txt` (statuses and bindings) and
-  `.decomp/` (history, runs, build directories, cache). Paths come from sanitized function keys, never
-  from model output.
-- **Compiler inputs are checked.** Each candidate compiles in a fresh directory. Before compiling,
-  Decomp rejects `#include` directives with absolute paths or `..` escapes outside the configured
-  include directories, as well as MSVC `#import`. Otherwise a candidate could pull arbitrary local
-  files into diagnostics that go back to the API. This safeguard is planned; its details are open.
+  writes only to `src/functions/<fn>.cpp` (verified sources), `symbols.txt` (statuses, scores and
+  spend) and `.decomp/` (history, runs, build directories, cache). Paths come from sanitized function
+  keys, never from model output.
+- **Compiler inputs are checked (planned).** Each candidate compiles in a fresh directory. Rejecting
+  `#include` directives with absolute paths or `..` escapes outside the configured include directories,
+  as well as MSVC `#import`, is planned; until then a candidate could pull local files into
+  diagnostics that go back to the API.
 - **The API key stays in memory.** It is read from `ANTHROPIC_API_KEY` and never written to project
-  files, transcripts, event logs, log files or crash output. The UI shows only whether a key is present
-  and valid.
+  files, transcripts, event logs or log files. `decomp agent` refuses to start without it, except with
+  `--replay`, which sends nothing.
 - **What leaves the machine:** the system prompt, the tool definitions, the per-function brief
-  (annotated disassembly, referenced data, symbol names, notes and previous attempts) and tool results
-  (diffs, diagnostics, disassembly, memory reads). Use the agent only on binaries whose code you are
-  comfortable sending to the API.
-- **Untrusted content.** Strings and names from the target appear in prompts. The system prompt marks
-  them as data, and the narrow tool surface (read-only queries plus compile) bounds what injected text
-  could do.
-- **Control.** Budgets cap spend, Abort is always available, and refusals are respected.
+  (annotated disassembly, referenced data, symbol names, notes and the best previous source) and tool
+  results (diffs, diagnostics, disassembly, memory reads). Use the agent only on binaries whose code
+  you are comfortable sending to the API.
+- **Untrusted content.** Strings and names from the target appear in prompts. The narrow tool surface
+  (read-only queries plus compile) bounds what injected text could do; marking such content as data in
+  the system prompt is planned.
+- **Control.** Budgets cap spend, Abort is always available (Ctrl+C twice), and refusals are respected.
 
 ## Configuration
 
-Agent settings live in the `agent` object of `decomp.json`, so they are shared with the project. From
-Phase 1, the Settings view can also hold per-user overrides. Key names and the initial defaults below
-may change during implementation.
+Agent settings live in the `agent` object of `decomp.json`, so they are shared with the project, and
+`decomp agent` options override them for one run. From Phase 1, the Settings view can also hold
+per-user overrides.
 
-| Key | Default | Notes |
-|---|---|---|
-| `model` | `claude-opus-5-5` | |
-| `max_tokens` | `64000` | Per response |
-| `effort` | `high` | `low`, `medium`, `high`, `xhigh` or `max`; fixed for a run |
-| `thinking_display` | `summarized` | `omitted` hides the summaries; it does not change cost |
-| `fallbacks` | `default` | `off` disables server-side fallbacks |
-| `budgets.function.max_turns` | `30` | |
-| `budgets.function.max_usd` | `5.00` | |
-| `budgets.function.max_tokens` | `6000000` | All four usage fields combined. A safety net: cache reads grow every turn, so USD is the primary budget. |
-| `budgets.function.max_wall_clock_minutes` | `30` | |
-| `budgets.run.max_usd` | `50.00` | |
-| `nudges` | `2` | Reminders after an `end_turn` without `submit_result` |
-| `retries.max` | `6` | |
-| `retries.base_delay_ms`, `retries.max_delay_ms` | `1000`, `60000` | |
-| `timeouts.connect_s`, `timeouts.stream_idle_s` | `30`, `120` | |
-| `tool_limits` | As listed under [Tools](#tools) | Output caps and default sizes |
-| `prices` | The table above | Add or override models |
-| `concurrency` | `1` | Workers per run (Phase 1) |
+| Key | Default | Option | Notes |
+|---|---|---|---|
+| `model` | `claude-opus-5-5` | `--model` | |
+| `effort` | `high` | `--effort` | `low`, `medium`, `high`, `xhigh` or `max`; fixed for a session |
+| `fallbacks` | `true` | `--no-fallbacks` | `false` disables server-side fallbacks |
+| `max_turns` | `40` | `--max-turns` | Requests per session |
+| `max_usd_per_function` | `5.0` | `--budget-usd` | `0` means unlimited |
+| `max_tokens_per_function` | `0` | `--max-tokens` | All four usage fields combined; `0` means unlimited. Cache reads grow every turn, so USD is the primary budget. |
+| `max_minutes_per_function` | `30` | `--max-minutes` | Wall clock; `0` means unlimited |
+
+Fixed in this version (configurable later): `max_tokens` 64000, thinking display `summarized`, 2
+nudges, 4 retries with a 1 s base and a 60 s cap, a 30 s connect timeout, a 120 s stall timeout, the
+tool limits and the price table. A run budget and concurrency arrive with the Phase 1 batch runner.
 
 The API key is the one setting that never lives in a file: it comes from `ANTHROPIC_API_KEY`.
 
 ## Running live
 
-1. Build Decomp, create a project, and make sure `decomp toolchain test <name>` passes for the
-   project's toolchain.
+1. Build Decomp, create a project (`decomp init <binary> --toolchain <name> --flag ...`), and make
+   sure `decomp toolchain test <name>` passes for the project's toolchain.
 2. Set the key:
 
    ```sh
@@ -731,49 +868,71 @@ The API key is the one setting that never lives in a file: it comes from `ANTHRO
    set ANTHROPIC_API_KEY=<your key>             # Windows cmd
    ```
 
-3. Run one function with the live view:
+3. Run one function:
 
    ```sh
-   decomp agent sum_array --progress
+   decomp agent sum_array
    ```
 
-   Planned behavior: the first Ctrl+C requests a stop (the current turn finishes) and a second one
-   aborts.
+   The live progress view is on by default (on stderr; `--no-progress` hides it, and `--progress`
+   keeps it with `--json` or `-q`). The first Ctrl+C stops after the current turn, a second aborts the
+   request in flight, and a third exits at once. With `--interactive`, every line typed on stdin is
+   queued as guidance for the next request, except `:pause`, `:resume`, `:stop`, `:abort` and
+   `:help`. `--guidance <text>` (repeatable) sends guidance with the first request. Exit codes: 0
+   matched, 2 not matched (gave up, budget, turn limit, no result, stopped), 3 refused, 1 error or
+   aborted.
 4. Check the results:
    - `decomp status`;
    - the source in `src/functions/`;
-   - the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl`, where
-     `cache_read_input_tokens` should be greater than zero from the second turn.
+   - the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl`, where the `response` records
+     should show `cache_read_input_tokens` greater than zero from the second turn.
+
+Without a project, `decomp agent <func> --binary <exe> --toolchain <name>` works on a bare binary;
+nothing is persisted unless `--log-dir <dir>` is given, and the best source is printed at the end.
 
 ## Offline replay testing
 
 All agent tests run without a network or a key:
 
-- `ReplayTransport` serves recorded HTTP exchanges in order (status, headers and an SSE body) from a
-  JSONL file, and records the outgoing requests for assertions. The line format is illustrative:
+- `ReplayTransport` serves scripted HTTP exchanges in order from a JSONL file (blank lines and `#`
+  comments are skipped) and records the outgoing requests for assertions, with `x-api-key` and
+  `authorization` masked. Each line is one response:
 
-  ```json
-  {"body": "event: message_start\ndata: {...}\n\n...", "headers": {"content-type": "text/event-stream"}, "status": 200}
+  ```
+  {"events": [{"data": {"type": "ping"}, "event": "ping"}], "headers": {"request-id": "req_1"}, "status": 200}
+  {"sse": "event: ping\ndata: {\"type\": \"ping\"}\n\n", "status": 200}
+  {"body": {"error": {"message": "Overloaded", "type": "overloaded_error"}, "type": "error"}, "headers": {"retry-after": "0"}, "status": 529}
+  {"network_error": "connection reset"}
   ```
 
-- Scripted scenarios in `tests/replay/` cover:
-  - *match*: a wrong source, its diff, a corrected source, `submit_result`, `matched`, and the source
-    written to the project;
-  - *refusal*: `refused`, with no tools run and the best attempt kept;
-  - *budget exhaustion*: `budget_exhausted`;
-  - *guidance*: supervisor guidance injected mid-run lands after the tool results, and the history
-    stays append-only;
-  - *retries*: a 429 with `retry-after`, a 529, and a mid-stream `overloaded_error`;
-  - *SSE edge cases*: thinking and signature deltas, tool JSON split across chunks, invalid tool JSON,
-    `max_tokens` in the middle of a tool call, and `ping` and `error` events.
-- Assertions cover:
-  - outcomes and function statuses;
-  - the emitted events;
-  - the append-only property;
-  - the written transcripts and history;
-  - the absence of the API key: tests set a sentinel key, then scan every file written.
-- From the CLI: `decomp agent <func> --replay tests/replay/match_add.jsonl --progress` runs the same
-  path end to end.
+  `events` lists the response's SSE events, from `message_start` to `message_stop` (shortened to one
+  `ping` above), and is serialized as SSE (`"crlf": true` switches to CRLF line endings). `sse` is
+  raw SSE text, `body` is a plain response body, and `"disconnect_after": N` delivers only the first
+  N bytes and then fails with a network error. Successful bodies arrive in pseudo-random chunks of
+  1-61 bytes, to exercise parsing across chunk boundaries. When the script runs out, the request
+  fails.
+- Scripted sessions:
+  - `tests/replay/agent_match_add.jsonl` matches `add` in the x86 fixture with clang-cl: two lookups in
+    parallel, a wrong attempt, its diff, a corrected attempt, `submit_result`, `matched`. The CI smoke
+    test and the Windows MSVC round trip run it through `decomp agent`.
+  - `tests/replay/agent_session_sum_array.jsonl` drives the loop with stub tools: thinking with
+    signatures, two parallel read-only calls, a 429 with `retry-after`, two compiles, a turn that ends
+    without a tool call (nudged), and `submit_result`.
+  - The unit tests script further sessions in code: a wrong source, its diff, a corrected source and
+    `submit_result` with real clang-cl compiles (`matched`, and the source written to the project), a
+    refusal (`refused`, no tools run), budget exhaustion (`budget_exhausted`), supervisor guidance
+    injected mid-run (the history stays append-only), a stop between turns, pause, resume and abort, a
+    mid-output fallback, a tool call cut off at `max_tokens`, invalid and schema-invalid tool input,
+    429 and 529 responses, overloaded stream errors, network errors, truncated streams, and SSE edge
+    cases (thinking and signature deltas, tool JSON split mid-token, CRLF and CR line endings).
+- Assertions cover outcomes and function statuses, the emitted events, the append-only property, the
+  written transcripts and history, and the absence of the API key: the runner test sets a sentinel key
+  and checks that no transcript line contains it.
+- From the CLI, in a project created with
+  `decomp init tests/fixtures/x86/basic.exe --dir <dir> --toolchain clang-cl-x86 --flag /O2 --flag /Gy
+  --flag /GS- --flag /GR- --flag /EHs-c-`, the command `decomp -C <dir> agent add --replay
+  tests/replay/agent_match_add.jsonl` runs the same path end to end. Only the model's side is
+  scripted; the compiles are real, so clang-cl must be installed.
 
 ## Open questions
 
