@@ -164,7 +164,10 @@ TEST_CASE("Every request of a multi-turn loop extends the previous one byte-for-
     LoopConfig config;
     config.finish_tool = "submit_result";
     int status_calls = 0;
-    config.status_line = [&] { return std::format("turns left: {}", config.max_turns - ++status_calls); };
+    config.status_line = [&](const LoopProgress& p) {
+        ++status_calls;
+        return std::format("turns left: {}", p.turns_left());
+    };
 
     const LoopOutcome outcome = run_loop(client, conversation, tools, config, &control, &injector);
     REQUIRE(outcome.status == LoopStatus::finished);

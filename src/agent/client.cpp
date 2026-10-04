@@ -104,12 +104,15 @@ std::vector<HttpHeader> capture_headers(const std::vector<HttpHeader>& headers) 
     return kept;
 }
 
-std::string messages_url(std::string_view base_url) {
+std::string api_url(std::string_view base_url, std::string_view path) {
     std::string_view base = trim(base_url);
     if (base.empty()) base = kDefaultBaseUrl;
     while (base.ends_with('/')) base.remove_suffix(1);
-    return std::string(base) + "/v1/messages";
+    return std::string(base) + std::string(path);
 }
+
+// Rate limited or overloaded: the shared gate holds every session back.
+bool is_throttle_status(int status) { return status == 429 || status == 529; }
 
 } // namespace
 
@@ -135,16 +138,11 @@ Result<Response> Client::create_message(const Json& request_body, StreamObserver
     const bool stream = json_bool_or(request_body, "stream", false);
 
     HttpRequest request;
-    request.url = messages_url(config_.base_url);
+    request.url = api_url(config_.base_url, "/v1/messages");
     request.connect_timeout = config_.connect_timeout;
     request.stall_timeout = config_.stall_timeout;
-    request.headers = {
-        {"x-api-key", config_.api_key},
-        {"anthropic-version", config_.anthropic_version},
-        {"content-type", "application/json"},
-        {"accept", stream ? "text/event-stream" : "application/json"},
-        {"user-agent", std::format("decomp/{}", kVersion)},
-    };
+    request.headers = base_headers(stream);
+    request.headers.emplace_back("content-type", "application/json");
     std::vector<std::string> betas;
     auto add_betas = [&betas](const std::vector<std::string>& list) {
         for (const auto& beta : list) {
@@ -158,10 +156,17 @@ Result<Response> Client::create_message(const Json& request_body, StreamObserver
 
     for (int attempt_no = 0;; ++attempt_no) {
         if (is_cancelled(options)) return make_error(ErrorCode::cancelled, "request cancelled");
+        if (config_.gate) {
+            auto on_wait = [observer](std::chrono::milliseconds expected) {
+                if (observer) observer->on_rate_wait(expected);
+            };
+            if (!config_.gate->acquire(options.cancelled, on_wait)) return make_error(ErrorCode::cancelled, "request cancelled");
+        }
         auto result = attempt(request, stream, observer, options);
         if (result) return std::move(*result);
 
         AttemptError& failure = result.error();
+        if (config_.gate && is_throttle_status(failure.status)) config_.gate->on_throttled(failure.status, failure.retry_after);
         if (!failure.retryable || attempt_no >= config_.max_retries) {
             if (failure.retryable && attempt_no > 0)
                 failure.error.message += std::format(" (gave up after {} retries)", attempt_no);
@@ -170,9 +175,84 @@ Result<Response> Client::create_message(const Json& request_body, StreamObserver
         const auto delay = backoff_delay(attempt_no, failure.retry_after);
         log::debug("Messages API request failed ({}); retry {} of {} in {} ms", failure.error.message, attempt_no + 1,
                    config_.max_retries, delay.count());
-        if (observer) observer->on_retry(attempt_no + 1, failure.error, delay);
+        if (observer) observer->on_retry(RetryInfo{attempt_no + 1, failure.error, delay, failure.status, failure.retry_after});
         wait(delay, options);
     }
+}
+
+std::vector<HttpHeader> Client::base_headers(bool stream) const {
+    return {
+        {"x-api-key", config_.api_key},
+        {"anthropic-version", config_.anthropic_version},
+        {"accept", stream ? "text/event-stream" : "application/json"},
+        {"user-agent", std::format("decomp/{}", kVersion)},
+    };
+}
+
+Result<std::vector<ModelInfo>> Client::list_models(const RequestOptions& options) {
+    if (trim(config_.api_key).empty()) return make_error(ErrorCode::invalid_argument, "ANTHROPIC_API_KEY is not set");
+    if (!transport_) return make_error(ErrorCode::invalid_argument, "no HTTP transport configured");
+    constexpr std::size_t kMaxBody = 16u * 1024 * 1024;
+    constexpr int kMaxPages = 20;
+
+    std::vector<ModelInfo> models;
+    std::string after;
+    for (int page = 0; page < kMaxPages; ++page) {
+        HttpRequest request;
+        request.method = "GET";
+        request.url = api_url(config_.base_url, "/v1/models?limit=1000" + (after.empty() ? std::string() : "&after_id=" + after));
+        request.connect_timeout = config_.connect_timeout;
+        request.stall_timeout = config_.stall_timeout;
+        request.headers = base_headers(false);
+
+        Json body_json;
+        for (int attempt_no = 0;; ++attempt_no) {
+            if (is_cancelled(options)) return make_error(ErrorCode::cancelled, "request cancelled");
+            std::string body;
+            bool too_large = false;
+            auto sent = transport_->send(request, [&](std::string_view chunk) {
+                if (is_cancelled(options)) return false;
+                if (body.size() + chunk.size() > kMaxBody) {
+                    too_large = true;
+                    return false;
+                }
+                body.append(chunk);
+                return true;
+            });
+            if (is_cancelled(options)) return make_error(ErrorCode::cancelled, "request cancelled");
+            if (too_large) return make_error(ErrorCode::api, "the model list exceeds 16 MiB");
+            bool retryable = false;
+            std::optional<std::chrono::milliseconds> retry_after;
+            Error failure;
+            if (!sent) {
+                retryable = sent.error().code == ErrorCode::network;
+                failure = std::move(sent.error());
+            } else if (!sent->ok()) {
+                retryable = is_retryable_status(sent->status);
+                retry_after = parse_retry_after(*sent);
+                failure = Error{ErrorCode::api, describe_http_error(*sent)};
+            } else {
+                auto parsed = parse_json(body);
+                if (!parsed || !parsed->is_object())
+                    return make_error(ErrorCode::parse, "invalid JSON in the model list: {}", parsed ? "not an object" : parsed.error().message);
+                body_json = std::move(*parsed);
+                break;
+            }
+            if (!retryable || attempt_no >= config_.max_retries) return std::unexpected(std::move(failure));
+            wait(backoff_delay(attempt_no, retry_after), options);
+        }
+
+        const auto data = body_json.find("data");
+        if (data == body_json.end() || !data->is_array()) return make_error(ErrorCode::parse, "the model list has no `data` array");
+        for (const Json& m : *data) {
+            if (!m.is_object()) continue;
+            ModelInfo info{json_string_or(m, "id", ""), json_string_or(m, "display_name", ""), json_string_or(m, "created_at", "")};
+            if (!info.id.empty()) models.push_back(std::move(info));
+        }
+        after = json_string_or(body_json, "last_id", "");
+        if (!json_bool_or(body_json, "has_more", false) || after.empty()) break;
+    }
+    return models;
 }
 
 std::expected<Response, Client::AttemptError> Client::attempt(const HttpRequest& request, bool stream,
@@ -202,13 +282,17 @@ std::expected<Response, Client::AttemptError> Client::attempt(const HttpRequest&
     };
 
     auto stream_error = [&]() -> AttemptError {
-        if (const auto& error = accumulator.stream_error())
+        if (const auto& error = accumulator.stream_error()) {
+            const int status = error->type == "overloaded_error" ? 529 : error->type == "rate_limit_error" ? 429 : 0;
             return AttemptError{Error{ErrorCode::api, std::format("stream error {}: {}", error->type, error->message)},
-                                error->retryable(), std::nullopt};
+                                error->retryable(), std::nullopt, status};
+        }
         return AttemptError{*stream_failure, false, std::nullopt};
     };
 
-    auto posted = transport_->post(request, on_data);
+    auto posted = transport_->send(request, on_data);
+    // Every answer reports the rate limits, error answers included.
+    if (posted && config_.gate) config_.gate->observe(posted->headers);
     if (is_cancelled(options)) return std::unexpected(AttemptError{Error{ErrorCode::cancelled, "request cancelled"}, false, {}});
     if (stream_failure) return std::unexpected(stream_error());
     if (body_too_large)
@@ -223,7 +307,7 @@ std::expected<Response, Client::AttemptError> Client::attempt(const HttpRequest&
     HttpResponse& http = *posted;
     if (!http.ok()) {
         AttemptError failure{Error{ErrorCode::api, describe_http_error(http)}, is_retryable_status(http.status),
-                             parse_retry_after(http)};
+                             parse_retry_after(http), http.status};
         // The API can override the status-based decision.
         if (auto should_retry = http.header("x-should-retry")) {
             if (*should_retry == "true") failure.retryable = true;

@@ -2,6 +2,7 @@
 
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "project/project.hpp"
 
 #include <algorithm>
 #include <format>
@@ -36,6 +37,19 @@ Json delta_event(std::size_t index, Json delta) {
 std::string header_value(const Json& value) { return value.is_string() ? value.get<std::string>() : dump_compact(value); }
 
 } // namespace
+
+std::optional<std::filesystem::path> find_replay_script(const std::filesystem::path& dir, const Symbol& fn) {
+    const std::string safe = project::safe_function_name(fn);
+    std::vector<std::string> names{safe + ".jsonl"};
+    if (auto cut = safe.rfind('_'); cut != std::string::npos && cut > 0) names.push_back(safe.substr(0, cut) + ".jsonl");
+    names.push_back("default.jsonl");
+    for (const auto& name : names) {
+        std::error_code ec;
+        const auto path = dir / fs::from_utf8(name);
+        if (std::filesystem::is_regular_file(path, ec)) return path;
+    }
+    return std::nullopt;
+}
 
 std::string to_sse(const Json& events, bool crlf) {
     const std::string_view eol = crlf ? "\r\n" : "\n";
@@ -108,11 +122,12 @@ std::size_t ReplayTransport::next_chunk_size() {
     return 1 + static_cast<std::size_t>((rng_state_ >> 33) % max_chunk);
 }
 
-Result<HttpResponse> ReplayTransport::post(const HttpRequest& request, const HttpDataCallback& on_data) {
+Result<HttpResponse> ReplayTransport::send(const HttpRequest& request, const HttpDataCallback& on_data) {
     Json step;
     {
         std::lock_guard lock(mutex_);
         RecordedRequest record;
+        record.method = request.method;
         record.url = request.url;
         for (const auto& [name, value] : request.headers) {
             const bool secret = iequals(name, "x-api-key") || iequals(name, "authorization");
@@ -131,7 +146,7 @@ Result<HttpResponse> ReplayTransport::post(const HttpRequest& request, const Htt
     }
 
     if (auto it = step.find("network_error"); it != step.end())
-        return make_error(ErrorCode::network, "POST {} failed: {} (replayed)", request.url, header_value(*it));
+        return make_error(ErrorCode::network, "{} {} failed: {} (replayed)", request.method, request.url, header_value(*it));
 
     HttpResponse response;
     response.status = static_cast<int>(json_int_or(step, "status", 200));
@@ -168,7 +183,7 @@ Result<HttpResponse> ReplayTransport::post(const HttpRequest& request, const Htt
         pos += n;
     }
     if (disconnect_after >= 0)
-        return make_error(ErrorCode::network, "POST {} failed: connection reset after {} bytes (replayed)", request.url, pos);
+        return make_error(ErrorCode::network, "{} {} failed: connection reset after {} bytes (replayed)", request.method, request.url, pos);
     return response;
 }
 

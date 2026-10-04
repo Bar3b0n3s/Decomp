@@ -20,6 +20,7 @@ using HttpHeader = std::pair<std::string, std::string>;
 std::optional<std::string> find_header(const std::vector<HttpHeader>& headers, std::string_view name);
 
 struct HttpRequest {
+    std::string method = "POST";  // POST or GET (a GET sends no body)
     std::string url;
     std::vector<HttpHeader> headers;
     std::string body;
@@ -50,9 +51,9 @@ class HttpTransport {
 public:
     virtual ~HttpTransport() = default;
 
-    // POSTs the request. Network failures (DNS, connect, TLS, reset, stall) -> ErrorCode::network;
+    // Sends the request. Network failures (DNS, connect, TLS, reset, stall) -> ErrorCode::network;
     // aborted by on_data -> ErrorCode::cancelled. HTTP error statuses are not errors at this level.
-    virtual Result<HttpResponse> post(const HttpRequest& request, const HttpDataCallback& on_data) = 0;
+    virtual Result<HttpResponse> send(const HttpRequest& request, const HttpDataCallback& on_data) = 0;
 };
 
 // libcurl on Linux/macOS, WinHTTP on Windows. Safe to share between threads.

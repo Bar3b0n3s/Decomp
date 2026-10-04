@@ -27,6 +27,11 @@ struct AgentSettings {
     long long max_tokens_per_function = 0;  // 0 = unlimited
     int max_minutes_per_function = 30;
     bool fallbacks = true;
+    double max_usd_per_run = 0;  // default run budget for `decomp run` and the GUI; 0 = unlimited
+    int workers = 4;             // default parallel sessions of a run
+    // Supervisor approval per agent action ("write_source": saving a verified match): auto, ask or deny.
+    // Actions not listed are automatic.
+    std::map<std::string, std::string> approvals;
 };
 
 struct Config {

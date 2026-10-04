@@ -76,6 +76,15 @@ struct StreamError {
     bool retryable() const { return type == "overloaded_error" || type == "api_error"; }
 };
 
+// A failed attempt that the client retries.
+struct RetryInfo {
+    int attempt = 0;  // retries counted from 1
+    Error error;
+    std::chrono::milliseconds delay{0};
+    int status = 0;  // HTTP status of the failed attempt (429, 529, ...); 0 for network and stream failures
+    std::optional<std::chrono::milliseconds> retry_after;  // the server's retry-after, when it sent one
+};
+
 // Live view of a streamed response. All hooks run on the thread that called Client::create_message.
 class StreamObserver {
 public:
@@ -87,9 +96,12 @@ public:
     virtual void on_thinking_delta(int /*index*/, std::string_view /*thinking*/) {}
     virtual void on_tool_input_delta(int /*index*/, std::string_view /*partial_json*/) {}
     virtual void on_block_stop(int /*index*/, const Json& /*block*/) {}
-    // A failed attempt is retried after `delay`; `attempt` counts retries from 1. Partial output already
-    // reported for the failed attempt is superseded by the next one.
-    virtual void on_retry(int /*attempt*/, const Error& /*error*/, std::chrono::milliseconds /*delay*/) {}
+    // A failed attempt is retried after `retry.delay`. Partial output already reported for the failed
+    // attempt is superseded by the next one.
+    virtual void on_retry(const RetryInfo& /*retry*/) {}
+    // The shared rate gate holds the request back for about `expected` (called again with 0 when it lets
+    // the request go).
+    virtual void on_rate_wait(std::chrono::milliseconds /*expected*/) {}
 };
 
 // Assembles a Response from Messages API stream events.

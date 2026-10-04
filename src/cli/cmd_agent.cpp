@@ -23,7 +23,7 @@ namespace {
 
 struct AgentArgs {
     std::string function, binary, pdb, toolchain, model, effort, replay, log_dir;
-    std::vector<std::string> flags, guidance;
+    std::vector<std::string> flags, guidance, policies;
     int max_turns = 0;
     double budget_usd = -1;
     long long max_tokens = -1;
@@ -155,6 +155,7 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
                           "or claude-sonnet-5-5",
                           settings.model);
     agent::AgentRunConfig config = agent::run_config_from(settings);
+    TRY_ASSIGN(auto approval_policies, agent::resolve_approval_policies(settings.approvals, a.policies, false));
 
     if (!a.replay.empty()) {
         TRY_ASSIGN(auto replay, agent::ReplayTransport::load(fs::from_utf8(a.replay)));
@@ -170,6 +171,8 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     else if (project) run_dir = project->runs_dir() / run_id;
 
     events::EventBus bus(run_id);
+    config.approvals = std::make_shared<agent::ApprovalGate>(&bus);
+    for (const auto& [action, policy] : approval_policies) config.approvals->set_policy(action, policy);
     std::unique_ptr<events::JsonlEventLog> event_log;
     if (!run_dir.empty()) {
         TRY_ASSIGN(auto opened, events::JsonlEventLog::open(run_dir / "events.jsonl"));
@@ -271,6 +274,8 @@ void register_agent_commands(CLI::App& app, GlobalOptions& g) {
     cmd->add_flag("--no-fallbacks", a->no_fallbacks, "Do not let the API retry declined requests on a fallback model");
     cmd->add_option("--guidance", a->guidance, "Guidance for the agent, sent with the first request (repeatable)")->allow_extra_args(false);
     cmd->add_flag("--interactive", a->interactive, "Read guidance from stdin while running (:pause, :resume, :stop, :abort)");
+    cmd->add_option("--policy", a->policies, "Approval policy override, e.g. write_source=deny (auto or deny; repeatable)")
+        ->allow_extra_args(false);
     cmd->add_option("--replay", a->replay, "Scripted API responses (JSONL) instead of the live API");
     cmd->add_option("--log-dir", a->log_dir, "Where run logs go (default: <project>/.decomp/runs)");
     cmd->add_flag("--progress", a->progress, "Show the live progress view even with --json or --quiet");

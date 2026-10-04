@@ -50,7 +50,10 @@ Json Config::to_json() const {
                   {"max_usd_per_function", agent.max_usd_per_function},
                   {"max_tokens_per_function", agent.max_tokens_per_function},
                   {"max_minutes_per_function", agent.max_minutes_per_function},
-                  {"fallbacks", agent.fallbacks}};
+                  {"fallbacks", agent.fallbacks},
+                  {"max_usd_per_run", agent.max_usd_per_run},
+                  {"workers", agent.workers},
+                  {"approvals", agent.approvals}};
     return j;
 }
 
@@ -77,6 +80,19 @@ Result<Config> Config::from_json(const Json& j) {
     c.agent.max_tokens_per_function = json_int_or(a, "max_tokens_per_function", c.agent.max_tokens_per_function);
     c.agent.max_minutes_per_function = static_cast<int>(json_int_or(a, "max_minutes_per_function", c.agent.max_minutes_per_function));
     c.agent.fallbacks = json_bool_or(a, "fallbacks", c.agent.fallbacks);
+    c.agent.max_usd_per_run = json_number_or(a, "max_usd_per_run", c.agent.max_usd_per_run);
+    c.agent.workers = static_cast<int>(json_int_or(a, "workers", c.agent.workers));
+    if (c.agent.workers < 1 || c.agent.workers > 64)
+        return make_error(ErrorCode::parse, "decomp.json: agent.workers must be between 1 and 64 (got {})", c.agent.workers);
+    if (auto it = a.find("approvals"); it != a.end()) {
+        if (!it->is_object()) return make_error(ErrorCode::parse, "decomp.json: agent.approvals must be an object");
+        for (auto p = it->begin(); p != it->end(); ++p) {
+            const std::string policy = p->is_string() ? p->get<std::string>() : "";
+            if (policy != "auto" && policy != "ask" && policy != "deny")
+                return make_error(ErrorCode::parse, "decomp.json: agent.approvals.{} must be \"auto\", \"ask\" or \"deny\"", p.key());
+            c.agent.approvals[p.key()] = policy;
+        }
+    }
     return c;
 }
 

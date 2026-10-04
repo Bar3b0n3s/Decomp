@@ -5,6 +5,7 @@
 
 #include "agent/http.hpp"
 #include "agent/messages.hpp"
+#include "agent/rate_gate.hpp"
 #include "core/json.hpp"
 #include "core/result.hpp"
 
@@ -37,6 +38,15 @@ struct ClientConfig {
     // A stream sends pings while the model works; a non-streaming request sends nothing until the whole
     // response is ready, so raise this for long non-streaming requests (or stream them).
     std::chrono::seconds stall_timeout{120};
+    // Shared by the clients of a run's sessions: every attempt waits for it, and every response's rate
+    // limit headers (and 429/529 answers) feed it.
+    std::shared_ptr<RateGate> gate;
+};
+
+struct ModelInfo {
+    std::string id;
+    std::string display_name;
+    std::string created_at;
 };
 
 struct RequestOptions {
@@ -64,6 +74,10 @@ public:
     Result<Response> create_message(const Json& request_body, StreamObserver* observer = nullptr,
                                     const RequestOptions& options = {});
 
+    // GET {base_url}/v1/models (all pages): checks the key and lists the models it can use. Fails with
+    // ErrorCode::api (e.g. "HTTP 401 authentication_error: ...") or a network error.
+    Result<std::vector<ModelInfo>> list_models(const RequestOptions& options = {});
+
     const ClientConfig& config() const { return config_; }
 
 private:
@@ -71,7 +85,10 @@ private:
         Error error;
         bool retryable = false;
         std::optional<std::chrono::milliseconds> retry_after;
+        int status = 0;  // HTTP status; 429/529 for rate_limit_error/overloaded_error stream events
     };
+
+    std::vector<HttpHeader> base_headers(bool stream) const;
 
     std::expected<Response, AttemptError> attempt(const HttpRequest& request, bool stream, StreamObserver* observer,
                                                   const RequestOptions& options);

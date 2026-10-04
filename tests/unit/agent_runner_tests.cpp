@@ -9,10 +9,13 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <map>
+#include <thread>
 
 using namespace decomp;
 using namespace decomp::agent;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -59,9 +62,9 @@ class HookTransport : public HttpTransport {
 public:
     HookTransport(std::shared_ptr<ReplayTransport> inner, std::function<void(int)> on_request)
         : inner_(std::move(inner)), on_request_(std::move(on_request)) {}
-    Result<HttpResponse> post(const HttpRequest& request, const HttpDataCallback& on_data) override {
+    Result<HttpResponse> send(const HttpRequest& request, const HttpDataCallback& on_data) override {
         on_request_(++count_);
-        return inner_->post(request, on_data);
+        return inner_->send(request, on_data);
     }
 
 private:
@@ -232,7 +235,7 @@ TEST_CASE("agent runner: the spend budget ends the session") {
         tool_turn("toolu_2", "lookup_symbol", {{"query", "never sent"}}),
     });
     AgentRunConfig config = replay_config(replay);
-    config.loop.max_cost_usd = 0.01;
+    config.loop.limits.max_cost_usd = 0.01;
     events::EventBus bus("run-budget");
     const FunctionRunResult r = run_function(fx.program, &fx.project, fx.setup(), fx.add, config, bus, fx.dir.path() / "t.jsonl");
     CHECK(r.outcome == "budget_exhausted");
@@ -328,4 +331,171 @@ TEST_CASE("agent runner: initial guidance rides in the first message") {
     REQUIRE(messages[0]["content"].size() == 2);
     CHECK(messages[0]["content"][1]["text"] == "[Supervisor guidance] Start with the listing.");
     CHECK(rec.counts["guidance"] == 1);  // blank guidance is dropped
+}
+
+namespace {
+
+// A project over the fixture program built with the installed LLVM, so candidates can match byte for byte.
+struct CompiledProject {
+    std::optional<test::LlvmTools> tools = test::find_llvm();
+    fs::TempDir dir = fs::TempDir::create("decomp-runner-compiled").value();
+    std::optional<project::Project> project;
+    std::optional<Program> program;
+    u64 add = 0;
+    matching::MatchSetup setup;
+
+    CompiledProject() {
+        if (!tools || !test::build_fixture_program(Arch::x86, *tools, dir.path())) return;
+        project = project::Project::init(dir.path() / "p", dir.path() / "basic.exe", std::nullopt, "clang-cl-x86").value();
+        program = project->open_program().value();
+        add = *program->resolve("add");
+        setup = test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "work");
+    }
+    bool ready() const { return program.has_value(); }
+};
+
+Json submit_matched(const std::string& id) {
+    return replay::message({replay::tool_use(id, "submit_result", {{"outcome", "matched"}, {"source", kRightAdd}, {"reason", ""}})}, "tool_use",
+                           replay::usage(900, 200, 0, 5000), {.id = "msg_" + id});
+}
+
+Json end_turn(const std::string& id) {
+    return replay::message({replay::text("I think that is it.")}, "end_turn", replay::usage(900, 50, 0, 5000), {.id = "msg_" + id});
+}
+
+} // namespace
+
+TEST_CASE("agent runner: approvals decide whether a verified match is saved") {
+    CompiledProject cp;
+    if (!cp.ready()) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    SUBCASE("deny: the agent hears why and the project keeps no file") {
+        auto replay = std::make_shared<ReplayTransport>(std::vector<Json>{
+            submit_matched("toolu_1"),
+            tool_turn("toolu_2", "submit_result", {{"outcome", "give_up"}, {"source", kRightAdd}, {"reason", "declined"}}),
+        });
+        events::EventBus bus("run-deny");
+        Recorder rec;
+        rec.attach(bus);
+        AgentRunConfig config = replay_config(replay);
+        config.approvals = std::make_shared<ApprovalGate>(&bus);
+        config.approvals->set_policy(std::string(kWriteSourceAction), ApprovalPolicy::deny);
+        const FunctionRunResult r = run_function(*cp.program, &*cp.project, cp.setup, cp.add, config, bus, {});
+        CHECK(r.outcome == "gave_up");
+        CHECK_FALSE(r.matched);
+        CHECK_FALSE(r.auto_submitted);  // a denied match is not saved behind the supervisor's back either
+        CHECK_FALSE(std::filesystem::exists(cp.project->matched_source_path(*cp.program->symbols().at(cp.add))));
+        CHECK(cp.project->function_info(cp.add).status != project::FunctionStatus::matched);
+        CHECK(rec.counts["file_written"] == 0);
+        CHECK(rec.counts["approval_decided"] == 1);  // the declined source is not proposed again at the end
+        const std::string answer = dump_compact(replay->requests()[1].body["messages"].back());
+        CHECK(answer.find("the supervisor declined saving it") != std::string::npos);
+    }
+    SUBCASE("ask: the session waits for the supervisor's approval") {
+        auto replay = std::make_shared<ReplayTransport>(std::vector<Json>{submit_matched("toolu_1")});
+        events::EventBus bus("run-ask");
+        Recorder rec;
+        rec.attach(bus);
+        AgentRunConfig config = replay_config(replay);
+        config.approvals = std::make_shared<ApprovalGate>(&bus);
+        config.approvals->set_policy(std::string(kWriteSourceAction), ApprovalPolicy::ask);
+        std::thread supervisor([&] {
+            for (int i = 0; i < 3000 && config.approvals->pending().empty(); ++i) std::this_thread::sleep_for(5ms);
+            const auto pending = config.approvals->pending();
+            REQUIRE(pending.size() == 1);
+            CHECK(pending[0].request.content == kRightAdd);
+            CHECK(pending[0].request.path.starts_with("src"));
+            CHECK(config.approvals->decide(pending[0].id, true));
+        });
+        const FunctionRunResult r = run_function(*cp.program, &*cp.project, cp.setup, cp.add, config, bus, {});
+        supervisor.join();
+        CHECK(r.outcome == "matched");
+        CHECK(std::filesystem::exists(r.matched_source));
+        REQUIRE(rec.state.data().files_written.size() == 1);
+        CHECK(rec.state.data().files_written.back().file.approval == "approved by user");
+        CHECK(rec.state.data().approvals_pending == 0);
+        CHECK(rec.counts["approval_requested"] == 1);
+    }
+}
+
+TEST_CASE("agent runner: a byte-exact attempt the model never submits is saved at the end") {
+    CompiledProject cp;
+    if (!cp.ready()) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    // The model compiles the right source, then talks instead of submitting until the nudges run out.
+    auto replay = std::make_shared<ReplayTransport>(std::vector<Json>{
+        tool_turn("toolu_1", "compile_and_diff", {{"source", kRightAdd}}),
+        end_turn("e1"),
+        end_turn("e2"),
+        end_turn("e3"),
+    });
+    AgentRunConfig config = replay_config(replay);
+    int first_messages = 0;
+    config.on_first_message = [&] { ++first_messages; };
+    events::EventBus bus("run-auto");
+    Recorder rec;
+    rec.attach(bus);
+    const auto transcript = cp.dir.path() / "auto.jsonl";
+    const FunctionRunResult r = run_function(*cp.program, &*cp.project, cp.setup, cp.add, config, bus, transcript);
+    CHECK(r.outcome == "matched");
+    CHECK(r.matched);
+    CHECK(r.auto_submitted);
+    CHECK(r.detail.find("did not submit") != std::string::npos);
+    CHECK(r.detail.find("no_result") != std::string::npos);
+    CHECK(std::filesystem::exists(r.matched_source));
+    CHECK(cp.project->function_info(cp.add).status == project::FunctionStatus::matched);
+    CHECK(first_messages == 1);
+    bool recorded = false;
+    for (const auto& l : read_jsonl(transcript))
+        if (l["type"] == "auto_submit") recorded = l["accepted"] == true;
+    CHECK(recorded);
+    CHECK(rec.state.data().matched == 1);
+}
+
+TEST_CASE("agent runner: a rate-limit wait shows as the worker's phase; skip ends a session as skipped") {
+    FixtureProject fx;
+    SUBCASE("rate wait") {
+        auto replay = std::make_shared<ReplayTransport>(std::vector<Json>{
+            tool_turn("toolu_1", "submit_result", {{"outcome", "give_up"}, {"source", ""}, {"reason", "test"}}),
+        });
+        AgentRunConfig config = replay_config(replay);
+        config.client.gate = std::make_shared<RateGate>();
+        config.client.gate->on_throttled(429, 150ms);
+        events::EventBus bus("run-rate");
+        Recorder rec;
+        rec.attach(bus);
+        const FunctionRunResult r = run_function(fx.program, &fx.project, fx.setup(), fx.add, config, bus, {}, nullptr, 3);
+        CHECK(r.outcome == "gave_up");
+        std::vector<std::string> phases;
+        for (const auto& e : rec.all)
+            if (const auto* p = std::get_if<events::WorkerPhaseChanged>(&e.payload)) phases.push_back(p->phase);
+        REQUIRE(phases.size() >= 2);
+        CHECK(phases[0] == "waiting for rate limit");
+        CHECK(phases[1] == "waiting for model");
+        bool spanned = false;
+        for (const auto& span : rec.state.data().workers.at(3).spans) spanned |= span.phase == "waiting for rate limit";
+        CHECK(spanned);
+    }
+    SUBCASE("skip") {
+        LoopControl control;
+        auto replay = std::make_shared<ReplayTransport>(std::vector<Json>{
+            tool_turn("toolu_1", "lookup_symbol", {{"query", "add"}}),
+            tool_turn("toolu_2", "lookup_symbol", {{"query", "never sent"}}),
+        });
+        auto transport = std::make_shared<HookTransport>(replay, [&](int n) {
+            if (n == 1) control.request_stop(StopReason::skip);
+        });
+        events::EventBus bus("run-skip");
+        Recorder rec;
+        rec.attach(bus);
+        const FunctionRunResult r = run_function(fx.program, &fx.project, fx.setup(), fx.add, replay_config(transport), bus, {}, &control);
+        CHECK(r.outcome == "skipped");
+        CHECK(r.stop_reason == StopReason::skip);
+        CHECK(r.detail == "skipped by the supervisor");
+        CHECK(rec.state.data().session(std::format("run-skip-{:x}", fx.add))->outcome == "skipped");
+    }
 }

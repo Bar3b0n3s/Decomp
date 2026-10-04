@@ -3,6 +3,7 @@
 // Scripted HttpTransport for tests and the CLI `--replay` flag, plus builders for scripted responses.
 
 #include "agent/http.hpp"
+#include "analysis/symbols.hpp"
 #include "core/json.hpp"
 #include "core/result.hpp"
 
@@ -20,6 +21,7 @@
 namespace decomp::agent {
 
 struct RecordedRequest {
+    std::string method;
     std::string url;
     std::vector<HttpHeader> headers;  // x-api-key and authorization values are masked as "***"
     std::string raw_body;
@@ -53,7 +55,7 @@ public:
     static Result<std::vector<Json>> parse_script(std::string_view jsonl);
 
     void push(Json response);
-    Result<HttpResponse> post(const HttpRequest& request, const HttpDataCallback& on_data) override;
+    Result<HttpResponse> send(const HttpRequest& request, const HttpDataCallback& on_data) override;
 
     std::vector<RecordedRequest> requests() const;
     std::size_t remaining() const;
@@ -70,6 +72,11 @@ private:
 
 // Serializes [{"event": name, "data": json}, ...] as SSE text.
 std::string to_sse(const Json& events, bool crlf = false);
+
+// The script for one function in a replay directory (a scripted multi-function run): the first that
+// exists of "<safe name>.jsonl" (e.g. "Player__Hit_401000.jsonl"), "<safe name without the address>.jsonl"
+// ("Player__Hit.jsonl") and "default.jsonl".
+std::optional<std::filesystem::path> find_replay_script(const std::filesystem::path& dir, const Symbol& fn);
 
 // Builders for scripted responses.
 namespace replay {

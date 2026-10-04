@@ -165,7 +165,7 @@ TEST_CASE("curl transport streams a 2xx body and captures headers") {
     auto transport = make_default_transport();
     std::string body;
     int chunks = 0;
-    auto response = transport->post(make_request(server.url()), [&](std::string_view chunk) {
+    auto response = transport->send(make_request(server.url()), [&](std::string_view chunk) {
         if (!chunk.empty()) ++chunks;
         body += chunk;
         return true;
@@ -190,6 +190,32 @@ TEST_CASE("curl transport streams a 2xx body and captures headers") {
     CHECK(received.body == R"({"hello":1})");
 }
 
+TEST_CASE("curl transport sends a GET without a body") {
+    OneShotServer server([](int fd) {
+        const std::string body = R"({"data":[]})";
+        send_all(fd, std::format("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.size(), body));
+    });
+    auto transport = make_default_transport();
+    HttpRequest request = make_request(server.url());
+    request.method = "GET";
+    request.headers = {{"x-api-key", "local-secret"}, {"anthropic-version", "2023-06-01"}};
+    std::string body;
+    auto response = transport->send(request, [&](std::string_view chunk) {
+        body += chunk;
+        return true;
+    });
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(body == R"({"data":[]})");
+    const ReceivedRequest& received = server.received();
+    CHECK(received.head.starts_with("GET /v1/messages HTTP/1.1\r\n"));
+    CHECK(received.body.empty());
+    CHECK(to_lower(received.head).find("content-length") == std::string::npos);
+
+    request.method = "DELETE";
+    CHECK_FALSE(transport->send(request, {}));
+}
+
 TEST_CASE("curl transport returns non-2xx bodies in body_prefix") {
     const std::string error_body =
         R"({"type":"error","error":{"type":"rate_limit_error","message":"slow down"},"request_id":"req_x"})";
@@ -200,7 +226,7 @@ TEST_CASE("curl transport returns non-2xx bodies in body_prefix") {
     });
     auto transport = make_default_transport();
     std::string body;
-    auto response = transport->post(make_request(server.url()), [&](std::string_view chunk) {
+    auto response = transport->send(make_request(server.url()), [&](std::string_view chunk) {
         body += chunk;
         return true;
     });
@@ -219,7 +245,7 @@ TEST_CASE("curl transport: on_data returning false cancels the transfer") {
         wait_for_close(fd, 5000);
     });
     auto transport = make_default_transport();
-    auto response = transport->post(make_request(server.url()), [](std::string_view chunk) { return chunk.empty(); });
+    auto response = transport->send(make_request(server.url()), [](std::string_view chunk) { return chunk.empty(); });
     REQUIRE_FALSE(response);
     CHECK(response.error().code == ErrorCode::cancelled);
 }
@@ -234,7 +260,7 @@ TEST_CASE("curl transport: idle polls let the caller cancel a silent stream") {
     std::size_t bytes = 0;
     const auto start = std::chrono::steady_clock::now();
     // Cancel once the stream has been silent for a while: only an idle poll can deliver that decision.
-    auto response = transport->post(make_request(server.url()), [&](std::string_view chunk) {
+    auto response = transport->send(make_request(server.url()), [&](std::string_view chunk) {
         bytes += chunk.size();
         if (chunk.empty()) ++polls;
         return std::chrono::steady_clock::now() - start < 400ms;
@@ -258,7 +284,7 @@ TEST_CASE("curl transport: a stalled stream fails with a network error") {
     request.stall_timeout = std::chrono::seconds(1);
     std::string body;
     const auto start = std::chrono::steady_clock::now();
-    auto response = transport->post(request, [&](std::string_view chunk) {
+    auto response = transport->send(request, [&](std::string_view chunk) {
         body += chunk;
         return true;
     });
@@ -284,7 +310,7 @@ TEST_CASE("curl transport: connection refused is a network error") {
     ::close(fd);
 
     auto transport = make_default_transport();
-    auto response = transport->post(make_request(std::format("http://127.0.0.1:{}/v1/messages", port)),
+    auto response = transport->send(make_request(std::format("http://127.0.0.1:{}/v1/messages", port)),
                                     [](std::string_view) { return true; });
     REQUIRE_FALSE(response);
     CHECK(response.error().code == ErrorCode::network);

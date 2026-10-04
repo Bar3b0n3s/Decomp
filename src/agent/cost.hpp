@@ -6,6 +6,7 @@
 #include "core/json.hpp"
 
 #include <map>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -48,5 +49,38 @@ struct ResponseCost {
 // otherwise the top-level usage is priced for the response's model, or `default_model` when that model
 // is not in the table.
 ResponseCost response_cost(const Response& response, std::string_view default_model);
+
+// Spend shared by the sessions of a run (thread-safe). Every turn's cost is added; the limit can change
+// while the run goes on.
+class SpendLedger {
+public:
+    explicit SpendLedger(double limit_usd = 0, double spent_usd = 0) : limit_(limit_usd), spent_(spent_usd) {}
+
+    void add(double usd) {
+        std::lock_guard lock(mutex_);
+        spent_ += usd;
+    }
+    double spent() const {
+        std::lock_guard lock(mutex_);
+        return spent_;
+    }
+    double limit() const {  // 0 = unlimited
+        std::lock_guard lock(mutex_);
+        return limit_;
+    }
+    void set_limit(double usd) {
+        std::lock_guard lock(mutex_);
+        limit_ = usd > 0 ? usd : 0;
+    }
+    bool exhausted() const {
+        std::lock_guard lock(mutex_);
+        return limit_ > 0 && spent_ >= limit_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    double limit_ = 0;
+    double spent_ = 0;
+};
 
 } // namespace decomp::agent

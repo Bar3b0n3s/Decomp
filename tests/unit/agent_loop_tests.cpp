@@ -150,7 +150,11 @@ struct Recorder : LoopObserver {
         log.push_back("end " + call.id);
         results.push_back(result);
     }
-    void on_injected(const std::string& text) override { injected.push_back(text); }
+    void on_injected(const Injected& guidance) override {
+        injected.push_back(guidance.text);
+        injected_ids.push_back(guidance.id);
+    }
+    std::vector<u64> injected_ids;
     void on_finish(const LoopOutcome& outcome) override { finished = outcome; }
 };
 
@@ -227,7 +231,7 @@ TEST_CASE("run_loop: budgets") {
                  submit_turn()});
         Conversation conversation = env.conversation();
         LoopConfig config = finish_config();
-        config.max_cost_usd = 1.0;
+        config.limits.max_cost_usd = 1.0;
         const LoopOutcome outcome = run_loop(env.client, conversation, env.tools, config);
         CHECK(outcome.status == LoopStatus::budget_exhausted);
         CHECK(outcome.detail.find("cost budget") != std::string::npos);
@@ -242,7 +246,7 @@ TEST_CASE("run_loop: budgets") {
                  submit_turn()});
         Conversation conversation = env.conversation();
         LoopConfig config = finish_config();
-        config.max_turns = 2;
+        config.limits.max_turns = 2;
         const LoopOutcome outcome = run_loop(env.client, conversation, env.tools, config);
         CHECK(outcome.status == LoopStatus::max_turns);
         CHECK(outcome.turns == 2);
@@ -254,7 +258,7 @@ TEST_CASE("run_loop: budgets") {
                  submit_turn()});
         Conversation conversation = env.conversation();
         LoopConfig config = finish_config();
-        config.max_total_tokens = 1000;
+        config.limits.max_total_tokens = 1000;
         const LoopOutcome outcome = run_loop(env.client, conversation, env.tools, config);
         CHECK(outcome.status == LoopStatus::budget_exhausted);
         CHECK(outcome.turns == 2);
@@ -264,7 +268,7 @@ TEST_CASE("run_loop: budgets") {
         Env env({submit_turn()});
         Conversation conversation = env.conversation();
         LoopConfig config = finish_config();
-        config.max_turns = 1;
+        config.limits.max_turns = 1;
         CHECK(run_loop(env.client, conversation, env.tools, config).status == LoopStatus::finished);
     }
 }
@@ -317,7 +321,7 @@ TEST_CASE("run_loop: supervisor guidance and the status line follow the tool res
         }
     };
     LoopConfig config = finish_config();
-    config.status_line = [] { return std::string("turns left: 38, best match: 87.5%"); };
+    config.status_line = [](const LoopProgress&) { return std::string("turns left: 38, best match: 87.5%"); };
     CHECK(run_loop(env.client, conversation, env.tools, config, &control, &recorder).status == LoopStatus::finished);
 
     const auto requests = env.transport->requests();

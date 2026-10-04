@@ -71,7 +71,7 @@ struct SessionObserver : LoopObserver {
     int responses = 0;
     long long cache_reads = 0;
     void on_thinking_delta(int, std::string_view t) override { thinking += t; }
-    void on_retry(int, const Error&, milliseconds) override { ++retries; }
+    void on_retry(const RetryInfo&) override { ++retries; }
     void on_response(int, const Response& r) override {
         ++responses;
         cache_reads += r.usage.cache_read_input_tokens;
@@ -102,7 +102,7 @@ TEST_CASE("A scripted JSONL session replays end to end") {
 
     LoopConfig loop_config;
     loop_config.finish_tool = "submit_result";
-    loop_config.status_line = [&] { return std::format("compiles so far: {}", compiles); };
+    loop_config.status_line = [&](const LoopProgress&) { return std::format("compiles so far: {}", compiles); };
     SessionObserver observer;
     const LoopOutcome outcome = run_loop(client, conversation, tools, loop_config, nullptr, &observer);
 

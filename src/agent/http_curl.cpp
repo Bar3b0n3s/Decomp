@@ -128,7 +128,7 @@ class CurlTransport final : public HttpTransport {
 public:
     CurlTransport() { ensure_curl_initialized(); }
 
-    Result<HttpResponse> post(const HttpRequest& request, const HttpDataCallback& on_data) override {
+    Result<HttpResponse> send(const HttpRequest& request, const HttpDataCallback& on_data) override {
         static const HttpDataCallback discard = [](std::string_view) { return true; };
 
         EasyHandle easy;
@@ -150,9 +150,15 @@ public:
         char error_buffer[CURL_ERROR_SIZE] = {};
 
         curl_easy_setopt(h, CURLOPT_URL, request.url.c_str());
-        curl_easy_setopt(h, CURLOPT_POST, 1L);
-        curl_easy_setopt(h, CURLOPT_POSTFIELDS, request.body.data());
-        curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+        if (request.method == "GET") {
+            curl_easy_setopt(h, CURLOPT_HTTPGET, 1L);
+        } else if (request.method == "POST") {
+            curl_easy_setopt(h, CURLOPT_POST, 1L);
+            curl_easy_setopt(h, CURLOPT_POSTFIELDS, request.body.data());
+            curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+        } else {
+            return make_error(ErrorCode::invalid_argument, "unsupported HTTP method '{}'", request.method);
+        }
         curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers.list);
         curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 0L);
         curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);  // required for multi-threaded use
@@ -183,12 +189,12 @@ public:
         const CURLcode rc = curl_easy_perform(h);
         if (transfer.cancelled) return make_error(ErrorCode::cancelled, "request cancelled");
         if (transfer.stalled) {
-            return make_error(ErrorCode::network, "POST {} failed: no data received for {} s (stalled)", request.url,
+            return make_error(ErrorCode::network, "{} {} failed: no data received for {} s (stalled)", request.method, request.url,
                               request.stall_timeout.count());
         }
         if (rc != CURLE_OK) {
             std::string detail = error_buffer[0] != '\0' ? std::string(trim(error_buffer)) : curl_easy_strerror(rc);
-            return make_error(ErrorCode::network, "POST {} failed: {}", request.url, detail);
+            return make_error(ErrorCode::network, "{} {} failed: {}", request.method, request.url, detail);
         }
         resolve_status(transfer);
         return std::move(transfer.response);

@@ -18,6 +18,7 @@ std::string_view to_string(LoopStatus status) {
     case LoopStatus::end_turn_without_finish: return "end_turn_without_finish";
     case LoopStatus::refused: return "refused";
     case LoopStatus::budget_exhausted: return "budget_exhausted";
+    case LoopStatus::run_budget_exhausted: return "run_budget_exhausted";
     case LoopStatus::max_turns: return "max_turns";
     case LoopStatus::aborted: return "aborted";
     case LoopStatus::stopped: return "stopped";
@@ -26,7 +27,21 @@ std::string_view to_string(LoopStatus status) {
     return "unknown";
 }
 
+std::string_view to_string(StopReason reason) {
+    switch (reason) {
+    case StopReason::user: return "user";
+    case StopReason::skip: return "skip";
+    case StopReason::run_budget: return "run_budget";
+    case StopReason::shutdown: return "shutdown";
+    }
+    return "unknown";
+}
+
 // ---- LoopControl -----------------------------------------------------------------------------------
+
+namespace {
+std::atomic<u64> g_next_injection_id{1};
+}
 
 void LoopControl::request_pause() {
     std::lock_guard lock(mutex_);
@@ -41,25 +56,54 @@ void LoopControl::resume() {
     cv_.notify_all();
 }
 
-void LoopControl::request_stop() {
+void LoopControl::request_stop(StopReason reason) {
     {
         std::lock_guard lock(mutex_);
+        if (!stop_ && !abort_) reason_ = reason;  // the first request names the reason
         stop_ = true;
     }
     cv_.notify_all();
 }
 
-void LoopControl::request_abort() {
+void LoopControl::request_abort(StopReason reason) {
     {
         std::lock_guard lock(mutex_);
+        if (!abort_) reason_ = reason;  // an abort overrides a pending stop's reason
         abort_ = true;
     }
     cv_.notify_all();
 }
 
-void LoopControl::inject(std::string text) {
+u64 LoopControl::inject(std::string text) {
+    const u64 id = g_next_injection_id.fetch_add(1);
     std::lock_guard lock(mutex_);
-    injected_.push_back(std::move(text));
+    injected_.push_back(Injected{id, std::move(text)});
+    return id;
+}
+
+bool LoopControl::retract(u64 id) {
+    std::lock_guard lock(mutex_);
+    return std::erase_if(injected_, [id](const Injected& i) { return i.id == id; }) > 0;
+}
+
+void LoopControl::set_limits(const LoopLimits& limits) {
+    std::lock_guard lock(mutex_);
+    limits_ = limits;
+}
+
+StopReason LoopControl::stop_reason() const {
+    std::lock_guard lock(mutex_);
+    return reason_;
+}
+
+std::optional<LoopLimits> LoopControl::limits() const {
+    std::lock_guard lock(mutex_);
+    return limits_;
+}
+
+std::vector<Injected> LoopControl::pending_injected() const {
+    std::lock_guard lock(mutex_);
+    return injected_;
 }
 
 bool LoopControl::is_paused() const {
@@ -78,7 +122,7 @@ bool LoopControl::wait_while_paused() {
     return !stop_.load() && !abort_.load();
 }
 
-std::vector<std::string> LoopControl::take_injected() {
+std::vector<Injected> LoopControl::take_injected() {
     std::lock_guard lock(mutex_);
     return std::exchange(injected_, {});
 }
@@ -126,13 +170,25 @@ public:
 private:
     std::optional<std::pair<LoopStatus, std::string>> check_control();
     std::optional<std::pair<LoopStatus, std::string>> check_budgets() const;
-    bool wall_exceeded() const {
-        return config_.max_wall.count() > 0 && Clock::now() - start_ >= config_.max_wall;
+    std::optional<std::pair<LoopStatus, std::string>> check_run_budget() const;
+    // The limits in effect now: the supervisor's latest, else the configured ones.
+    LoopLimits limits() const {
+        if (control_)
+            if (auto live = control_->limits()) return *live;
+        return config_.limits;
+    }
+    bool wall_exceeded(const LoopLimits& limits) const {
+        return limits.max_wall.count() > 0 && Clock::now() - start_ >= limits.max_wall;
+    }
+    LoopProgress progress() const {
+        return LoopProgress{outcome_.turns, limits(), outcome_.cost_usd, outcome_.usage.total(),
+                            std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - start_)};
     }
     std::vector<PreparedCall> prepare_calls(const Response& response) const;
     std::vector<ToolRun> execute(const std::vector<PreparedCall>& calls, int turn);
     void flush_pending(bool with_extras);
     LoopOutcome finish(LoopStatus status, std::string detail);
+    LoopOutcome finish_aborted(int turn);
     std::string nudge_text(const Response& response) const;
 
     Client& client_;
@@ -155,11 +211,8 @@ LoopOutcome LoopRun::run() {
     start_ = Clock::now();
     while (true) {
         if (auto stop = check_control()) return finish(stop->first, std::move(stop->second));
-        if (outcome_.turns >= config_.max_turns)
-            return finish(LoopStatus::max_turns, std::format("reached the turn limit ({})", config_.max_turns));
-        if (wall_exceeded())
-            return finish(LoopStatus::budget_exhausted,
-                          std::format("wall-clock budget of {} s exhausted", config_.max_wall.count()));
+        // Limits may have been lowered (or the run budget spent by other sessions) since the last turn.
+        if (auto exhausted = check_budgets()) return finish(exhausted->first, std::move(exhausted->second));
 
         flush_pending(true);
         if (conversation_.messages().empty()) {
@@ -176,7 +229,7 @@ LoopOutcome LoopRun::run() {
         auto response = client_.create_message(request, observer_, options);
         if (!response) {
             if (response.error().code == ErrorCode::cancelled && control_ && control_->abort_requested())
-                return finish(LoopStatus::aborted, std::format("aborted during turn {}", turn));
+                return finish_aborted(turn);
             outcome_.error = response.error();
             return finish(LoopStatus::error, response.error().describe());
         }
@@ -184,10 +237,11 @@ LoopOutcome LoopRun::run() {
         const ResponseCost cost = response_cost(*response, conversation_.settings().model);
         outcome_.usage.add(cost.usage);
         outcome_.cost_usd += cost.usd;
+        if (config_.ledger) config_.ledger->add(cost.usd);
         if (observer_) observer_->on_response(turn, *response);
         // An abort that raced with the end of the stream still stops before any tool runs.
         if (control_ && control_->abort_requested())
-            return finish(LoopStatus::aborted, std::format("aborted during turn {}", turn));
+            return finish_aborted(turn);
 
         // The stop reason decides what may be used from this turn.
         if (response->stop_reason == "refusal") {
@@ -236,9 +290,18 @@ LoopOutcome LoopRun::run() {
 std::optional<std::pair<LoopStatus, std::string>> LoopRun::check_control() {
     if (!control_) return std::nullopt;
     auto requested = [this]() -> std::optional<std::pair<LoopStatus, std::string>> {
-        if (control_->abort_requested()) return std::pair{LoopStatus::aborted, std::string("aborted by the supervisor")};
-        if (control_->stop_requested()) return std::pair{LoopStatus::stopped, std::string("stopped by the supervisor")};
-        return std::nullopt;
+        const bool abort = control_->abort_requested();
+        if (!abort && !control_->stop_requested()) return std::nullopt;
+        const StopReason reason = control_->stop_reason();
+        outcome_.stop_reason = reason;
+        const LoopStatus status = abort ? LoopStatus::aborted : LoopStatus::stopped;
+        switch (reason) {
+        case StopReason::skip: return std::pair{status, std::string("skipped by the supervisor")};
+        case StopReason::run_budget: return std::pair{status, std::string("the run budget is exhausted")};
+        case StopReason::shutdown: return std::pair{status, std::string("the run is shutting down")};
+        case StopReason::user: break;
+        }
+        return std::pair{status, std::string(abort ? "aborted by the supervisor" : "stopped by the supervisor")};
     };
     if (auto r = requested()) return r;
     if (control_->is_paused()) {
@@ -251,18 +314,25 @@ std::optional<std::pair<LoopStatus, std::string>> LoopRun::check_control() {
 }
 
 std::optional<std::pair<LoopStatus, std::string>> LoopRun::check_budgets() const {
-    if (config_.max_total_tokens > 0 && outcome_.usage.total() >= config_.max_total_tokens)
-        return std::pair{LoopStatus::budget_exhausted, std::format("token budget exhausted ({} of {} tokens)",
-                                                                   outcome_.usage.total(), config_.max_total_tokens)};
-    if (config_.max_cost_usd > 0 && outcome_.cost_usd >= config_.max_cost_usd)
+    const LoopLimits l = limits();
+    if (l.max_total_tokens > 0 && outcome_.usage.total() >= l.max_total_tokens)
         return std::pair{LoopStatus::budget_exhausted,
-                         std::format("cost budget exhausted (${:.4f} of ${:.4f})", outcome_.cost_usd, config_.max_cost_usd)};
-    if (wall_exceeded())
+                         std::format("token budget exhausted ({} of {} tokens)", outcome_.usage.total(), l.max_total_tokens)};
+    if (l.max_cost_usd > 0 && outcome_.cost_usd >= l.max_cost_usd)
         return std::pair{LoopStatus::budget_exhausted,
-                         std::format("wall-clock budget of {} s exhausted", config_.max_wall.count())};
-    if (outcome_.turns >= config_.max_turns)
-        return std::pair{LoopStatus::max_turns, std::format("reached the turn limit ({})", config_.max_turns)};
+                         std::format("cost budget exhausted (${:.4f} of ${:.4f})", outcome_.cost_usd, l.max_cost_usd)};
+    if (auto run = check_run_budget()) return run;
+    if (wall_exceeded(l))
+        return std::pair{LoopStatus::budget_exhausted, std::format("wall-clock budget of {} s exhausted", l.max_wall.count())};
+    if (outcome_.turns >= l.max_turns)
+        return std::pair{LoopStatus::max_turns, std::format("reached the turn limit ({})", l.max_turns)};
     return std::nullopt;
+}
+
+std::optional<std::pair<LoopStatus, std::string>> LoopRun::check_run_budget() const {
+    if (!config_.ledger || !config_.ledger->exhausted()) return std::nullopt;
+    return std::pair{LoopStatus::run_budget_exhausted,
+                     std::format("run budget exhausted (${:.2f} of ${:.2f})", config_.ledger->spent(), config_.ledger->limit())};
 }
 
 std::vector<PreparedCall> LoopRun::prepare_calls(const Response& response) const {
@@ -351,16 +421,16 @@ void LoopRun::flush_pending(bool with_extras) {
     std::string extra;
     if (with_extras) {
         if (control_) {
-            for (std::string& text : control_->take_injected()) {
-                if (trim(text).empty()) continue;
-                if (observer_) observer_->on_injected(text);
+            for (Injected& guidance : control_->take_injected()) {
+                if (trim(guidance.text).empty()) continue;
+                if (observer_) observer_->on_injected(guidance);
                 if (!extra.empty()) extra += "\n\n";
-                extra += "[Supervisor guidance] " + text;
+                extra += "[Supervisor guidance] " + guidance.text;
             }
         }
         // The status line rides along with tool results and nudges; it never forms a message alone.
         if (config_.status_line && !pending_.empty()) {
-            const std::string line = config_.status_line();
+            const std::string line = config_.status_line(progress());
             if (!trim(line).empty()) {
                 if (!extra.empty()) extra += "\n\n";
                 extra += line;
@@ -383,6 +453,18 @@ LoopOutcome LoopRun::finish(LoopStatus status, std::string detail) {
                outcome_.turns, outcome_.cost_usd);
     if (observer_) observer_->on_finish(outcome_);
     return outcome_;
+}
+
+LoopOutcome LoopRun::finish_aborted(int turn) {
+    outcome_.stop_reason = control_ ? control_->stop_reason() : StopReason::user;
+    std::string why;
+    switch (outcome_.stop_reason) {
+    case StopReason::skip: why = " (skipped)"; break;
+    case StopReason::run_budget: why = " (run budget exhausted)"; break;
+    case StopReason::shutdown: why = " (run shutting down)"; break;
+    case StopReason::user: break;
+    }
+    return finish(LoopStatus::aborted, std::format("aborted during turn {}{}", turn, why));
 }
 
 std::string LoopRun::nudge_text(const Response& response) const {

@@ -131,7 +131,7 @@ struct FileWritten {
     u64 size = 0;
     std::string sha1 = {};
     std::string session = {};
-    std::string approval = {};  // how the write was allowed: policy, approved
+    std::string approval = {};  // how the write was allowed: "auto" (policy) or "approved by <who>"
 };
 struct LogLine {
     std::string level, message;

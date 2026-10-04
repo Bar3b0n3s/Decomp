@@ -60,9 +60,9 @@ std::string describe_error(DWORD code) {
     return std::format("{} (error {})", text, code);
 }
 
-Error last_error(std::string_view what, const std::string& url) {
+Error last_error(std::string_view what, const HttpRequest& request) {
     const DWORD code = GetLastError();
-    return Error{ErrorCode::network, std::format("POST {} failed: {}: {}", url, what, describe_error(code))};
+    return Error{ErrorCode::network, std::format("{} {} failed: {}: {}", request.method, request.url, what, describe_error(code))};
 }
 
 DWORD to_timeout_ms(std::chrono::seconds s) {
@@ -118,8 +118,10 @@ public:
         if (session_) WinHttpCloseHandle(session_);
     }
 
-    Result<HttpResponse> post(const HttpRequest& request, const HttpDataCallback& on_data) override {
+    Result<HttpResponse> send(const HttpRequest& request, const HttpDataCallback& on_data) override {
         if (!session_) return make_error(ErrorCode::network, "WinHttpOpen failed: {}", init_error_);
+        if (request.method != "GET" && request.method != "POST")
+            return make_error(ErrorCode::invalid_argument, "unsupported HTTP method '{}'", request.method);
 
         // Crack the URL into scheme, host, port and path.
         const std::wstring wide_url = utf8_to_wide(request.url);
@@ -138,17 +140,18 @@ public:
         const bool secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
 
         Handle connection(WinHttpConnect(session_, host.c_str(), parts.nPort, 0));
-        if (!connection) return std::unexpected(last_error("WinHttpConnect", request.url));
+        if (!connection) return std::unexpected(last_error("WinHttpConnect", request));
 
-        Handle req(WinHttpOpenRequest(connection.get(), L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+        const std::wstring verb = utf8_to_wide(request.method);
+        Handle req(WinHttpOpenRequest(connection.get(), verb.c_str(), path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                       WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0));
-        if (!req) return std::unexpected(last_error("WinHttpOpenRequest", request.url));
+        if (!req) return std::unexpected(last_error("WinHttpOpenRequest", request));
 
         const DWORD connect_ms = to_timeout_ms(request.connect_timeout);
         const DWORD stall_ms = to_timeout_ms(request.stall_timeout);
         if (!WinHttpSetTimeouts(req.get(), static_cast<int>(connect_ms), static_cast<int>(connect_ms),
                                 static_cast<int>(stall_ms), static_cast<int>(stall_ms)))
-            return std::unexpected(last_error("WinHttpSetTimeouts", request.url));
+            return std::unexpected(last_error("WinHttpSetTimeouts", request));
 
         DWORD disable = WINHTTP_DISABLE_REDIRECTS;
         WinHttpSetOption(req.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
@@ -158,25 +161,25 @@ public:
             const std::wstring line = utf8_to_wide(std::format("{}: {}", name, value));
             if (!WinHttpAddRequestHeaders(req.get(), line.c_str(), static_cast<DWORD>(line.size()),
                                           WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
-                return make_error(ErrorCode::network, "POST {} failed: cannot add header '{}': {}", request.url, name,
+                return make_error(ErrorCode::network, "{} {} failed: cannot add header '{}': {}", request.method, request.url, name,
                                   describe_error(GetLastError()));
         }
 
         if (request.body.size() > std::numeric_limits<DWORD>::max())
             return make_error(ErrorCode::invalid_argument, "request body too large ({} bytes)", request.body.size());
-        const DWORD body_size = static_cast<DWORD>(request.body.size());
+        const DWORD body_size = request.method == "GET" ? 0 : static_cast<DWORD>(request.body.size());
         void* body = body_size ? const_cast<char*>(request.body.data()) : WINHTTP_NO_REQUEST_DATA;
         if (!WinHttpSendRequest(req.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, body, body_size, body_size, 0))
-            return std::unexpected(last_error("WinHttpSendRequest", request.url));
+            return std::unexpected(last_error("WinHttpSendRequest", request));
         if (!WinHttpReceiveResponse(req.get(), nullptr))
-            return std::unexpected(last_error("WinHttpReceiveResponse", request.url));
+            return std::unexpected(last_error("WinHttpReceiveResponse", request));
 
         HttpResponse response;
         DWORD status = 0;
         DWORD status_size = sizeof(status);
         if (!WinHttpQueryHeaders(req.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                  WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX))
-            return std::unexpected(last_error("WinHttpQueryHeaders(status)", request.url));
+            return std::unexpected(last_error("WinHttpQueryHeaders(status)", request));
         response.status = static_cast<int>(status);
 
         DWORD raw_size = 0;
@@ -196,12 +199,12 @@ public:
         while (true) {
             DWORD available = 0;
             if (!WinHttpQueryDataAvailable(req.get(), &available))
-                return std::unexpected(last_error("reading response", request.url));
+                return std::unexpected(last_error("reading response", request));
             if (available == 0) break;  // end of body
             buffer.resize(std::max<std::size_t>(available, buffer.size()));
             DWORD read = 0;
             if (!WinHttpReadData(req.get(), buffer.data(), available, &read))
-                return std::unexpected(last_error("reading response", request.url));
+                return std::unexpected(last_error("reading response", request));
             if (read == 0) break;
             const std::string_view chunk(buffer.data(), read);
             if (response.ok()) {

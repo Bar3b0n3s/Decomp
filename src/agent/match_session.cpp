@@ -364,6 +364,37 @@ ToolOutput MatchSession::submit_result(const Json& input) {
     if (!ev) return ToolOutput::error("internal error: " + ev.error().message);
     if (!ev->result.diff || !ev->result.diff->byte_exact)
         return ToolOutput::error("not accepted: the submitted source is not byte-exact.\n" + ev->text);
+    std::string approval = "auto";
+    if (project_ && approvals_) {
+        // The supervisor may want to see (or veto) what lands in the project.
+        const auto path = project_->matched_source_path(symbol_);
+        std::error_code ec;
+        std::string previous;
+        if (std::filesystem::exists(path, ec))
+            if (auto text = fs::read_text(path)) previous = std::move(*text);
+        const std::string display = symbol_.display.empty() ? symbol_.name : symbol_.display;
+        ApprovalRequest request{std::string(kWriteSourceAction),
+                                session_id_,
+                                display,
+                                va_,
+                                fs::to_utf8(std::filesystem::relative(path, project_->root(), ec)),
+                                std::format("byte-exact {} ({} bytes of source{})", display, source.size(),
+                                            previous.empty() ? ", new file" : ", replaces the existing file"),
+                                source,
+                                std::move(previous)};
+        const ApprovalDecision decision = approvals_->request(std::move(request), setup_.cancelled, worker_);
+        if (decision.verdict == "cancelled")
+            return ToolOutput::error("Verified byte-exact, but the session ended before the supervisor decided whether to save it.");
+        if (!decision.approved()) {
+            std::lock_guard lock(mutex_);
+            declined_.push_back(source);
+        }
+        if (!decision.approved())
+            return ToolOutput::error(std::format("Verified byte-exact, but the supervisor declined saving it{} Adjust the source as "
+                                                 "asked and submit it again, or give up with your reasons.",
+                                                 decision.reason.empty() ? "." : ": " + decision.reason + "."));
+        approval = decision.by == "policy" ? "auto" : "approved by " + decision.by;
+    }
     {
         std::lock_guard lock(mutex_);
         matched_ = true;
@@ -373,12 +404,22 @@ ToolOutput MatchSession::submit_result(const Json& input) {
     }
     if (project_) {
         if (auto r = project_->write_matched_source(symbol_, source, project::ChangeOrigin{SymbolSource::agent, session_id_, "verified match"}); r)
-            publish(events::FileWritten{fs::to_utf8(r->path), "matched source", r->size, r->sha1, session_id_, "policy"});
+            publish(events::FileWritten{fs::to_utf8(r->path), "matched source", r->size, r->sha1, session_id_, approval});
+        else
+            log::warn("cannot save the matched source of {}: {}", symbol_.name, r.error().message);
     }
     auto out = ToolOutput::ok("accepted: byte-exact match verified.");
     out.end_session = true;
     out.outcome = {{"outcome", "matched"}, {"best_match", 100.0}};
     return out;
+}
+
+std::optional<std::string> MatchSession::unsubmitted_exact_source() const {
+    std::lock_guard lock(mutex_);
+    if (matched_) return std::nullopt;
+    for (auto it = attempts_.rbegin(); it != attempts_.rend(); ++it)
+        if (it->byte_exact && std::ranges::find(declined_, it->source) == declined_.end()) return it->source;
+    return std::nullopt;
 }
 
 std::string MatchSession::status_line(int turns_left) const {

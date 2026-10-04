@@ -10,7 +10,9 @@
 #include <chrono>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <mutex>
+#include <utility>
 
 namespace decomp::agent {
 
@@ -19,10 +21,10 @@ AgentRunConfig run_config_from(const project::AgentSettings& s) {
     c.conversation.model = s.model;
     c.conversation.effort = s.effort;
     c.conversation.fallbacks = s.fallbacks;
-    c.loop.max_turns = s.max_turns;
-    c.loop.max_cost_usd = s.max_usd_per_function;
-    c.loop.max_total_tokens = s.max_tokens_per_function;
-    c.loop.max_wall = std::chrono::minutes(s.max_minutes_per_function);
+    c.loop.limits.max_turns = s.max_turns;
+    c.loop.limits.max_cost_usd = s.max_usd_per_function;
+    c.loop.limits.max_total_tokens = s.max_tokens_per_function;
+    c.loop.limits.max_wall = std::chrono::minutes(s.max_minutes_per_function);
     return c;
 }
 
@@ -87,8 +89,10 @@ std::string first_line(const Json& content, usize max = 200) {
 // Loop hooks -> events (for the progress view / GUI) + transcript records.
 class Bridge : public LoopObserver {
 public:
-    Bridge(events::EventBus& bus, Transcript& transcript, std::string session, int worker, std::string model)
-        : bus_(bus), transcript_(transcript), session_(std::move(session)), worker_(worker), model_(std::move(model)) {}
+    Bridge(events::EventBus& bus, Transcript& transcript, std::string session, int worker, std::string model,
+           std::function<void()> on_first_message)
+        : bus_(bus), transcript_(transcript), session_(std::move(session)), worker_(worker), model_(std::move(model)),
+          on_first_message_(std::move(on_first_message)) {}
 
     int current_turn() const { return turn_; }
 
@@ -109,7 +113,10 @@ public:
         phase_.clear();
         bus_.publish(events::TurnStarted{session_, turn}, worker_);
     }
-    void on_message_start(const Response&) override { mark_first_event(); }
+    void on_message_start(const Response&) override {
+        mark_first_event();
+        if (on_first_message_) std::exchange(on_first_message_, nullptr)();
+    }
     void on_block_start(int, const Json& block) override {
         mark_first_event();
         const std::string type = json_string_or(block, "type", "");
@@ -124,11 +131,22 @@ public:
         mark_first_event();
         bus_.publish(events::StreamDelta{session_, "thinking", std::string(text)}, worker_);
     }
-    void on_retry(int attempt, const Error& error, std::chrono::milliseconds delay) override {
-        transcript_.write({{"type", "retry"}, {"turn", turn_}, {"attempt", attempt}, {"error", error.describe()}, {"delay_ms", delay.count()}});
-        bus_.publish(events::Retry{session_, attempt, error.message, delay.count()}, worker_);
+    void on_retry(const RetryInfo& retry) override {
+        const long long retry_after = retry.retry_after ? retry.retry_after->count() : 0;
+        transcript_.write({{"type", "retry"},
+                           {"turn", turn_},
+                           {"attempt", retry.attempt},
+                           {"error", retry.error.describe()},
+                           {"delay_ms", retry.delay.count()},
+                           {"status", retry.status},
+                           {"retry_after_ms", retry_after}});
+        bus_.publish(events::Retry{session_, retry.attempt, retry.error.message, retry.delay.count(), retry.status, retry_after}, worker_);
         first_event_.reset();  // the retried attempt starts over
         phase_.clear();
+    }
+    void on_rate_wait(std::chrono::milliseconds expected) override {
+        set_phase(expected.count() > 0 ? "waiting for rate limit" : "waiting for model");
+        if (expected.count() == 0) turn_started_ = std::chrono::steady_clock::now();  // latency counts from the send
     }
     void on_response(int turn, const Response& response) override {
         const ResponseCost cost = response_cost(response, model_);
@@ -171,9 +189,9 @@ public:
                            {"elapsed_ms", elapsed.count()}});
         bus_.publish(events::ToolCallFinished{session_, call.id, call.name, result.is_error, first_line(result.content), elapsed.count()}, worker_);
     }
-    void on_injected(const std::string& text) override {
-        transcript_.write({{"type", "guidance"}, {"turn", turn_}, {"text", text}});
-        bus_.publish(events::Guidance{session_, text}, worker_);
+    void on_injected(const Injected& guidance) override {
+        transcript_.write({{"type", "guidance"}, {"turn", turn_}, {"id", guidance.id}, {"text", guidance.text}});
+        bus_.publish(events::Guidance{session_, guidance.text, guidance.id}, worker_);
     }
     void on_paused() override { transcript_.write({{"type", "paused"}, {"turn", turn_}}); }
     void on_resumed() override { transcript_.write({{"type", "resumed"}, {"turn", turn_}}); }
@@ -190,6 +208,7 @@ private:
     std::chrono::steady_clock::time_point turn_started_{};
     std::optional<std::chrono::steady_clock::time_point> first_event_;
     std::string phase_;  // what the model is producing in this turn (thinking, writing)
+    std::function<void()> on_first_message_;
 
     void mark_first_event() {
         if (!first_event_) first_event_ = std::chrono::steady_clock::now();
@@ -208,9 +227,13 @@ std::string outcome_name(const LoopOutcome& o) {
     case LoopStatus::end_turn_without_finish: return "no_result";
     case LoopStatus::refused: return "refused";
     case LoopStatus::budget_exhausted: return "budget_exhausted";
+    case LoopStatus::run_budget_exhausted: return "run_budget_exhausted";
     case LoopStatus::max_turns: return "max_turns";
-    case LoopStatus::aborted: return "aborted";
-    case LoopStatus::stopped: return "stopped";
+    case LoopStatus::aborted:
+    case LoopStatus::stopped:
+        if (o.stop_reason == StopReason::skip) return "skipped";
+        if (o.stop_reason == StopReason::run_budget) return "run_budget_exhausted";
+        return o.status == LoopStatus::aborted ? "aborted" : "stopped";
     case LoopStatus::error: return "error";
     }
     return "error";
@@ -255,7 +278,12 @@ FunctionRunResult run_function(const Program& program, project::Project* project
     const std::string session_id = !config.session_id.empty() ? config.session_id
                                    : bus.run_id().empty()       ? std::format("{:x}", va)
                                                                 : std::format("{}-{:x}", bus.run_id(), va);
-    MatchSession session(program, project, setup, va, &bus, session_id, worker);
+    // An abort also cancels a compile in progress (and an approval wait).
+    matching::MatchSetup session_setup = setup;
+    if (control)
+        session_setup.cancelled = [control, outer = setup.cancelled] { return control->abort_requested() || (outer && outer()); };
+    MatchSession session(program, project, std::move(session_setup), va, &bus, session_id, worker);
+    session.set_approvals(config.approvals);
     const Symbol& sym = session.symbol();
     const std::string display = sym.display.empty() ? sym.name : sym.display;
     Transcript transcript(transcript_path);
@@ -288,10 +316,11 @@ FunctionRunResult run_function(const Program& program, project::Project* project
     }
     conversation.append_user_blocks(std::move(first));
 
-    Bridge bridge(bus, transcript, session_id, worker, config.conversation.model);
+    Bridge bridge(bus, transcript, session_id, worker, config.conversation.model, config.on_first_message);
     LoopConfig loop = config.loop;
     loop.finish_tool = "submit_result";
-    loop.status_line = [&session, &bridge, max = loop.max_turns] { return session.status_line(std::max(0, max - bridge.current_turn())); };
+    // Turns left come from the limits in effect now (the supervisor can change them mid-session).
+    loop.status_line = [&session](const LoopProgress& progress) { return session.status_line(progress.turns_left()); };
 
     std::shared_ptr<HttpTransport> transport = config.transport;
     if (!transport) transport = make_default_transport();
@@ -304,6 +333,22 @@ FunctionRunResult run_function(const Program& program, project::Project* project
     result.turns = outcome.turns;
     result.cost_usd = outcome.cost_usd;
     result.usage = outcome.usage;
+    result.stop_reason = outcome.stop_reason;
+
+    // A byte-exact attempt the model never submitted (it ran out of turns or budget, was stopped, or
+    // stopped talking) is still a match: verify and save it the way submit_result would.
+    if (!session.matched() && outcome.status != LoopStatus::aborted) {
+        if (auto exact = session.unsubmitted_exact_source()) {
+            bus.publish(events::LogLine{"info", std::format("{}: saving the byte-exact attempt the session did not submit", display), session_id},
+                        worker);
+            const ToolOutput saved = session.submit_result(Json{{"outcome", "matched"}, {"source", *exact}, {"reason", ""}});
+            transcript.write({{"type", "auto_submit"}, {"accepted", !saved.is_error}, {"result", saved.text}});
+            if (session.matched()) {
+                result.auto_submitted = true;
+                result.detail = std::format("saved the byte-exact attempt the session did not submit (the session ended: {})", result.outcome);
+            }
+        }
+    }
     result.matched = session.matched();
     if (result.matched) result.outcome = "matched";
     if (result.outcome == "gave_up" && outcome.finish_outcome.is_object())

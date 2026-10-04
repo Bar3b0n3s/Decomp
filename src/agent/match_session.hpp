@@ -1,11 +1,13 @@
 #pragma once
 
+#include "agent/approvals.hpp"
 #include "analysis/program.hpp"
 #include "core/json.hpp"
 #include "events/bus.hpp"
 #include "matching/match.hpp"
 #include "project/project.hpp"
 
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -60,6 +62,9 @@ public:
     ToolOutput record_note(const Json& input);
     ToolOutput submit_result(const Json& input);
 
+    // Saving a verified match asks this gate first (the setup's `cancelled` ends a wait).
+    void set_approvals(std::shared_ptr<ApprovalGate> approvals) { approvals_ = std::move(approvals); }
+
     // First user message: target, toolchain, annotated listing, references, history.
     std::string brief() const;
     // One line appended after tool results each turn.
@@ -73,6 +78,9 @@ public:
     const std::string& matched_source() const { return matched_source_; }
     const std::vector<MatchAttempt>& attempts() const { return attempts_; }
     const std::string& session_id() const { return session_id_; }
+    // The source of this session's latest byte-exact attempt that the supervisor has not declined, while
+    // no match has been accepted (the runner saves it when the session ends without submitting it).
+    std::optional<std::string> unsubmitted_exact_source() const;
 
 private:
     struct Evaluation {
@@ -98,6 +106,8 @@ private:
     bool matched_ = false;
     std::string matched_source_;
     std::vector<std::string> session_notes_;
+    std::shared_ptr<ApprovalGate> approvals_;
+    std::vector<std::string> declined_;  // sources the supervisor declined to save
 };
 
 // The frozen system prompt (identical for every function so the prompt cache is shared).

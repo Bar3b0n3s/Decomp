@@ -43,7 +43,11 @@ struct RetryObserver : StreamObserver {
     };
     std::vector<Retry> retries;
     std::string text;
-    void on_retry(int attempt, const Error& error, milliseconds delay) override { retries.push_back({attempt, error, delay}); }
+    void on_retry(const RetryInfo& r) override {
+        retries.push_back({r.attempt, r.error, r.delay});
+        statuses.push_back(r.status);
+    }
+    std::vector<int> statuses;
     void on_text_delta(int, std::string_view t) override { text += t; }
 };
 
@@ -60,9 +64,9 @@ Json hello_response() { return replay::message({replay::text("Hello there.")}, "
 struct CapturingTransport : HttpTransport {
     HttpRequest last;
     ReplayTransport inner{std::vector<Json>{hello_response()}};
-    Result<HttpResponse> post(const HttpRequest& request, const HttpDataCallback& on_data) override {
+    Result<HttpResponse> send(const HttpRequest& request, const HttpDataCallback& on_data) override {
         last = request;
-        return inner.post(request, on_data);
+        return inner.send(request, on_data);
     }
 };
 
