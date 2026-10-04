@@ -50,6 +50,9 @@ struct RunRequest {
     std::optional<agent::LoopLimits> limits;
     // On top of decomp.json's agent.approvals ("ask" works here: the GUI answers).
     std::map<std::string, agent::ApprovalPolicy, std::less<>> policies;
+    // Supervisor guidance every session of the run gets with its brief (`decomp agent --guidance`); the
+    // Diff viewer's "hand back" starts a run on one function with the edited source this way.
+    std::vector<std::string> guidance = {};
 };
 
 class Workspace {

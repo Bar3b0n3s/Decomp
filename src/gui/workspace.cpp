@@ -245,6 +245,7 @@ Result<std::string> Workspace::start_run(const RunRequest& request) {
         settings.max_minutes_per_function = static_cast<int>(request.limits->max_wall.count() / 60);
     }
     TRY_ASSIGN(auto options, options_for(std::move(settings), request.policies));
+    options.agent.guidance = request.guidance;
 
     const auto current = program();
     std::vector<u64> vas = request.functions;
