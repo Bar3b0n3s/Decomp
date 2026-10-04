@@ -88,7 +88,7 @@ public:
     Settings& settings() { return settings_; }
     // The live run's estimated time to finish its queue (status bar); nullopt without a live run or
     // before the first estimate.
-    const std::optional<vm::QueueEta>& eta() const { return eta_.eta; }
+    const vm::QueueEta* eta() const { return eta_.eta.get(); }
 
 private:
     struct Slot {
@@ -192,7 +192,7 @@ private:
         JobHandle<vm::DurationModel> loading;
         std::optional<vm::DurationModel> base;
         std::chrono::steady_clock::time_point computed{};
-        std::optional<vm::QueueEta> eta;
+        std::shared_ptr<const vm::QueueEta> eta;  // also ViewContext::eta
     } eta_;
     std::string layout_name_;
     std::vector<std::string> layout_action_ids_;

@@ -4,7 +4,10 @@
 #include "gui/views/run_monitor_view.hpp"
 
 #include "core/strings.hpp"
+#include "gui/views/remembered_tabs.hpp"
 #include "gui/widgets.hpp"
+#include "viewmodel/common.hpp"
+#include "viewmodel/eta.hpp"
 
 #include <implot.h>
 
@@ -73,23 +76,24 @@ public:
         draw_workers(ctx, *s, commands, live);
         ImGui::Spacing();
         if (ImGui::BeginTabBar("##monitor_tabs")) {
-            if (ImGui::BeginTabItem("Activity")) {
+            tabs_.begin(ctx, "run_monitor", "activity");
+            if (tabs_.item("Activity", "activity")) {
                 draw_activity(*s);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(std::format("Queue ({})###queue", s->queue_total).c_str())) {
+            if (tabs_.item(std::format("Queue ({})###queue", s->queue_total).c_str(), "queue")) {
                 draw_queue(ctx, *s, commands, live);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Timeline")) {
+            if (tabs_.item("Timeline", "timeline")) {
                 draw_timeline(ctx, *s);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Throughput")) {
+            if (tabs_.item("Throughput", "throughput")) {
                 draw_throughput(*s);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Rate limits")) {
+            if (tabs_.item("Rate limits", "rate_limits")) {
                 draw_rate_limits(ctx, *s);
                 ImGui::EndTabItem();
             }
@@ -257,10 +261,18 @@ private:
         const auto& queue = *s.queue;
         if (queue.empty()) ImGui::TextDisabled("Nothing waits: every function of the run has been dispatched.");
         const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit;
-        if (!queue.empty() && ImGui::BeginTable("##queue", 4, flags)) {
+        // Expected start and finish per queued function (the App's estimate, refreshed once a second).
+        if (ctx.eta.get() != eta_source_) {
+            eta_source_ = ctx.eta.get();
+            eta_by_va_.clear();
+            if (ctx.eta)
+                for (const auto& item : ctx.eta->items) eta_by_va_[item.va] = {item.start, item.finish};
+        }
+        if (!queue.empty() && ImGui::BeginTable("##queue", 5, flags)) {
             ImGui::TableSetupColumn("#");
             ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Difficulty");
+            ImGui::TableSetupColumn("ETA");
             ImGui::TableSetupColumn("");
             ImGui::TableHeadersRow();
             ImGuiListClipper clipper;
@@ -276,6 +288,17 @@ private:
                     if (ImGui::TextLink(q.function.c_str())) ctx.open("inspector", NavTarget{.va = q.va});
                     ImGui::TableNextColumn();
                     ImGui::Text("%.1f", q.difficulty);
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+                        ImGui::SetTooltip("The queue's estimate, from the function's size: easier functions run first.");
+                    ImGui::TableNextColumn();
+                    if (auto it = eta_by_va_.find(q.va); it != eta_by_va_.end()) {
+                        ImGui::Text("in %s", vm::format_duration(it->second.first).c_str());
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+                            ImGui::SetTooltip("Expected to start in %s and finish in %s, from how long functions of its size took.",
+                                              vm::format_duration(it->second.first).c_str(), vm::format_duration(it->second.second).c_str());
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
                     ImGui::TableNextColumn();
                     ImGui::BeginDisabled(!live);
                     ImGui::BeginDisabled(i == 0);
@@ -502,6 +525,9 @@ private:
         std::string session, name, outcome;
     };
     std::vector<FinishedRow> finished_;
+    RememberedTabs tabs_;
+    const vm::QueueEta* eta_source_ = nullptr;
+    std::map<u64, std::pair<double, double>> eta_by_va_;  // start, finish (seconds from the estimate)
     u64 finished_version_ = ~u64{0};
     std::string finished_run_;
 };

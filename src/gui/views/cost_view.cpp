@@ -5,6 +5,7 @@
 #include "gui/views/cost_view.hpp"
 
 #include "gui/export.hpp"
+#include "gui/views/remembered_tabs.hpp"
 #include "gui/jobs.hpp"
 #include "gui/widgets.hpp"
 #include "gui/workspace.hpp"
@@ -60,21 +61,8 @@ public:
         draw_flags(ctx);
         ImGui::Spacing();
         if (ImGui::BeginTabBar("##cost_tabs")) {
-            // The shown tab is remembered per project (and can be chosen through the view state).
-            Json& state = ctx.view_state("cost");
-            const std::string wanted = json_string_or(state, "tab", "runs");
-            auto tab = [&](const char* label, const char* key) {
-                const ImGuiTabItemFlags flags = wanted != shown_tab_ && wanted == key ? ImGuiTabItemFlags_SetSelected : 0;
-                if (!ImGui::BeginTabItem(label, nullptr, flags)) return false;
-                if (shown_tab_ != key) {
-                    shown_tab_ = key;
-                    if (wanted != key) {
-                        state["tab"] = key;
-                        ctx.mark_settings_dirty();
-                    }
-                }
-                return true;
-            };
+            tabs_.begin(ctx, "cost", "runs");
+            auto tab = [&](const char* label, const char* key) { return tabs_.item(label, key); };
             if (tab("By run", "runs")) {
                 draw_slices(ctx, "##runs", report_->cost.by_run, true);
                 ImGui::EndTabItem();
@@ -599,7 +587,7 @@ private:
     double budget_edit_ = 0;
     bool editing_budget_ = false;
     agent::LoopLimits limits_;
-    std::string shown_tab_;
+    RememberedTabs tabs_;
 };
 
 } // namespace

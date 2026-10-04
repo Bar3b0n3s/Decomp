@@ -257,8 +257,16 @@ TEST_CASE("the shell announces what a run did once, not again when it is reopene
     auto id = fx.workspace->start_run(request);
     REQUIRE(id);
     REQUIRE(fx.until([&] { return fx.sessions.started == 2; }));
-    // While the run is live, the status bar has an estimate for the queue.
+    // While the run is live, the status bar has an estimate for the queue, and the Run monitor shows
+    // it per function; every Run monitor tab renders the live run.
     ctx.frames(2, [&] { app.frame(); });
+    REQUIRE(app.focus_view("run_monitor"));
+    for (const char* tab : {"activity", "queue", "timeline", "throughput", "rate_limits"}) {
+        CAPTURE(tab);
+        app.context().view_state("run_monitor")["tab"] = tab;
+        ctx.frames(3, [&] { app.frame(); });
+        CHECK(app.view_visible("run_monitor"));
+    }
     REQUIRE(app.eta());
     CHECK(app.eta()->workers == 2);
     CHECK(app.eta()->running.size() == 2);

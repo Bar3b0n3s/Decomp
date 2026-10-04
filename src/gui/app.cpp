@@ -210,6 +210,7 @@ void App::update_eta() {
     const auto program = ws ? ws->program() : nullptr;
     if (!project || !program || !ws->run_live() || !ctx_.snapshot) {
         eta_.eta.reset();
+        ctx_.eta.reset();
         return;
     }
     // The base model: finished sessions of the project's recent runs, read from their event logs again
@@ -237,7 +238,8 @@ void App::update_eta() {
     eta_.computed = now;
     vm::DurationModel model = eta_.base.value_or(vm::DurationModel{});
     model.add_run(*ctx_.snapshot, program->symbols());
-    eta_.eta = vm::estimate_queue(model, *ctx_.snapshot, program->symbols(), std::chrono::system_clock::now());
+    eta_.eta = std::make_shared<const vm::QueueEta>(vm::estimate_queue(model, *ctx_.snapshot, program->symbols(), std::chrono::system_clock::now()));
+    ctx_.eta = eta_.eta;
 }
 
 void App::set_dpi_scale(float scale) {

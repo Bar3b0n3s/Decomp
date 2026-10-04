@@ -18,6 +18,10 @@
 #include <string>
 #include <string_view>
 
+namespace decomp::vm {
+struct QueueEta;
+} // namespace decomp::vm
+
 namespace decomp::gui {
 
 // Everything a view may use while drawing. Owned by the App and valid for its lifetime; UI thread only.
@@ -37,6 +41,8 @@ struct ViewContext {
     Fonts fonts;
     std::shared_ptr<const events::RunStateData> snapshot;  // loaded once per frame; null: no run
     ProjectInfo project;                                    // loaded once per frame
+    // The live run's queue estimate (status bar, Run monitor), refreshed once a second; null: none.
+    std::shared_ptr<const vm::QueueEta> eta;
 
     // Navigates (with history) to a view, e.g. ctx.open("inspector", {.va = 0x401000}).
     void open(std::string view, NavTarget target = {}) { nav.open(std::move(view), std::move(target)); }

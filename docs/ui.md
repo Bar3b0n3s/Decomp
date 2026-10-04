@@ -141,38 +141,43 @@ Each view lists what it **shows**, what the user can **do**, and its **data sour
 **Shows**
 
 - A worker table: worker, function, phase, turn `n/max`, elapsed time, best percentage, tokens and
-  dollars, and the last tool call. The phase is one of: building context, waiting for model,
-  streaming, running tool, compiling, diffing, backoff, waiting for approval.
-- A plain-language live activity feed, for example "Worker 2: compiling attempt 4 of
-  `Player::Update` with MSVC 6 /O2 - 3.2 s".
-- The queue, with order, difficulty estimate and ETA. The difficulty estimate is a heuristic over
-  size, basic blocks, loops, calls and unknown callees, refined in Phase 3. The ETA uses this
-  project's observed session durations by size bucket.
+  dollars, and the last tool call. A session's phase is one of: starting, waiting for model,
+  thinking, writing, running `<tool>`, compiling, turn done, backoff, waiting for rate limit, waiting
+  for approval, paused; an idle worker shows why it waits (waiting for the first session, paused, run
+  budget exhausted, idle) or that it retired after concurrency was lowered.
+- A plain-language live activity feed, for example "int __cdecl add(int, int): turn 2
+  compile_and_diff -> compile: ok", with follow.
+- The queue, with order, difficulty estimate and ETA. The queue's difficulty estimate comes from the
+  function's size (the Function browser's difficulty column also weighs blocks, loops, calls and
+  unknown callees). The ETA uses this project's observed session durations by size bucket (the last
+  ten runs and the live run). A large run's queue arrives as its first 500 functions plus the number
+  pending.
 - A worker timeline: a Gantt chart of phases per worker, to spot bottlenecks such as long compile
   queues or backoff.
-- Throughput: turns per minute, compiles per minute, output tokens per second, time to first token.
-- Rate-limit and retry history: response-header snapshots, each retry with its status and delay.
+- Throughput: turns, compiles and retries per minute, output tokens per second, time to first token.
+- Rate limits and retry history: the gate's latest snapshot (requests and tokens left, reset, backoff)
+  and its history, and each retry with its status and delay.
 
 **Actions**
 
-- Reorder, pin and remove queue items.
-- Change concurrency and budgets live.
-- Skip or requeue a function.
-- Pause or resume one worker.
+- Reorder, pin, skip and remove queued functions; requeue finished ones.
+- Change concurrency, the run budget and the per-function limits live.
+- Pause or resume one worker (and the whole run from the top bar).
 
 **Data sources**
 
-- `turn_started`/`turn_finished`, `stream_delta` (tokens per second, time to first token),
-  `tool_call_started`/`tool_call_finished`, `compile_finished`, `diff_computed` and `retry`; the
-  planned `worker_phase_changed`, `compile_started` and `rate_limit_updated`. Today the reducer derives
-  each worker's phase from the other events.
-- The `RunState` workers (session and phase); the queue is Phase 1.
+- `worker_phase_changed`, `turn_started`/`turn_finished`, `tool_call_started`/`tool_call_finished`,
+  `compile_started`/`compile_finished`, `diff_computed`, `retry`, `rate_limit_updated`,
+  `queue_updated`, `budget_changed` and `control`, folded into `RunState` (workers with their phase
+  spans, the queue, rate limits, per-minute statistics).
+- The queue ETA from `vm::estimate_queue` (`src/viewmodel/eta.hpp`), which the shell computes once a
+  second.
 
 **Notes**
 
-The slice has one worker and no queue. The progress view of `decomp agent` is that single-worker
-version of this view ([CLI parity](#cli-parity)). Its phases today are starting, waiting for model,
-thinking, writing, running tools, turn done, compiling, running `<tool>`, backoff and done.
+The progress view of `decomp run` (one line per worker) is the CLI version of this view
+([CLI parity](#cli-parity)), and `decomp run --interactive` has its controls. The selected tab is
+remembered per project.
 
 ### Agent session
 
@@ -477,38 +482,42 @@ sources automatically, which is the default policy.
 | Pause | Each worker finishes its current turn (request and tools), then waits | Between turns |
 | Resume | Workers continue | Immediately |
 | Stop | Workers finish their current turn, then sessions end with outcome `stopped` and best attempts are kept | Between turns |
-| Abort | In-flight requests are cancelled and partial turns discarded; sessions end with outcome `aborted`. Cancelling running compiles is planned. | Immediately |
-| Skip function | Ends that function's session, if any, and marks it `skipped` | Between turns |
+| Abort | In-flight requests and running compiles are cancelled and partial turns discarded; sessions end with outcome `aborted` | Immediately |
+| Skip function | Ends that function's session, if any, after its turn (outcome `skipped`), or takes it out of the queue | Between turns |
 | Pause worker | Pauses one worker | Between turns |
-| Set concurrency, change budgets (Phase 1) | Applied to the running run | Next scheduling decision |
+| Set concurrency, change the run budget or per-function limits | Applied to the running run | Next scheduling decision (limits: the sessions' next check) |
+| Requeue, enqueue, remove, move, pin | Changes the queue | Next scheduling decision |
 
-In the slice, `decomp agent <func>` starts one session, and Pause, Resume, Stop and Abort exist for
-it: the first Ctrl+C stops, a second aborts, and with `--interactive` the stdin commands `:pause`,
-`:resume`, `:stop` and `:abort` do the same. Skip, per-worker pause and live changes come with the
-Phase 1 runner.
+The GUI sends these through `RunCommands` (the top bar, the Run monitor, the Function browser, the
+Agent session); `decomp run --interactive` has the same commands on stdin (`:pause [worker]`,
+`:resume [worker]`, `:stop`, `:abort`, `:skip`, `:requeue`, `:workers`, `:budget`, `:guide`), and Ctrl+C
+stops (twice: aborts). A single `decomp agent <func>` session has Pause, Resume, Stop and Abort (Ctrl+C,
+and `:pause`, `:resume`, `:stop` and `:abort` with `--interactive`).
 
 A turn is never left half-recorded. A paused session resumes exactly where it was, and a stopped
-session can be inspected exactly as it was through its transcript. Whether a stopped session can be
-resumed from its last committed turn is open
-([roadmap.md](roadmap.md#phase-1-supervision-gui-and-batch-runner)).
+session can be inspected exactly as it was through its transcript. A stopped, budget-limited or
+interrupted run can be resumed: its unfinished functions start again with a fresh conversation whose
+brief carries their attempts, notes and best source ([agent.md](agent.md#resuming)).
 
 ### Steering
 
 The Agent session view has a guidance composer. A message is queued for the session and appended to
 the conversation at the next safe point: in the next user message, after the tool results (or the
 nudge) and before the status line, prefixed `[Supervisor guidance]`. Until then it shows as pending
-and can be retracted (retraction is planned; `LoopControl` has no retract command yet). Once
-appended, it is part of the conversation for good (the conversation is
+and can be retracted. Once appended, it is part of the conversation for good (the conversation is
 [append-only](agent.md#the-append-only-conversation)) and appears inline in the timeline. Guidance can
-also carry a source: the Diff viewer's "hand back" sends the edited source this way. In the slice,
-`decomp agent --interactive` queues each line typed on stdin as guidance, and `--guidance` queues
-text for the first request; a `guidance` event and transcript record mark when it was sent.
+also carry a source: the Diff viewer's "hand back" sends the edited source this way. From the CLI,
+`decomp agent --interactive` queues each line typed on stdin as guidance, `--guidance` queues text for
+the first request, and `decomp run --interactive` takes `:guide <fn> <text>`; a `guidance` event and
+transcript record mark when it was sent.
 
 ### Approvals
 
 Gated actions appear in Changes & approvals and as notifications. A decision applies immediately.
-The policy for an action type can be changed from the same place, and changes are recorded as events
-so the audit trail shows who allowed what.
+The policy for an action type can be changed from the same place for the live run (Settings changes
+the project's default), and changes are recorded as `control` events, so the audit trail shows who
+allowed what; `approval_decided` records each decision, and `.decomp/changes.jsonl` how each write was
+approved ([agent.md](agent.md#approvals)).
 
 ### Manual mode
 
