@@ -62,6 +62,7 @@ Matching tips (MSVC and clang-cl):
 - Calls must reach the same functions with the same calling conventions (__cdecl, __stdcall, __fastcall, __thiscall for member functions).
 - String literals and floating-point constants are compared by value, so their content must be exact.
 - When the diff says only registers or stack offsets differ, you are close: try small reorderings rather than rewriting.
+- Listing notation: `imagerel X` (MSVC x64 `[r8+rcx*4+imagerel X]` after `lea r8, __ImageBase`) is an ordinary indexed access to X, such as X[i]. A call annotated "via thunk" goes to the named function; the linker made the thunk, so it is not part of your source.
 
 Keep text between tool calls short; put reasoning into code and notes. When the result is byte-exact, call submit_result with outcome "matched" and that exact source. If you are stuck after many attempts with no improvement, record a note with what you learned and call submit_result with outcome "give_up", your best source, and the reason.)";
     return prompt;
