@@ -76,7 +76,7 @@ project "decomp_tests"
     kind "ConsoleApp"
     decomp_settings()
     files { "tests/**.hpp", "tests/**.cpp" }
-    removefiles { "tests/fixtures/**" }
+    removefiles { "tests/fixtures/**", "tests/gui/**" }
     includedirs { "tests" }
     defines { "DECOMP_SOURCE_DIR=\"" .. path.getabsolute(".") .. "\"" }
     link_decomp()
@@ -123,3 +123,11 @@ project "decomp-gui"
         entrypoint "mainCRTStartup"
     filter {}
     link_gui({ "glfw" })
+
+project "decomp_gui_tests"
+    kind "ConsoleApp"
+    gui_settings()
+    files { "tests/gui/**.hpp", "tests/gui/**.cpp" }
+    includedirs { "tests" }
+    defines { "DECOMP_SOURCE_DIR=\"" .. path.getabsolute(".") .. "\"" }
+    link_gui()

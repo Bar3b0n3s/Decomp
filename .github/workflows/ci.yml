@@ -21,7 +21,8 @@ jobs:
       - name: Install compilers and libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-14 libcurl4-openssl-dev clang-18 lld-18 llvm-18
+          sudo apt-get install -y g++-14 libcurl4-openssl-dev clang-18 lld-18 llvm-18 \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev xvfb
 
       - name: Install premake
         run: |
@@ -44,6 +45,17 @@ jobs:
 
       - name: Unit and integration tests
         run: ./bin/Release/decomp_tests
+
+      - name: GUI tests (headless)
+        run: ./bin/Release/decomp_gui_tests
+
+      - name: GUI smoke test (Xvfb)
+        run: xvfb-run -a ./bin/Release/decomp-gui --frames 60 --screenshot gui-shell.png --config-dir "$(mktemp -d)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-screenshots
+          path: gui-shell.png
 
       - name: CLI smoke test
         run: |
@@ -104,6 +116,10 @@ jobs:
 
       - name: Unit and integration tests
         run: bin\Release\decomp_tests.exe
+
+      # decomp-gui itself is built but not run: hosted runners have no OpenGL 3.
+      - name: GUI tests (headless)
+        run: bin\Release\decomp_gui_tests.exe
 
       - name: MSVC round trip (x86)
         uses: ilammy/msvc-dev-cmd@v1
