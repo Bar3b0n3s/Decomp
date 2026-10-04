@@ -79,8 +79,12 @@ void Workspace::poll() {
     }
     if (ready(past_load_)) {
         auto loaded = past_load_.get();
-        if (loaded) past_ = std::move(*loaded);
-        else error_ = std::format("cannot open the run: {}", loaded.error().message);
+        if (loaded) {
+            past_ = std::move(*loaded);
+            run_history_ = past_->store->snapshot();
+        } else {
+            error_ = std::format("cannot open the run: {}", loaded.error().message);
+        }
     }
 }
 
@@ -261,6 +265,7 @@ Result<std::string> Workspace::start_run(const RunRequest& request) {
     TRY_ASSIGN(auto store, run::RunStore::create(project_->runs_dir(), events::new_run_id()));
     const std::string id = store.id();
     TRY(launch(std::move(store), std::move(items), std::move(options), false, nullptr));
+    ++run_serial_;
     return id;
 }
 
@@ -284,8 +289,12 @@ Result<void> Workspace::resume_run(const std::string& run_id) {
     auto state = std::make_shared<events::RunStateStore>();
     TRY_ASSIGN(auto past, events::read_event_log(store.events_path()));
     for (const auto& e : past) state->apply(e);
+    auto history = state->snapshot();
     close_run();
-    return launch(std::move(store), {}, std::move(*options), true, std::move(state));
+    TRY(launch(std::move(store), {}, std::move(*options), true, std::move(state)));
+    ++run_serial_;
+    run_history_ = std::move(history);
+    return {};
 }
 
 Result<void> Workspace::open_run(const std::string& run_id) {
@@ -293,6 +302,7 @@ Result<void> Workspace::open_run(const std::string& run_id) {
     if (run_live()) return make_error(ErrorCode::invalid_argument, "a run is in progress: stop it before opening another");
     TRY_ASSIGN(auto dir, run::find_run(project_->runs_dir(), run_id));
     close_run();
+    ++run_serial_;
     past_load_ = std::async(std::launch::async, [dir]() -> Result<PastRun> {
         TRY_ASSIGN(auto events, events::read_event_log(dir / "events.jsonl"));
         PastRun past;
@@ -307,10 +317,12 @@ Result<void> Workspace::open_run(const std::string& run_id) {
 
 void Workspace::close_run() {
     if (run_live()) return;
+    if (live_ || past_ || past_load_.valid()) ++run_serial_;
     live_.reset();
     if (past_load_.valid()) past_load_.wait();
     past_load_ = {};
     past_.reset();
+    run_history_.reset();
 }
 
 bool Workspace::run_live() const { return live_ && live_->controller && !live_->controller->finished(); }

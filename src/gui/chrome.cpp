@@ -9,6 +9,7 @@
 #include "gui/layout.hpp"
 #include "gui/widgets.hpp"
 #include "gui/workspace.hpp"
+#include "viewmodel/common.hpp"
 
 #include <imgui_internal.h>
 #include <implot.h>
@@ -315,7 +316,21 @@ void App::draw_status_bar() {
         if (run_.phase == RunPhase::none) ImGui::Text("Queue %s", dash);
         else ImGui::Text("Queue %zu", run_.queued);
         vertical_separator();
-        ImGui::Text("ETA %s", dash);
+        if (const auto& eta = eta_.eta; eta && run_.phase != RunPhase::none) {
+            const bool done = eta->items.empty() && eta->running.empty() && eta->beyond_head == 0;
+            ImGui::Text("ETA %s", done ? dash : vm::format_duration(eta->finish).c_str());
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                usize samples = 0;
+                for (const auto& r : eta->running) samples = std::max(samples, r.estimate.samples);
+                for (const auto& i : eta->items) samples = std::max(samples, i.estimate.samples);
+                ImGui::SetTooltip("Time until the queue is done on %d worker(s): %zu running, %zu queued.\n%s", eta->workers,
+                                  eta->running.size(), eta->items.size() + eta->beyond_head,
+                                  samples ? "Estimated from how long functions of similar size took in this project's runs."
+                                          : "No finished sessions yet: a rough default by function size.");
+            }
+        } else {
+            ImGui::Text("ETA %s", dash);
+        }
         vertical_separator();
         if (run_.phase == RunPhase::none) ImGui::Text("Cache hit %s", dash);
         else ImGui::Text("Cache hit %.0f%%", run_.cache_hit_rate * 100.0);

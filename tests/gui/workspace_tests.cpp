@@ -243,3 +243,55 @@ TEST_CASE("every view renders with a project open and a finished run, and with a
     fx.workspace->wait_loaded();
     render_all("past run");
 }
+
+TEST_CASE("the shell announces what a run did once, not again when it is reopened or resumed") {
+    Fixture fx;
+    fx.open();
+    HeadlessContext ctx;
+    Settings settings;
+    App app(fx.workspace->services(), settings);
+    ctx.frames(2, [&] { app.frame(); });
+    fx.sessions.hold = true;
+    RunRequest request;
+    request.workers = 2;
+    auto id = fx.workspace->start_run(request);
+    REQUIRE(id);
+    REQUIRE(fx.until([&] { return fx.sessions.started == 2; }));
+    // While the run is live, the status bar has an estimate for the queue.
+    ctx.frames(2, [&] { app.frame(); });
+    REQUIRE(app.eta());
+    CHECK(app.eta()->workers == 2);
+    CHECK(app.eta()->running.size() == 2);
+    CHECK(app.eta()->items.size() == 11);
+    CHECK(app.eta()->finish > 0);
+    fx.sessions.release();
+    REQUIRE(fx.until([&] { return !fx.workspace->run_live(); }));
+    ctx.frames(3, [&] { app.frame(); });
+    CHECK_FALSE(app.eta());  // no live run
+
+    auto texts = [&] {
+        std::vector<std::string> out;
+        for (const auto& n : app.notifications().history()) out.push_back(n.text);
+        return out;
+    };
+    const auto announced = texts();
+    auto has = [&](std::string_view part) {
+        return std::ranges::any_of(announced, [&](const std::string& t) { return t.find(part) != std::string::npos; });
+    };
+    CHECK(has("Run completed"));
+    CHECK(has("matched"));
+    CHECK(has("gave up"));
+    // The run summary links to the dashboard or monitor; a match batch to the matched functions.
+    bool linked = false;
+    for (const auto& n : app.notifications().history())
+        if (n.text.find("functions matched") != std::string::npos) linked = n.link && n.link->view == "function_browser";
+    CHECK(linked);
+
+    // Reopened read-only: its history is known, so nothing is announced again.
+    fx.workspace->close_run();
+    REQUIRE(fx.workspace->open_run(*id));
+    REQUIRE(fx.until([&] { return !fx.workspace->run_loading(); }));
+    ctx.frames(3, [&] { app.frame(); });
+    CHECK(texts().size() == announced.size());
+    CHECK(ctx.id_conflicts() == 0);
+}

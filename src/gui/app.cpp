@@ -7,6 +7,7 @@
 #include "gui/theme.hpp"
 #include "gui/views/views.hpp"
 #include "gui/workspace.hpp"
+#include "run/store.hpp"
 
 #include <imgui_internal.h>
 
@@ -29,6 +30,17 @@ std::string normalize_view_name(std::string_view name) {
 }
 
 constexpr auto kSaveInterval = std::chrono::seconds(2);
+// How many of the project's most recent runs the ETA learns session durations from.
+constexpr usize kEtaRuns = 10;
+
+Severity to_severity(vm::Severity s) {
+    switch (s) {
+    case vm::Severity::info: return Severity::info;
+    case vm::Severity::warning: return Severity::warning;
+    case vm::Severity::error: return Severity::error;
+    }
+    return Severity::info;
+}
 
 } // namespace
 
@@ -141,18 +153,86 @@ void App::poll_workspace() {
     }
     if (quit_after_run_ && !ws->run_live()) quit_ = true;
 
-    // Project-wide progress (status bar), recomputed only when symbols or function states change.
+    // Project-wide progress (status bar), recomputed only when symbols or function states change: a
+    // background job over immutable snapshots (100,000 functions take milliseconds).
     if (project.phase == ProjectPhase::open) {
-        const auto program = ws->program();
+        auto program = ws->program();
         const u64 version = ws->project()->version();
-        if (!progress_.progress || progress_.version != version || progress_.program != program.get()) {
-            progress_.progress = project::compute_progress(program->symbols(), *ws->project());
+        if (progress_.version != version || progress_.program != program.get()) {
             progress_.version = version;
             progress_.program = program.get();
+            progress_.job.cancel();
+            progress_.job = jobs_.submit([program, infos = ws->project()->function_infos()] {
+                return project::compute_progress(program->symbols(), *infos);
+            });
         }
+        if (progress_.job.ready())
+            if (auto p = progress_.job.take()) progress_.progress = std::move(*p);
     } else {
+        progress_.job.cancel();
         progress_ = {};
     }
+}
+
+void App::update_run_notifications() {
+    Workspace* ws = services_.workspace;
+    const auto& snap = ctx_.snapshot;
+    // Another run on screen: start over (without a workspace, as in tests, a new run id means one).
+    const u64 serial = ws ? ws->run_serial() : 0;
+    const std::string run = snap ? snap->run_id : std::string();
+    if (serial != notified_serial_ || (!ws && run != notified_run_)) {
+        notified_serial_ = serial;
+        notified_run_ = run;
+        notification_rules_.reset();
+        notifications_primed_ = false;
+    }
+    if (!notifications_primed_) {
+        if (ws && ws->run_loading()) return;  // a past run's history is still being read
+        if (auto history = ws ? ws->run_history() : nullptr) notification_rules_.prime(*history);
+        notifications_primed_ = true;
+    }
+    if (!snap) return;
+    for (vm::Notification& n : notification_rules_.update(*snap, std::chrono::system_clock::now())) {
+        std::optional<NavEntry> link;
+        if (!n.link.view.empty()) link = NavEntry{n.link.view, NavTarget{.va = n.link.va, .session = n.link.session, .anchor = n.link.anchor}};
+        notifications_.notify(to_severity(n.severity), std::move(n.text), std::move(link), n.toast);
+    }
+}
+
+void App::update_eta() {
+    Workspace* ws = services_.workspace;
+    project::Project* project = ws ? ws->project() : nullptr;
+    const auto program = ws ? ws->program() : nullptr;
+    if (!project || !program || !ws->run_live() || !ctx_.snapshot) {
+        eta_.eta.reset();
+        return;
+    }
+    // The base model: finished sessions of the project's recent runs, read from their event logs again
+    // when another run is shown (the previous one has finished by then).
+    if (eta_.project != project->root() || eta_.serial != ws->run_serial()) {
+        eta_.project = project->root();
+        eta_.serial = ws->run_serial();
+        eta_.loading.cancel();
+        eta_.loading = jobs_.submit([runs_dir = project->runs_dir(), live = ws->run_id(), program](const CancelToken& token) {
+            vm::DurationModel model;
+            usize used = 0;
+            for (const auto& info : run::list_runs(runs_dir)) {  // newest first
+                if (token.cancelled() || used == kEtaRuns) break;
+                if (info.id == live) continue;  // the live run counts through its snapshot
+                ++used;
+                (void)vm::add_event_log(model, info.dir / "events.jsonl", program->symbols());  // an unreadable log adds nothing
+            }
+            return model;
+        });
+    }
+    if (eta_.loading.ready())
+        if (auto model = eta_.loading.take()) eta_.base = std::move(*model);
+    const auto now = std::chrono::steady_clock::now();
+    if (eta_.eta && now - eta_.computed < std::chrono::seconds(1)) return;
+    eta_.computed = now;
+    vm::DurationModel model = eta_.base.value_or(vm::DurationModel{});
+    model.add_run(*ctx_.snapshot, program->symbols());
+    eta_.eta = vm::estimate_queue(model, *ctx_.snapshot, program->symbols(), std::chrono::system_clock::now());
 }
 
 void App::set_dpi_scale(float scale) {
@@ -163,6 +243,7 @@ double App::idle_timeout() {
     double timeout = 1.0;  // the chrome's clocks refresh at least once a second
     if (auto expiry = notifications_.next_expiry(ImGui::GetTime())) timeout = std::min(timeout, std::max(*expiry, 0.05));
     if (run_.phase == RunPhase::running || run_.phase == RunPhase::stopping) timeout = std::min(timeout, 0.5);
+    if (notification_rules_.waiting()) timeout = std::min(timeout, 0.25);  // a batch is due soon
     return timeout;
 }
 
@@ -284,6 +365,8 @@ void App::frame() {
     ctx_.snapshot = services_.snapshot();
     ctx_.project = services_.project();
     run_ = summarize(ctx_.snapshot.get());
+    update_run_notifications();
+    update_eta();
     sync_project();
     apply_style();
     apply_pending_layout();

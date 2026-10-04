@@ -98,6 +98,12 @@ public:
     bool run_loading() const { return past_load_.valid(); }
     std::string run_id() const;
     std::filesystem::path run_dir() const;
+    // Changes whenever another run is shown (started, resumed, opened or closed).
+    u64 run_serial() const { return run_serial_; }
+    // What the shown run had done before this workspace attached to it: the folded log of a resumed or
+    // reopened run (so its history is not announced again as news); null for a run started here, and
+    // while a past run is still loading.
+    std::shared_ptr<const events::RunStateData> run_history() const { return run_history_; }
     run::RunController* controller();  // the live run's (also after it finished); null otherwise
     // The project's runs, newest first (cached; refresh re-reads the runs directory).
     const std::vector<run::RunInfo>& runs(bool refresh = false);
@@ -150,6 +156,8 @@ private:
     std::future<Result<PastRun>> past_load_;
     std::vector<run::RunInfo> runs_;
     bool runs_loaded_ = false;
+    u64 run_serial_ = 0;
+    std::shared_ptr<const events::RunStateData> run_history_;
     std::string error_;
 };
 

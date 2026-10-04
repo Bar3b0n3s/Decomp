@@ -25,6 +25,8 @@ struct Progress {
 };
 
 Progress compute_progress(const SymbolDb& symbols, const Project& project);
+// The same from a function-state snapshot (Project::function_infos()), safe on any thread.
+Progress compute_progress(const SymbolDb& symbols, const std::map<u64, FunctionInfo>& infos);
 Json to_json(const Progress& progress);
 
 } // namespace decomp::project

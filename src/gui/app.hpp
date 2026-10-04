@@ -19,6 +19,8 @@
 #include "gui/services.hpp"
 #include "gui/settings.hpp"
 #include "gui/view.hpp"
+#include "viewmodel/eta.hpp"
+#include "viewmodel/notification_rules.hpp"
 
 #include <imgui.h>
 
@@ -84,6 +86,9 @@ public:
     JobQueue& jobs() { return jobs_; }
     const RunSummary& run() const { return run_; }
     Settings& settings() { return settings_; }
+    // The live run's estimated time to finish its queue (status bar); nullopt without a live run or
+    // before the first estimate.
+    const std::optional<vm::QueueEta>& eta() const { return eta_.eta; }
 
 private:
     struct Slot {
@@ -114,6 +119,8 @@ private:
     void draw_project_dialog();
     void draw_quit_dialogs();
     void poll_workspace();
+    void update_run_notifications();
+    void update_eta();
 
     bool can_start() const;
     void wake() const;
@@ -163,12 +170,30 @@ private:
     bool open_quit_dialog_ = false;
     bool quit_after_run_ = false;  // quit once the live run has ended
     std::string reported_project_error_;
-    // Project-wide progress for the status bar, recomputed when the project or program changes.
+    // Project-wide progress for the status bar, recomputed in the background when the project or program
+    // changes.
     struct ProgressCache {
         u64 version = ~u64{0};
         const void* program = nullptr;
+        JobHandle<project::Progress> job;
         std::optional<project::Progress> progress;
     } progress_;
+    // Run notifications (docs/ui.md#notifications): what the rules find in each new snapshot goes to the
+    // notification center. A resumed or reopened run's history is primed first, so it is not news.
+    vm::NotificationRules notification_rules_;
+    u64 notified_serial_ = ~u64{0};
+    std::string notified_run_;
+    bool notifications_primed_ = false;
+    // The queue's ETA: session durations from the project's recent runs (loaded in the background) plus
+    // the live run's own, re-estimated once a second.
+    struct EtaState {
+        std::filesystem::path project;
+        u64 serial = ~u64{0};
+        JobHandle<vm::DurationModel> loading;
+        std::optional<vm::DurationModel> base;
+        std::chrono::steady_clock::time_point computed{};
+        std::optional<vm::QueueEta> eta;
+    } eta_;
     std::string layout_name_;
     std::vector<std::string> layout_action_ids_;
 };

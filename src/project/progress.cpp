@@ -2,10 +2,14 @@
 
 namespace decomp::project {
 
-Progress compute_progress(const SymbolDb& symbols, const Project& project) {
+Progress compute_progress(const SymbolDb& symbols, const Project& project) { return compute_progress(symbols, *project.function_infos()); }
+
+Progress compute_progress(const SymbolDb& symbols, const std::map<u64, FunctionInfo>& infos) {
+    static const FunctionInfo kUnstarted{};
     Progress p;
     for (const auto* f : symbols.functions()) {
-        const FunctionInfo info = project.function_info(f->va);
+        const auto it = infos.find(f->va);
+        const FunctionInfo& info = it != infos.end() ? it->second : kUnstarted;
         auto& b = p.buckets[info.status];
         ++b.functions;
         b.bytes += f->size;
