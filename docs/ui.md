@@ -350,118 +350,140 @@ filtering run as background jobs over the snapshot.
 
 **Shows**
 
-- Files written by Decomp or on the agent's behalf (verified sources, `symbols.txt`, later headers),
-  with their diffs and the session that caused them.
-- A queue of gated actions waiting for a decision.
+- The queue of gated actions waiting for a decision: today, verified matches waiting to be saved
+  under the policy `ask`, each with its function, session, target path and a line diff against the
+  file it would replace (or the new file).
+- The live run's policy for each action type.
+- Every file Decomp wrote into the project (`.decomp/changes.jsonl`, today verified sources): time,
+  path, who wrote it (agent or user), the session and the reason (which says when the supervisor
+  approved it), with a line diff of what it replaced (side by side, with line numbers and a "changes
+  only" toggle).
 
 **Actions**
 
-- Approve or deny a gated action.
-- Revert a change.
-- Set the policy for each action type: auto, ask or deny.
+- Approve or deny a waiting action, with a reason that a denied agent receives.
+- Revert a change: the latest change of a file can be reverted while no run is live. The replaced
+  content comes back from `.decomp/blobs/`, or a new file is removed (its function goes back to
+  `nonmatching`); the revert is itself recorded.
+- Set the policy for each action type for the live run: auto, ask or deny (Settings saves the
+  project's default in `decomp.json`).
 
 | Action type | Default policy |
 |---|---|
-| Write a verified source to `src/functions/` | auto (mechanically verified) |
+| Write a verified source to `src/functions/` (`write_source`) | auto (mechanically verified) |
 | Record symbol bindings from a match (planned) | auto (can be switched to ask) |
 | Rename or create a symbol through `set_symbol` (Phase 3) | ask |
 | Change shared headers through `define_type` (Phase 3) | ask |
 
 **Data sources**
 
-- `file_written` (in the slice: verified sources), and the planned `symbol_changed`,
-  `approval_requested` and `approval_decided`.
+- `approval_requested` and `approval_decided`, `file_written` (with size, SHA-1 and how it was
+  approved), `control` (policy changes); the controller's pending approvals.
+- `.decomp/changes.jsonl` and `.decomp/blobs/` ([project-format.md](project-format.md#changesjsonl-and-blobs)).
 
 **Notes**
 
-A gated tool call waits for its decision, and the worker shows the phase "waiting for approval". A
-denial goes back to the agent as an error result so that it can adapt. Whether a long wait should
-return "pending" immediately instead is open. The slice has no approval queue: it writes verified
-sources automatically, which is the default policy.
+A gated action waits for its decision, and the worker shows the phase "waiting for approval"; Stop
+does not end the wait, Abort does. A denial goes back to the agent as an error result with the
+reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
 ### Cost and usage
 
 **Shows**
 
-- Spend by run, by function and by day.
-- Tokens by type.
-- Cache-hit ratio over time.
-- Turns and dollars per match.
-- Success rate by effort level and by model.
-- A projection for the remaining functions, from the observed cost per function by size bucket.
-- Budget alerts.
-- Turns served by a fallback model, and usage priced without a price-table row (flagged).
+- Budgets: the live run's spend against its run budget (amber from the alert threshold, red at
+  100%) and the per-function limits.
+- Spend for all runs and this run, dollars and turns per match, tokens by type, the cache-hit rate,
+  and the spend recorded per function.
+- Tabs: spend by run (a chart and a table; a run opens read-only from it), by day (local days), by
+  model and effort with success rates, by function, tokens by type per run (stacked), the cache-hit
+  rate over the run and per run, and the projection for the functions still to do, from the
+  observed spend per function by size bucket (buckets without history borrow the nearest one's,
+  scaled by size).
+- Flags for turns a fallback model served and for usage priced without a price-table row.
 
 **Actions**
 
-- Set run and function budgets and alert thresholds.
+- Set the live run's budget and per-function limits, and the alert threshold (a GUI setting, 80% by
+  default, which also colors the top bar and raises the budget warnings).
+- Export the report as CSV (runs, days, models, functions) or JSON.
 
 **Data sources**
 
-- `turn_finished` (usage and cost per turn) and the planned `budget_updated`.
-- Run summaries and the price table ([agent.md](agent.md#cost-accounting)).
+- Run summaries (`summary.json` of every run, read in the background) merged with the live run's
+  state; per-function spend from `symbols.txt` (`cost=`); `budget_changed`; the price table
+  ([agent.md](agent.md#cost-accounting)). The report is `vm::cost_report` and
+  `vm::project_remaining_cost` (`src/viewmodel/cost.hpp`), recomputed in the background when the
+  runs, the project or (every two seconds) the live run change.
 
 ### Toolchains and compiles
 
 **Shows**
 
-- The registry: name, kind, compiler path, detected version (planned), wrapper and environment.
-- Health-check results.
-- Recent compiles: the full command line, environment overrides, duration, exit code, output, and
-  whether it was a cache hit.
+- The registry: name, kind, compiler path, wrapper, flags, include directories and environment,
+  for the user's toolchains and the detected clang-cl ones.
+- Health-check results: whether a probe compiles into a usable object, the command line and output,
+  and the compiler's version (cl.exe's banner, or `--version`).
+- The run's recent compiles (the last 200): time, function, toolchain, result, exit code, duration,
+  cache hit, and for the selected one the full command line and output.
 
 **Actions**
 
-- Add or edit toolchains. This writes the user-level registry.
+- Add, edit or remove toolchains (this writes the user-level registry); save a copy of a detected
+  one.
 - Run a health check.
-- Re-run a compile, bypassing the cache.
+- Re-run a recorded compile from its attempt's source with the project's toolchain, bypassing the
+  compile cache, and see its diff summary and output.
 
 **Data sources**
 
-- `ToolchainRegistry` and health-check results.
-- `compile_finished` (success, cache hit, duration, error count) and the planned `compile_started`,
-  which will carry the toolchain, the command line and the output.
+- `ToolchainRegistry`, `matching::check_toolchain` and `detect_version`.
+- `compile_started` and `compile_finished` (toolchain, command line, exit code, output up to 4 KB,
+  duration, cache hit), and the function's `attempts.jsonl` for a re-run.
 
 ### Logs and errors
 
 **Shows**
 
-- The structured log, with level and module filters and search.
-- Errors grouped by kind: API errors by type and status, compile failures, tool errors and I/O
-  errors, each with its retry history.
+- Errors grouped by kind: API errors and retries (with status and delay), compiler failures, tool
+  errors, failed sessions, and warnings and errors logged during the run (300 kept).
+- The run's log (warnings and errors logged during it, 500 kept) and this application's own log, with
+  a level filter and search.
 
 **Actions**
 
-- Copy.
-- Jump to the transcript at that point (the turn or tool call).
-- Open the related function.
+- Copy a line or the shown lines.
+- Open the session an entry belongs to.
 
 **Data sources**
 
-- `log` events (warnings and errors logged during a run), `retry`, and any event that carries an
-  error, such as `tool_call_finished` with `is_error` and `session_finished` with outcome `error`. `RunState` keeps the last 50 error lines.
+- `log` events, `retry`, `tool_call_finished` with `is_error`, `compile_finished` failures and
+  `session_finished` with outcome `error`, kept as structured records by `RunState`; the
+  application's in-memory log (`log::recent()`).
 
 ### Settings
 
 **Shows**
 
-- API key status: present and valid. The key itself is never shown and cannot be entered here; it
-  comes from the environment.
-- Model, effort, budgets, fallbacks on or off, the price table, concurrency and paths.
-- Theme, font size and colorblind-safe diff palettes.
-- Saved layouts and recent projects.
+- API key status: whether `ANTHROPIC_API_KEY` is set, and a Check that lists the models the key can
+  use (a `GET /v1/models` request, which consumes no tokens). The key itself is never shown and cannot
+  be entered here; it comes from the environment.
+- The project's agent settings (`decomp.json`): model, effort, fallbacks, workers, run budget,
+  per-function turns, dollars, tokens and minutes, and the approval policy for saving verified
+  matches; the price table.
+- Appearance: theme, font size, colorblind-safe diff palettes.
+- Recent projects and saved layouts.
+- Developer: a replay directory that drives sessions from scripted responses, so runs need no key.
 
 **Actions**
 
-- Edit any setting.
-- Choose where a setting is saved: per user, or per project. Per-project settings are written to
-  `decomp.json`, so they show up in git.
+- Edit the project's agent settings and save them to `decomp.json` (shared through git), or revert
+  the edits. GUI settings (appearance, layouts, recent projects, the budget alert, the replay
+  directory) are saved per user in `gui.json`.
 
 **Data sources**
 
-- `decomp.json` and the user settings file.
-- Key validity comes from the most recent API response (a 401 marks the key invalid). A Check button
-  sends a lightweight request that lists models and consumes no tokens.
+- `decomp.json`, the user's `gui.json`, and the price table in `agent/cost.hpp`.
 
 ### Later-phase views
 
@@ -581,13 +603,13 @@ Default bindings (provisional):
 | Function matched | Info | Yes, batched when many arrive together | Diff viewer |
 | Function gave up | Info | Yes | Agent session |
 | Function refused | Warning | Yes | Agent session |
-| Budget at 80% (run or function) | Warning | Yes | Cost and usage |
+| Budget at the alert threshold, 80% by default (run or function) | Warning | Yes | Cost and usage |
 | Budget at 100% | Error | Sticky | Cost and usage |
 | Authentication error (401 or 403) | Error | Sticky | Settings |
 | Rate-limit storm (many 429s in a short window) | Warning | Yes | Run monitor |
 | Toolchain failure (compiler missing, health check failed, compile crash or timeout) | Error | Sticky | Toolchains and compiles |
 | Run finished, with a summary (matched, gave up, refused, spend, duration) | Info | Yes | Dashboard |
-| Approval requested (Phase 1) | Warning | Yes | Changes and approvals |
+| Approval requested | Warning | Yes | Changes and approvals |
 | A fallback model served a turn | Info | No, history only | Agent session |
 
 The rules are `vm::NotificationRules` (`src/viewmodel/notification_rules.hpp`), applied to every new
@@ -598,7 +620,9 @@ one summary. Detection is limited to what the snapshot records: an authenticatio
 403 (or a missing key) in a session's error or in the log; a storm is five or more retries after a 429
 in two consecutive minutes; a toolchain failure is a compile that timed out, crashed, wrote no object,
 or failed without a single diagnostic, or a compile tool call that failed because the compiler could
-not be started. Health checks report through the Toolchains view.
+not be started. A failed health check in the Toolchains view posts its own sticky error. The shell
+primes the rules with a resumed or reopened run's history, so only what happens while it watches is
+announced; toasts link to the view named in the table.
 
 ## Accessibility
 

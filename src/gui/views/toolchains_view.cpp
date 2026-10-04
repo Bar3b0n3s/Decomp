@@ -12,6 +12,7 @@
 #include "matching/toolchain.hpp"
 #include "project/setup.hpp"
 #include "viewmodel/common.hpp"
+#include "viewmodel/notification_rules.hpp"
 
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -36,6 +37,7 @@ struct Health {
     std::string summary;  // or the error
     std::string version;  // the compiler's version line, when it could be read
     std::string command, output;
+    std::optional<vm::Notification> failure;  // what the notification center gets when it failed
 };
 
 class ToolchainsView final : public View {
@@ -51,7 +53,11 @@ public:
             if (*r) registry_ = std::move(**r);
             else load_error_ = r->error().message;
         }
-        if (auto r = health_.take()) health_result_ = std::move(*r);
+        if (auto r = health_.take()) {
+            health_result_ = std::move(*r);
+            if (const auto& n = health_result_->failure)
+                ctx.notify(Severity::error, n->text, NavEntry{n->link.view, NavTarget{.anchor = n->link.anchor}});
+        }
 
         if (ImGui::BeginTabBar("##toolchain_tabs")) {
             if (ImGui::BeginTabItem("Recent compiles")) {
@@ -148,8 +154,12 @@ private:
                 auto report = matching::check_toolchain(t);
                 if (!report) {
                     h.summary = report.error().message;
+                    matching::HealthReport failed;
+                    failed.object = h.summary;
+                    h.failure = vm::health_check_notification(t.name, failed, std::chrono::system_clock::now());
                     return h;
                 }
+                h.failure = vm::health_check_notification(t.name, *report, std::chrono::system_clock::now());
                 h.ok = report->ok;
                 h.summary = std::format("{} in {} ms: {}", report->ok ? "works" : "failed", report->duration.count(), report->object);
                 h.version = report->version;
