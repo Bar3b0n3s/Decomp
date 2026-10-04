@@ -6,8 +6,12 @@
 #include "core/fs.hpp"
 #include "core/strings.hpp"
 #include "gui/widgets.hpp"
+#include "gui/workspace.hpp"
 #include "matching/health.hpp"
+#include "matching/match.hpp"
 #include "matching/toolchain.hpp"
+#include "project/setup.hpp"
+#include "viewmodel/common.hpp"
 
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -30,6 +34,7 @@ struct Health {
     std::string toolchain;
     bool ok = false;
     std::string summary;  // or the error
+    std::string version;  // the compiler's version line, when it could be read
     std::string command, output;
 };
 
@@ -147,6 +152,7 @@ private:
                 }
                 h.ok = report->ok;
                 h.summary = std::format("{} in {} ms: {}", report->ok ? "works" : "failed", report->duration.count(), report->object);
+                h.version = report->version;
                 h.command = join_words(report->command);
                 h.output = report->output;
                 return h;
@@ -184,6 +190,7 @@ private:
         if (busy) ImGui::TextDisabled("Checking...");
         if (health_result_ && health_result_->toolchain == t.name) {
             colored_text(health_result_->ok ? ctx.colors().ok : ctx.colors().error, health_result_->summary);
+            if (!health_result_->version.empty()) ImGui::TextWrapped("Version: %s", health_result_->version.c_str());
             if (!health_result_->command.empty()) {
                 ImGui::PushFont(ctx.fonts.mono, 0.0f);
                 ImGui::TextWrapped("%s", health_result_->command.c_str());
@@ -259,6 +266,59 @@ private:
         ImGui::PushFont(ctx.fonts.mono, 0.0f);
         ImGui::TextWrapped("%s", shown->output.empty() ? "(no output)" : shown->output.c_str());
         ImGui::PopFont();
+        draw_rerun(ctx, *s, *shown);
+    }
+
+    // Compiles the attempt behind a recorded compile again, bypassing the compile cache (a cached
+    // result may come from a compiler or headers that have changed since).
+    void draw_rerun(ViewContext& ctx, const events::RunStateData& s, const events::CompileRecord& c) {
+        Workspace* ws = ctx.services.workspace;
+        project::Project* project = ws ? ws->project() : nullptr;
+        auto program = ws ? ws->program() : nullptr;
+        const events::SessionState* session = s.session(c.session);
+        const Symbol* fn = session && program ? program->symbols().at(session->va) : nullptr;
+        const bool busy = rerun_.valid() && !rerun_.finished();
+        ImGui::BeginDisabled(!project || !fn || busy);
+        if (ImGui::Button("Re-run without the cache")) {
+            // The attempt this compile belongs to: the session's first attempt recorded at or after it.
+            std::optional<std::string> source;
+            for (const Json& a : project->attempts(*fn)) {
+                if (json_string_or(a, "session", "") != c.session) continue;
+                source = json_string_or(a, "source", "");
+                const auto at = vm::parse_iso8601(json_string_or(a, "time", ""));
+                if (at && *at >= c.time - std::chrono::seconds(1)) break;
+            }
+            auto setup = project::make_match_setup(project, "");
+            if (!source || source->empty()) {
+                ctx.notify(Severity::warning, "The source of that compile is not in the function's attempts.");
+            } else if (!setup) {
+                ctx.notify(Severity::error, std::format("Cannot compile: {}", setup.error().message));
+            } else {
+                setup->bypass_cache = true;
+                rerun_record_ = &c;
+                rerun_result_.reset();
+                rerun_ = ctx.jobs.submit([program, setup = std::move(*setup), va = fn->va, source = std::move(*source)]() -> std::string {
+                    auto r = matching::compile_and_diff(*program, setup, va, source);
+                    if (!r) return std::format("error: {}", r.error().message);
+                    std::string out = std::format("{} in {} ms (exit code {}){}\n", r->compile.ok ? "compiled" : "failed",
+                                                  r->compile.duration.count(), r->compile.exit_code, r->compile.cached ? ", cached" : "");
+                    if (r->diff) out += matching::summary_line(*r->diff) + "\n";
+                    else if (!r->diff_error.empty()) out += r->diff_error + "\n";
+                    return out + r->compile.output;
+                });
+            }
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(fn ? "Compile this attempt's source again with the project's toolchain, ignoring the cache, and diff it."
+                                 : "Needs the open project and the function of this compile.");
+        if (busy) ImGui::TextDisabled("Compiling...");
+        if (auto r = rerun_.take()) rerun_result_ = std::move(*r);
+        if (rerun_result_ && rerun_record_ == &c) {
+            ImGui::PushFont(ctx.fonts.mono, 0.0f);
+            ImGui::TextWrapped("%s", rerun_result_->c_str());
+            ImGui::PopFont();
+        }
     }
 
     JobHandle<Result<matching::ToolchainRegistry>> load_;
@@ -268,6 +328,9 @@ private:
     std::string selected_;
     std::optional<matching::Toolchain> edit_;
     JobHandle<Health> health_;
+    JobHandle<std::string> rerun_;
+    const events::CompileRecord* rerun_record_ = nullptr;  // which compile the result is for
+    std::optional<std::string> rerun_result_;
     std::optional<Health> health_result_;
     const events::CompileRecord* selected_compile_ = nullptr;
 };

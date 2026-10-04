@@ -71,8 +71,8 @@ void register_toolchain_commands(CLI::App& app, GlobalOptions& g) {
                 if (!t) return make_error(ErrorCode::not_found, "unknown toolchain '{}'", *name);
                 TRY_ASSIGN(auto r, matching::check_toolchain(*t));
                 if (g.json) print_json(matching::to_json(r));
-                else std::println("{} {} ({} ms){}\n{}", r.ok ? "OK" : "FAILED", join(r.command, " "), r.duration.count(),
-                                  r.object.empty() ? "" : "\n  " + r.object, r.output);
+                else std::println("{} {} ({} ms){}{}\n{}", r.ok ? "OK" : "FAILED", join(r.command, " "), r.duration.count(),
+                                  r.version.empty() ? "" : "\n  " + r.version, r.object.empty() ? "" : "\n  " + r.object, r.output);
                 return r.ok ? 0 : 1;
             }));
         });

@@ -108,7 +108,11 @@ TEST_CASE("toolchain health check compiles a probe") {
     CHECK(r.ok);
     CHECK(r.arch == Arch::x86);
     CHECK(r.functions == 1);
+    // clang-cl answers --version with "clang version <x.y.z> ...".
+    CHECK(r.version.find("clang version") != std::string::npos);
+    CHECK(matching::to_json(r)["version"] == r.version);
     t.compiler = "/nonexistent/clang-cl";
     auto missing = matching::check_toolchain(t);
     CHECK((!missing || !missing->ok));
+    CHECK(matching::detect_version(t).empty());
 }
