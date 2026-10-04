@@ -28,6 +28,8 @@ struct AgentRunConfig {
     // Supervisor guidance sent with the brief in the first message (later guidance goes through
     // LoopControl::inject and joins the next turn's tool results).
     std::vector<std::string> guidance;
+    // Session id for events and the transcript; default "<run>-<va hex>".
+    std::string session_id;
 };
 
 // Model, effort, fallbacks and budgets from a project's agent settings.

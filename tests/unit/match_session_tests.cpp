@@ -120,8 +120,8 @@ TEST_CASE("compile_and_diff and submit_result with a real compiler") {
     CHECK(accepted.outcome["outcome"] == "matched");
     CHECK(session.matched());
     CHECK(session.attempts().size() == 5);
-    CHECK(state.data().sessions.at("s1").compiles == 5);
-    CHECK(state.data().sessions.at("s1").best_match == 100.0);
+    CHECK(state.data().sessions.at("s1")->compiles == 5);
+    CHECK(state.data().sessions.at("s1")->best_match == 100.0);
 
     auto give_up = MatchSession(program, nullptr, clang_setup(tmp.path()), *program.resolve("add"))
                        .call("submit_result", Json{{"outcome", "give_up"}, {"source", ""}, {"reason", "stuck"}});

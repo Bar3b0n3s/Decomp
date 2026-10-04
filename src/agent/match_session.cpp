@@ -143,12 +143,23 @@ ToolOutput MatchSession::call(std::string_view tool, const Json& input) {
 }
 
 Result<MatchSession::Evaluation> MatchSession::evaluate(const std::string& source) {
+    int number = 0;
+    {
+        std::lock_guard lock(mutex_);
+        number = static_cast<int>(attempts_.size()) + 1;
+    }
+    std::vector<std::string> flags = setup_.toolchain.flags;
+    flags.insert(flags.end(), setup_.flags.begin(), setup_.flags.end());
+    publish(events::CompileStarted{session_id_, setup_.toolchain.name, join(flags, " ")});
     TRY_ASSIGN(auto r, matching::compile_and_diff(program_, setup_, va_, source));
     Evaluation ev;
     publish(events::CompileFinished{session_id_, r.compile.ok, r.compile.cached, r.compile.duration.count(),
-                                    static_cast<int>(std::ranges::count_if(r.compile.diagnostics, [](const matching::Diagnostic& d) {
-                                        return d.severity == "error" || d.severity == "fatal error";
-                                    }))});
+                                    static_cast<int>(std::ranges::count_if(r.compile.diagnostics,
+                                                                           [](const matching::Diagnostic& d) {
+                                                                               return d.severity == "error" || d.severity == "fatal error";
+                                                                           })),
+                                    r.compile.exit_code, join(r.compile.command, " "), truncate_utf8(r.compile.output, events::kMaxCompileOutput),
+                                    setup_.toolchain.name});
     MatchAttempt attempt;
     attempt.source = source;
     attempt.compiled = r.compile.ok;
@@ -170,7 +181,9 @@ Result<MatchSession::Evaluation> MatchSession::evaluate(const std::string& sourc
         attempt.match_percent = d.match_percent;
         attempt.byte_exact = d.byte_exact;
         attempt.summary = matching::summary_line(d);
-        publish(events::DiffComputed{session_id_, d.match_percent, d.byte_exact, attempt.summary});
+        publish(events::DiffComputed{session_id_, d.match_percent, d.byte_exact, attempt.summary, number, static_cast<int>(d.equal),
+                                     static_cast<int>(d.encoding), static_cast<int>(d.operand), static_cast<int>(d.opcode),
+                                     static_cast<int>(d.inserted), static_cast<int>(d.deleted)});
     }
     {
         std::lock_guard lock(mutex_);
@@ -182,13 +195,16 @@ Result<MatchSession::Evaluation> MatchSession::evaluate(const std::string& sourc
         }
         attempts_.push_back(attempt);
         if (project_) {
-            (void)project_->record_attempt(symbol_, Json{{"session", session_id_},
-                                                         {"attempt", attempt.number},
-                                                         {"compiled", attempt.compiled},
-                                                         {"match_percent", attempt.match_percent},
-                                                         {"byte_exact", attempt.byte_exact},
-                                                         {"summary", attempt.summary},
-                                                         {"source", source}});
+            (void)project_->record_attempt(
+                symbol_, Json{{"session", session_id_},
+                              {"attempt", attempt.number},
+                              {"origin", "agent"},
+                              {"time", std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now()))},
+                              {"compiled", attempt.compiled},
+                              {"match_percent", attempt.match_percent},
+                              {"byte_exact", attempt.byte_exact},
+                              {"summary", attempt.summary},
+                              {"source", source}});
             if (improved) (void)project_->save_best_source(symbol_, source);
         }
         ev.text += std::format("\nattempt {}: best so far {:.1f}%", attempt.number, best_match_);
@@ -357,7 +373,7 @@ ToolOutput MatchSession::submit_result(const Json& input) {
     }
     if (project_) {
         if (auto r = project_->write_matched_source(symbol_, source, project::ChangeOrigin{SymbolSource::agent, session_id_, "verified match"}); r)
-            publish(events::FileWritten{fs::to_utf8(project_->matched_source_path(symbol_)), "matched source"});
+            publish(events::FileWritten{fs::to_utf8(r->path), "matched source", r->size, r->sha1, session_id_, "policy"});
     }
     auto out = ToolOutput::ok("accepted: byte-exact match verified.");
     out.end_session = true;

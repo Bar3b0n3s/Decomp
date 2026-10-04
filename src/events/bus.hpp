@@ -7,13 +7,20 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace decomp::events {
 
-// Thread-safe publish/subscribe. Handlers run on the publishing thread and must be quick.
+// Serialized publish/subscribe: publish() assigns the sequence number and runs every handler under
+// one lock, so subscribers see events one at a time in seq order whatever thread publishes. A publish
+// from inside a handler (same thread) is queued and delivered right after the current event.
+// Handlers must be quick, must not block on other publishers, and must not call into components that
+// publish while holding their own locks. After unsubscribe() returns, the handler is not running and
+// will not run again (unless called from that handler itself).
 class EventBus {
 public:
     using Handler = std::function<void(const Event&)>;
@@ -24,12 +31,20 @@ public:
     void unsubscribe(int id);
     Event publish(Payload payload, int worker = -1);
     const std::string& run_id() const { return run_; }
+    // Continues numbering after `last` (a resumed run appends to its existing log).
+    void set_next_seq(u64 next);
+    u64 last_seq() const { return next_seq_.load() - 1; }
 
 private:
+    Event make_event(Payload payload, int worker);
+    void deliver(const Event& e);
+
     std::string run_;
     std::atomic<u64> next_seq_{1};
-    std::mutex mutex_;
-    std::map<int, Handler> handlers_;
+    std::recursive_mutex mutex_;
+    std::atomic<std::thread::id> dispatching_{};
+    std::vector<Event> pending_;  // published from inside a handler
+    std::map<int, std::shared_ptr<Handler>> handlers_;
     int next_id_ = 1;
 };
 

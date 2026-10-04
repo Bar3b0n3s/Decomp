@@ -3,6 +3,7 @@
 #include "agent/cost.hpp"
 #include "agent/match_session.hpp"
 #include "agent/tools.hpp"
+#include "core/fs.hpp"
 #include "core/log.hpp"
 #include "core/strings.hpp"
 
@@ -27,17 +28,19 @@ AgentRunConfig run_config_from(const project::AgentSettings& s) {
 
 namespace {
 
-// One JSON record per line. Requests carry no credentials (the key only travels in headers).
+// One JSON record per line, each stamped with "time" (ms since the epoch). One file per session.
+// Requests carry no credentials (the key only travels in headers).
 class Transcript {
 public:
     explicit Transcript(const std::filesystem::path& path) {
         if (path.empty()) return;
         std::error_code ec;
         std::filesystem::create_directories(path.parent_path(), ec);
-        out_.open(path, std::ios::app | std::ios::binary);
+        out_.open(path, std::ios::trunc | std::ios::binary);
         if (!out_) log::warn("cannot write the transcript {}", path.string());
     }
-    void write(const Json& record) {
+    void write(Json record) {
+        record["time"] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         std::lock_guard lock(mutex_);
         if (!out_.is_open()) return;
         out_ << dump_compact(record) << '\n';
@@ -48,6 +51,28 @@ private:
     std::ofstream out_;
     std::mutex mutex_;
 };
+
+// Tool inputs in events are previews: long strings (candidate sources) are shortened. The transcript
+// keeps the full input.
+Json input_preview(const Json& input) {
+    constexpr usize kMax = 240;
+    if (input.is_string()) {
+        const auto& text = input.get_ref<const std::string&>();
+        if (text.size() <= kMax) return input;
+        return truncate_utf8(text, kMax) + std::format("... ({} bytes)", text.size());
+    }
+    if (input.is_object()) {
+        Json out = Json::object();
+        for (auto it = input.begin(); it != input.end(); ++it) out[it.key()] = input_preview(*it);
+        return out;
+    }
+    if (input.is_array()) {
+        Json out = Json::array();
+        for (const auto& v : input) out.push_back(input_preview(v));
+        return out;
+    }
+    return input;
+}
 
 events::TokenUsage to_event_usage(const Usage& u) {
     return {u.input_tokens, u.output_tokens, u.cache_creation_input_tokens, u.cache_read_input_tokens};
@@ -70,7 +95,7 @@ public:
     void on_turn_start(int turn, const Json& request) override {
         turn_ = turn;
         turn_started_ = std::chrono::steady_clock::now();
-        bus_.publish(events::TurnStarted{session_, turn}, worker_);
+        first_event_.reset();
         const Json& messages = request.contains("messages") ? request["messages"] : Json::array();
         if (turn == 1 || messages.size() < logged_messages_) {
             transcript_.write({{"type", "request"}, {"turn", turn}, {"body", request}});
@@ -81,14 +106,29 @@ public:
             transcript_.write({{"type", "request_delta"}, {"turn", turn}, {"messages", std::move(added)}});
         }
         logged_messages_ = messages.size();
+        phase_.clear();
+        bus_.publish(events::TurnStarted{session_, turn}, worker_);
     }
-    void on_text_delta(int, std::string_view text) override { bus_.publish(events::StreamDelta{session_, "text", std::string(text)}, worker_); }
+    void on_message_start(const Response&) override { mark_first_event(); }
+    void on_block_start(int, const Json& block) override {
+        mark_first_event();
+        const std::string type = json_string_or(block, "type", "");
+        if (type == "fallback") return;
+        set_phase(type == "thinking" || type == "redacted_thinking" ? "thinking" : "writing");
+    }
+    void on_text_delta(int, std::string_view text) override {
+        mark_first_event();
+        bus_.publish(events::StreamDelta{session_, "text", std::string(text)}, worker_);
+    }
     void on_thinking_delta(int, std::string_view text) override {
+        mark_first_event();
         bus_.publish(events::StreamDelta{session_, "thinking", std::string(text)}, worker_);
     }
     void on_retry(int attempt, const Error& error, std::chrono::milliseconds delay) override {
-        bus_.publish(events::Retry{session_, attempt, error.message, delay.count()}, worker_);
         transcript_.write({{"type", "retry"}, {"turn", turn_}, {"attempt", attempt}, {"error", error.describe()}, {"delay_ms", delay.count()}});
+        bus_.publish(events::Retry{session_, attempt, error.message, delay.count()}, worker_);
+        first_event_.reset();  // the retried attempt starts over
+        phase_.clear();
     }
     void on_response(int turn, const Response& response) override {
         const ResponseCost cost = response_cost(response, model_);
@@ -97,8 +137,9 @@ public:
             log::warn("no price known for model '{}': spend and the USD budget are estimated with {} prices", response.model,
                       price_for(model_).model);
         }
-        const auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - turn_started_);
-        bus_.publish(events::TurnFinished{session_, turn, response.stop_reason, to_event_usage(cost.usage), cost.usd, latency.count()}, worker_);
+        const auto now = std::chrono::steady_clock::now();
+        const auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(now - turn_started_);
+        const auto ttft = std::chrono::duration_cast<std::chrono::milliseconds>(first_event_.value_or(now) - turn_started_);
         transcript_.write({{"type", "response"},
                            {"turn", turn},
                            {"id", response.id},
@@ -110,13 +151,16 @@ public:
                            {"had_fallback", response.had_fallback},
                            {"cost_usd", cost.usd},
                            {"latency_ms", latency.count()},
+                           {"ttft_ms", ttft.count()},
                            {"request_id", response.header("request-id").value_or("")}});
+        bus_.publish(events::TurnFinished{session_, turn, response.stop_reason, to_event_usage(cost.usage), cost.usd, latency.count(),
+                                          response.model, ttft.count(), response.had_fallback},
+                     worker_);
     }
     void on_tool_start(int turn, const ToolCall& call) override {
-        bus_.publish(events::ToolCallStarted{session_, call.id, call.name, turn, call.input}, worker_);
+        bus_.publish(events::ToolCallStarted{session_, call.id, call.name, turn, input_preview(call.input)}, worker_);
     }
     void on_tool_end(int turn, const ToolCall& call, const ToolResult& result, std::chrono::milliseconds elapsed) override {
-        bus_.publish(events::ToolCallFinished{session_, call.id, call.name, result.is_error, first_line(result.content), elapsed.count()}, worker_);
         transcript_.write({{"type", "tool"},
                            {"turn", turn},
                            {"id", call.id},
@@ -125,10 +169,11 @@ public:
                            {"is_error", result.is_error},
                            {"result", result.content},
                            {"elapsed_ms", elapsed.count()}});
+        bus_.publish(events::ToolCallFinished{session_, call.id, call.name, result.is_error, first_line(result.content), elapsed.count()}, worker_);
     }
     void on_injected(const std::string& text) override {
-        bus_.publish(events::Guidance{session_, text}, worker_);
         transcript_.write({{"type", "guidance"}, {"turn", turn_}, {"text", text}});
+        bus_.publish(events::Guidance{session_, text}, worker_);
     }
     void on_paused() override { transcript_.write({{"type", "paused"}, {"turn", turn_}}); }
     void on_resumed() override { transcript_.write({{"type", "resumed"}, {"turn", turn_}}); }
@@ -143,6 +188,17 @@ private:
     usize logged_messages_ = 0;
     bool warned_price_ = false;
     std::chrono::steady_clock::time_point turn_started_{};
+    std::optional<std::chrono::steady_clock::time_point> first_event_;
+    std::string phase_;  // what the model is producing in this turn (thinking, writing)
+
+    void mark_first_event() {
+        if (!first_event_) first_event_ = std::chrono::steady_clock::now();
+    }
+    void set_phase(std::string phase) {
+        if (phase == phase_) return;
+        phase_ = std::move(phase);
+        bus_.publish(events::WorkerPhaseChanged{phase_, session_, ""}, worker_);
+    }
 };
 
 std::string outcome_name(const LoopOutcome& o) {
@@ -196,19 +252,33 @@ project::FunctionStatus final_status(const FunctionRunResult& r, const project::
 FunctionRunResult run_function(const Program& program, project::Project* project, const matching::MatchSetup& setup, u64 va,
                                const AgentRunConfig& config, events::EventBus& bus, const std::filesystem::path& transcript_path,
                                LoopControl* control, int worker) {
-    const std::string session_id = bus.run_id().empty() ? std::format("{:x}", va) : std::format("{}-{:x}", bus.run_id(), va);
+    const std::string session_id = !config.session_id.empty() ? config.session_id
+                                   : bus.run_id().empty()       ? std::format("{:x}", va)
+                                                                : std::format("{}-{:x}", bus.run_id(), va);
     MatchSession session(program, project, setup, va, &bus, session_id, worker);
     const Symbol& sym = session.symbol();
     const std::string display = sym.display.empty() ? sym.name : sym.display;
-    bus.publish(events::SessionStarted{session_id, sym.name, display, va}, worker);
+    Transcript transcript(transcript_path);
+    transcript.write({{"type", "session"},
+                      {"session", session_id},
+                      {"function", sym.name},
+                      {"display", display},
+                      {"va", va},
+                      {"model", config.conversation.model},
+                      {"effort", config.conversation.effort},
+                      {"worker", worker}});
+    std::string transcript_name;
+    if (!transcript_path.empty())
+        transcript_name = fs::to_utf8(transcript_path.parent_path().filename() / transcript_path.filename());
+    bus.publish(events::SessionStarted{session_id, sym.name, display, va, transcript_name}, worker);
 
     // "in_progress" is only announced, not saved: a crash must not leave it behind in symbols.txt.
     const project::FunctionInfo before = project ? project->function_info(va) : project::FunctionInfo{};
-    if (before.status != project::FunctionStatus::matched) bus.publish(events::StatusChanged{display, va, "in_progress"}, worker);
+    if (before.status != project::FunctionStatus::matched)
+        bus.publish(events::StatusChanged{display, va, "in_progress", std::string(project::to_string(before.status)), before.best_match}, worker);
 
     ToolRegistry tools = make_tools(session);
     Conversation conversation(config.conversation, system_prompt(), tools.definitions());
-    Transcript transcript(transcript_path);
     Json first = Json::array({Json{{"type", "text"}, {"text", session.brief()}}});
     for (const auto& text : config.guidance) {
         if (trim(text).empty()) continue;
@@ -267,7 +337,9 @@ FunctionRunResult run_function(const Program& program, project::Project* project
             info.status = final_status(result, info);
         });
         if (!updated) log::warn("cannot update symbols.txt: {}", updated.error().message);
-        else bus.publish(events::StatusChanged{display, va, std::string(project::to_string(updated->status))}, worker);
+        else
+            bus.publish(events::StatusChanged{display, va, std::string(project::to_string(updated->status)), "in_progress", updated->best_match},
+                        worker);
     }
     bus.publish(events::SessionFinished{session_id, result.outcome, result.detail, result.best_match, result.turns, result.cost_usd}, worker);
     return result;

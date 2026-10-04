@@ -12,9 +12,13 @@ Result<CandidateResult> compile_and_diff(const Program& program, const MatchSetu
     req.source = source;
     req.flags = setup.flags;
     req.include_dirs = setup.include_dirs;
+    req.cancelled = setup.cancelled;
+    req.bypass_cache = setup.bypass_cache;
     TRY_ASSIGN(out.compile, compiler.compile(req));
     if (!out.compile.ok) {
-        out.diff_error = out.compile.timed_out ? "the compiler timed out" : "compilation failed";
+        out.diff_error = out.compile.cancelled ? "the compile was cancelled"
+                         : out.compile.timed_out ? "the compiler timed out"
+                                                 : "compilation failed";
         return out;
     }
     auto obj = coff::Object::parse(out.compile.object_data);

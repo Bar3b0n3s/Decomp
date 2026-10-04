@@ -73,13 +73,13 @@ TEST_CASE("RunState folds a run into sessions, workers and totals") {
     CHECK(d.usage.cache_read == 3000);
     CHECK(d.cost_usd == doctest::Approx(0.07));
     CHECK(d.cache_hit_rate() == doctest::Approx(3000.0 / 7500.0));
-    const auto& s1 = d.sessions.at("s1");
+    const auto& s1 = *d.sessions.at("s1");
     CHECK(s1.outcome == "matched");
     CHECK(s1.matched);
     CHECK(s1.best_match == 100.0);
     CHECK(s1.scores == std::vector<double>{68.8, 100.0});
     CHECK(s1.compiles == 1);
-    CHECK(d.sessions.at("s2").refusal_category == "cyber");
+    CHECK(d.sessions.at("s2")->refusal_category == "cyber");
     CHECK(d.workers.at(0).session.empty());
     CHECK(d.files_written.size() == 1);
     CHECK(d.activity_total >= 6);
@@ -105,8 +105,8 @@ TEST_CASE("event log replays into the same state") {
     CHECK(b.finished == a.finished);
     CHECK(b.cost_usd == doctest::Approx(a.cost_usd));
     CHECK(b.usage.total() == a.usage.total());
-    CHECK(b.sessions.at("s1").scores == a.sessions.at("s1").scores);
-    CHECK(b.sessions.at("s1").outcome == a.sessions.at("s1").outcome);
+    CHECK(b.sessions.at("s1")->scores == a.sessions.at("s1")->scores);
+    CHECK(b.sessions.at("s1")->outcome == a.sessions.at("s1")->outcome);
 }
 
 TEST_CASE("event bus is safe across threads and keeps sequence numbers unique") {

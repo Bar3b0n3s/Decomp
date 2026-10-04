@@ -10,28 +10,54 @@ namespace decomp::events {
 int EventBus::subscribe(Handler handler) {
     std::lock_guard lock(mutex_);
     int id = next_id_++;
-    handlers_.emplace(id, std::move(handler));
+    handlers_.emplace(id, std::make_shared<Handler>(std::move(handler)));
     return id;
 }
 
 void EventBus::unsubscribe(int id) {
-    std::lock_guard lock(mutex_);
+    std::lock_guard lock(mutex_);  // waits for a delivery in progress on another thread
     handlers_.erase(id);
 }
 
-Event EventBus::publish(Payload payload, int worker) {
+void EventBus::set_next_seq(u64 next) {
+    std::lock_guard lock(mutex_);
+    next_seq_ = std::max<u64>(next, 1);
+}
+
+Event EventBus::make_event(Payload payload, int worker) {
     Event e;
     e.seq = next_seq_.fetch_add(1);
     e.time = std::chrono::system_clock::now();
     e.run = run_;
     e.worker = worker;
     e.payload = std::move(payload);
-    std::vector<Handler> handlers;
-    {
-        std::lock_guard lock(mutex_);
-        for (const auto& [id, h] : handlers_) handlers.push_back(h);
+    return e;
+}
+
+void EventBus::deliver(const Event& e) {
+    // Handlers are shared pointers so that one unsubscribing (itself or another) during delivery is safe.
+    std::vector<std::shared_ptr<Handler>> handlers;
+    handlers.reserve(handlers_.size());
+    for (const auto& [id, h] : handlers_) handlers.push_back(h);
+    for (const auto& h : handlers) (*h)(e);
+}
+
+Event EventBus::publish(Payload payload, int worker) {
+    std::unique_lock lock(mutex_);
+    Event e = make_event(std::move(payload), worker);
+    if (dispatching_.load() == std::this_thread::get_id()) {
+        // Published by a handler: deliver after the event being delivered now, in order.
+        pending_.push_back(e);
+        return e;
     }
-    for (const auto& h : handlers) h(e);
+    dispatching_ = std::this_thread::get_id();
+    deliver(e);
+    while (!pending_.empty()) {
+        Event next = std::move(pending_.front());
+        pending_.erase(pending_.begin());
+        deliver(next);
+    }
+    dispatching_ = std::thread::id{};
     return e;
 }
 

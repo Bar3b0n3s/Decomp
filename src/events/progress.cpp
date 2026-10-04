@@ -31,18 +31,23 @@ std::string ProgressRenderer::render_block(const RunStateData& st, std::chrono::
     out += std::format("run {}  {}  model {} ({})  elapsed {}  spend ${:.2f}  cache {:.0f}%  matched {}/{}\n", st.run_id,
                        st.status.empty() ? "starting" : st.status, st.model, st.effort, duration_text(end - st.started), st.cost_usd,
                        100 * st.cache_hit_rate(), st.matched, st.planned.size());
+    if (st.queue && !st.queue->empty()) out += std::format("  queue {} function(s)\n", st.queue->size());
+    // At most kMaxWorkerLines worker lines, so the block stays small with many workers.
+    constexpr usize kMaxWorkerLines = 12;
+    usize shown = 0, idle = 0;
     for (const auto& [id, w] : st.workers) {
-        if (w.session.empty()) {
-            out += std::format("  worker {}  idle\n", id);
+        const SessionState* s = w.session.empty() ? nullptr : st.session(w.session);
+        if (!s) {
+            ++idle;
             continue;
         }
-        auto it = st.sessions.find(w.session);
-        if (it == st.sessions.end()) continue;
-        const auto& s = it->second;
+        if (shown++ >= kMaxWorkerLines) continue;
         out += std::format("  worker {}  {:<28} turn {:>2}  {:<18} best {:5.1f}%  ${:.2f}  {}\n", id,
-                           clip(s.display.empty() ? s.function : s.display, 28), s.turn, clip(w.phase, 18), s.best_match, s.cost_usd,
-                           duration_text(now - s.started));
+                           clip(s->display.empty() ? s->function : s->display, 28), s->turn, clip(w.phase, 18), s->best_match,
+                           s->cost_usd, duration_text(now - s->started));
     }
+    if (shown > kMaxWorkerLines) out += std::format("  ... {} more busy worker(s)\n", shown - kMaxWorkerLines);
+    if (idle) out += std::format("  {} idle worker(s)\n", idle);
     usize start = st.activity.size() > activity_lines ? st.activity.size() - activity_lines : 0;
     for (usize i = start; i < st.activity.size(); ++i) out += "  " + clip(st.activity[i], 150) + "\n";
     return out;

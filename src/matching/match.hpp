@@ -4,6 +4,7 @@
 #include "matching/toolchain.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -17,6 +18,8 @@ struct MatchSetup {
     std::vector<std::filesystem::path> include_dirs;
     std::filesystem::path work_dir;
     std::optional<std::filesystem::path> cache_dir;
+    std::function<bool()> cancelled;  // polled while waiting for a compile slot and while compiling
+    bool bypass_cache = false;
 };
 
 struct CandidateResult {

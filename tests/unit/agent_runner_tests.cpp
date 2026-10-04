@@ -159,9 +159,12 @@ TEST_CASE("agent runner: wrong source, diff, corrected source, submit -> matched
     CHECK(types["tool"] == 3);
     CHECK(lines.back()["type"] == "outcome");
     CHECK(lines.back()["outcome"] == "matched");
+    CHECK(lines.front()["type"] == "session");  // the header comes first
+    CHECK(lines.front()["va"] == va);
+    for (const auto& l : lines) CHECK(l.contains("time"));
 
     // Events drive the supervision state.
-    const auto& session = rec.state.data().sessions.at("run-match-" + std::format("{:x}", va));
+    const auto& session = *rec.state.data().sessions.at("run-match-" + std::format("{:x}", va));
     CHECK(session.finished);
     CHECK(session.outcome == "matched");
     CHECK(session.matched);
@@ -171,10 +174,20 @@ TEST_CASE("agent runner: wrong source, diff, corrected source, submit -> matched
     CHECK(rec.counts["turn_finished"] == 3);
     CHECK(rec.counts["stream_delta"] > 0);
     CHECK(rec.counts["status_changed"] == 2);  // in_progress, then matched
+    CHECK(rec.counts["compile_started"] == 3);
+    CHECK(session.transcript == "sessions/add.jsonl");
+    CHECK(session.model == "claude-opus-5-5");
+    REQUIRE(rec.state.data().recent_compiles.size() == 3);
+    for (const auto& c : rec.state.data().recent_compiles) {
+        CHECK(c->ok);  // the wrong attempt compiles too; it just does not match
+        CHECK(c->exit_code == 0);
+        CHECK(c->toolchain == "clang-cl-x86");
+    }
+    CHECK_FALSE(rec.state.data().recent_compiles.back()->command.empty());
 
     // The event log replays into the state the live views saw.
     const auto replayed = events::RunState::replay(events::read_event_log(dir.path() / "run" / "events.jsonl").value());
-    const auto& again = replayed.data().sessions.at("run-match-" + std::format("{:x}", va));
+    const auto& again = *replayed.data().sessions.at("run-match-" + std::format("{:x}", va));
     CHECK(again.outcome == session.outcome);
     CHECK(again.turn == session.turn);
     CHECK(again.compiles == session.compiles);
@@ -185,6 +198,11 @@ TEST_CASE("agent runner: wrong source, diff, corrected source, submit -> matched
     CHECK(again.usage.cache_read == session.usage.cache_read);
     CHECK(session.usage.cache_read > 0);
     CHECK(replayed.data().activity_total == rec.state.data().activity_total);
+    CHECK(again.transcript == session.transcript);
+    CHECK(again.model == session.model);
+    CHECK(replayed.data().recent_compiles.size() == rec.state.data().recent_compiles.size());
+    CHECK(replayed.data().minutes.size() == rec.state.data().minutes.size());
+    CHECK(replayed.data().workers.at(0).spans.size() == rec.state.data().workers.at(0).spans.size());
 }
 
 TEST_CASE("agent runner: a refusal marks the function refused") {
@@ -201,7 +219,7 @@ TEST_CASE("agent runner: a refusal marks the function refused") {
     CHECK(r.detail.find("cyber") != std::string::npos);
     CHECK(fx.project.function_info(fx.add).status == project::FunctionStatus::refused);
     CHECK(rec.counts["refusal"] == 1);
-    const auto& session = rec.state.data().sessions.at(std::format("run-refusal-{:x}", fx.add));
+    const auto& session = *rec.state.data().sessions.at(std::format("run-refusal-{:x}", fx.add));
     CHECK(session.outcome == "refused");
     CHECK(session.refusal_category == "cyber");
 }
