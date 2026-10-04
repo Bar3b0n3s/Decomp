@@ -119,6 +119,13 @@ void RunState::apply(const Event& e) {
                        activity(e, std::format("run resumed: {} interrupted session(s) restart", p.interrupted.size()));
                    },
                    [&](const SessionStarted& p) {
+                       // The dispatched function leaves the queue of pending work.
+                       if (std::ranges::any_of(*data_.queue, [&](const QueueEntry& q) { return q.va == p.va; })) {
+                           auto rest = std::make_shared<std::vector<QueueEntry>>();
+                           for (const auto& q : *data_.queue)
+                               if (q.va != p.va) rest->push_back(q);
+                           data_.queue = std::move(rest);
+                       }
                        auto& s = session(p.session);
                        s.function = p.function;
                        s.display = p.display;
@@ -312,6 +319,13 @@ void RunState::apply(const Event& e) {
                    [&](const QueueUpdated& p) { data_.queue = std::make_shared<const std::vector<QueueEntry>>(p.items); },
                    [&](const Control& p) {
                        push_capped(data_.controls, ControlRecord{e.time, p}, kControls);
+                       // Run-wide commands change what the run is doing (per-worker ones name a target).
+                       if (p.target.empty() && (data_.status == "running" || data_.status == "paused" || data_.status == "stopping")) {
+                           if (p.command == "pause") data_.status = "paused";
+                           else if (p.command == "resume") data_.status = "running";
+                           else if (p.command == "stop") data_.status = "stopping";
+                           else if (p.command == "abort") data_.status = "aborting";
+                       }
                        activity(e, std::format("{}{}{}", p.command, p.target.empty() ? "" : " " + p.target, p.detail.empty() ? "" : ": " + p.detail));
                    },
                },

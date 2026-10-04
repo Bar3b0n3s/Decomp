@@ -193,8 +193,14 @@ public:
         transcript_.write({{"type", "guidance"}, {"turn", turn_}, {"id", guidance.id}, {"text", guidance.text}});
         bus_.publish(events::Guidance{session_, guidance.text, guidance.id}, worker_);
     }
-    void on_paused() override { transcript_.write({{"type", "paused"}, {"turn", turn_}}); }
-    void on_resumed() override { transcript_.write({{"type", "resumed"}, {"turn", turn_}}); }
+    void on_paused() override {
+        transcript_.write({{"type", "paused"}, {"turn", turn_}});
+        set_phase("paused");
+    }
+    void on_resumed() override {
+        transcript_.write({{"type", "resumed"}, {"turn", turn_}});
+        set_phase("waiting for model");
+    }
 
 private:
     events::EventBus& bus_;
