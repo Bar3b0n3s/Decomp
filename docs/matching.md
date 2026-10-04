@@ -68,10 +68,9 @@ relative field of an instruction; these fields count as **address operands**:
 | No relocation information (`.reloc` stripped or absent, as in EXEs linked `/FIXED`) | **Heuristic:** displacements and immediates of at least 4 bytes whose value lies inside the image's sections, at or above `ImageBase + 0x1000` |
 | MSVC x64 jump-table loads (`mov r, [base + i*4 + table_rva]` with `base` = `__ImageBase`) | The displacement, read as the table's RVA |
 
-Other fields of fewer than 4 bytes are never address operands. A heuristic field becomes an address
-operand even when the candidate holds a plain constant there, so on images without relocations an
-integer that looks like an address shows up as a difference; comparing such fields as plain values
-when the candidate has no relocation at that field is planned.
+Other fields of fewer than 4 bytes are never address operands. A heuristic field is only a guess:
+when the candidate has no relocation at that field, the two fields are compared as plain values
+instead, so an integer constant that happens to look like an address still matches.
 
 Each resolved address becomes a reference (`Ref`), in this order:
 
@@ -100,10 +99,12 @@ functions the object defines.
 - A jump table at the end of the range is split off as data: the first relocated reference from an
   indirect jump into the function's own section, past the jump, marks the end of the code (see
   [jump tables](#jump-tables-inside-text-x86)).
-- Without `/Gy`, functions share `.text`, and two things do not work yet (planned): the alignment
-  padding before the next function is not trimmed, so it shows as extra `nop` or `int3` rows, and a
-  call to another function of the same section is not recognized as a symbol reference (it falls
-  through to the anonymous-data rules below). Objects built without `/Gy` therefore do not match yet.
+- Candidates are always compiled with `/Gy`: for MSVC-style toolchains the driver appends `/Gy` when
+  the flags lack it or turn it off with `/Gy-`. `/Gy` changes how functions are packaged, not the code
+  generated for them, so targets built without it still match. Each candidate function is therefore
+  a COMDAT of its own: no alignment padding is included and calls to neighbouring functions carry
+  relocations. (A `.obj` built elsewhere without `/Gy` and given to `diff --obj` is not supported:
+  padding shows as extra rows and same-section calls are not recognized.)
 
 A relocation at the offset of an instruction's field makes that field an address operand. COFF
 relocations have no explicit addend: the field's existing contents are the addend. For example,
@@ -134,20 +135,22 @@ instruction is its prefix and mnemonic plus these operand templates. References 
 
 | Kind | Key | Equal when | Shown as |
 |---|---|---|---|
-| `symbol` | Name and offset | The offsets are equal and the names are equivalent: identical, or with the same qualified name. The target's PDB name also counts. | Qualified name, `g_table+0x8` |
+| `symbol` | Name and offset | The offsets are equal and the names match: identical when the target's name is the linker's own (C++-decorated, or a public that differs from its PDB name), otherwise the same qualified name. The target's PDB name also counts. | Qualified name, `g_table+0x8` |
 | `label` | `L<index>`, the destination's position in that side's listing | The two destinations are aligned with each other | `loc_<offset in the function>` |
 | `string` | The bytes up to the terminator | Identical bytes. When the target has no string symbol there, the string at the target address is read and compared. | An escaped C string, first 48 bytes |
 | `float32`, `float64`, `vector` | The constant's bytes | Identical bit patterns, read at the target address when the target has no constant symbol there | `1.5f`, `0.75`, `const:<hex>` |
 | `table` | The targets of every entry, as labels | Same length, and every entry's labels aligned | `switch_table` |
 | `unknown` | `unk_<va>` on the target, `<section>+<offset>` on the candidate | Never | The address in hex |
 
-**Names compare by equivalence, not by exact decorated form.** Two names are equal when they are
-identical or when their qualified names are: `?add@@YAHHH@Z` and `add` are equivalent, and so are
-`__imp__ExitProcess@4` and `__imp_ExitProcess`. That lets static functions and data, whose PDB records
-carry undecorated names, match the candidate's mangled names. It also means that a callee or global
-declared with the wrong parameter types or calling convention still compares equal when its name is
-right, and so does the matched function itself: check its decorated name against the brief. A
-`signature` hint for this case is planned.
+**Linker names compare exactly; readable names by equivalence.** When the target's name is the
+linker's own (C++-decorated like `?add@@YAHHH@Z`, or a public such as `_entry` whose PDB name `entry`
+differs), the candidate must use exactly that name, after dropping an `__imp_` prefix on either side.
+That also checks the declaration: `int add(int, unsigned)` mangles to `?add@@YAHHI@Z` and does not
+match, even though its code is identical; a hint names both declarations. This applies to references
+and to the matched function's own name. When only a readable name is known (static functions and data,
+whose PDB records carry undecorated names, or names from the export table), names are equal when their
+qualified names are: `helper` matches the candidate's `?helper@@YAHH@Z`, and `__imp__ExitProcess@4`
+matches `_ExitProcess@4`.
 
 **Strings and floats compare by content.** MSVC names string literals by an encoding of their content
 (`??_C@_0...`), and floats by their bit pattern (`__real@...`). Older compilers without string pooling
@@ -155,8 +158,8 @@ emit anonymous `$SG...` symbols. The target only has addresses, possibly pooled 
 linker. So on the candidate side, Decomp reads the literal or constant from the object's data section.
 On the target side, it reads the bytes at the referenced address. The two compare equal when the bytes
 are identical. Floats compare by bits, never numerically, so `-0.0`, `0.0` and NaN payloads stay
-distinct. Strings are read as NUL-terminated byte strings; reading wide (UTF-16) literals as such is
-planned.
+distinct. Narrow strings are read up to their NUL byte; wide literals (`??_C@_1...`) are read as UTF-16
+up to their 0x0000 unit and compared over all their bytes (ref kind `wide_string`).
 
 **Internal branch targets become instruction indices.** A branch whose destination lies inside the
 function is keyed `L<index>`, where the index is the destination instruction's position in that side's
@@ -322,8 +325,9 @@ section-definition auxiliary record carries the length, a checksum and the selec
 duplicates for ordinary functions, "any" for inline functions and pooled literals. Associative COMDATs
 attach data to the function, such as x64 `.pdata`/`.xdata` and debug symbols. Extraction runs from the
 function's symbol to the next symbol of its section or the section end, which for a COMDAT is the
-whole function ([step 2](#2-candidate-side)). `/O1` and `/O2` imply `/Gy` in all supported versions.
-Objects built without `/Gy`, where all functions share `.text`, do not match yet (planned).
+whole function ([step 2](#2-candidate-side)). The compile driver always adds `/Gy` to candidate
+compiles (see [step 2](#2-candidate-side)), so targets built without it are matched too; only
+objects built elsewhere without `/Gy` and passed to `diff --obj` are not supported.
 
 ### String literals (`??_C@`)
 
@@ -331,8 +335,8 @@ With string pooling (`/GF`, which `/O1` and `/O2` imply), literals become COMDAT
 (narrow) or `??_C@_1...` (wide). The name encodes the length, a hash and a prefix of the content.
 Without pooling, older compilers place literals in `.data` or `.rdata` under anonymous `$SG<n>` local
 symbols. Decomp compares both by content. A wrong literal is therefore an `operand` row (category
-`symbol`) with a hint that shows both strings. Wide literals are read as byte strings for now, which
-stops at their first zero byte (planned). A literal placed in a different section, for example because
+`symbol`) with a hint that shows both strings. Wide literals are compared over all their UTF-16 units.
+A literal placed in a different section, for example because
 of a `const` mismatch, is caught in Phase 5 when data placement is verified.
 
 ### Floating-point constants (`__real@`, `__xmm@`)
@@ -500,9 +504,9 @@ Old compilers depend on their environment. VC6's `cl.exe` needs `PATH` to includ
 - `env_prepend`: puts a value in front of the inherited value, joined with the host's path separator.
 
 These become `ProcessSpec.env` overrides, so the parent environment is otherwise inherited. Unsetting
-a variable from a toolchain entry is not supported. Decomp does not yet remove `CL` and `_CL_`, which
-MSVC reads as extra command-line options; removing them so that a developer's shell settings cannot
-change codegen is planned.
+a variable from a toolchain entry is not supported. For MSVC-style toolchains Decomp removes `CL` and
+`_CL_`, which `cl.exe` and clang-cl read as extra command-line options, unless the toolchain sets them,
+so a developer's shell settings cannot change codegen.
 
 `wrapper` prefixes the command line. Its main use is running MSVC under Wine on Linux
 (`["wine"]`). With Wine, the Windows-side search path is extended through `WINEPATH`, `WINEPREFIX`
@@ -571,8 +575,9 @@ tool result (`compile: ok (cached)`), so the transcripts show which attempts act
   function that uses `__FILE__` cannot match yet. Choosing the compile name to match source paths
   found in the target is planned.
 - **Environment hygiene.** The toolchain's environment is applied explicitly, and the compiler runs in
-  its own directory, so nothing depends on the caller's current directory. Removing `CL` and `_CL_` is
-  planned.
+  its own directory, so nothing depends on the caller's current directory. For MSVC-style toolchains
+  `CL` and `_CL_` (extra options that `cl.exe` and clang-cl read from the environment) are removed
+  unless the toolchain sets them.
 - **Source encoding.** Old MSVC versions read source in the system code page. Candidate files are
   written as UTF-8 without a BOM, so non-ASCII bytes in string literals should be written as escapes
   (`"\xE9"`). Both sides compare as bytes, so mistakes surface as string mismatches rather than
@@ -592,9 +597,9 @@ tool result (`compile: ok (cached)`), so the transcripts show which attempts act
 |---|---|---|
 | Target formats | PE32, PE32+ | ELF64 (Phase 7) |
 | Candidate objects | COFF from MSVC and clang-cl (including `/bigobj`), built with `/Gy` | Objects without `/Gy` (padding, same-section calls); ELF objects (Phase 7) |
-| Address fields | Base relocations, relative branches, RIP-relative operands, stripped-`.reloc` heuristic, MSVC x64 RVA table loads | Candidate-guided comparison of heuristic fields |
+| Address fields | Base relocations, relative branches, RIP-relative operands, stripped-`.reloc` heuristic (compared as values where the candidate has no relocation), MSVC x64 image-base-relative operands | — |
 | Symbol sources | PDB 7.0 (publics, procedures, data), exports, imports, x64 `.pdata`, `symbols.txt` | MSVC `.map`, RTTI names, library signatures (Phase 2) |
-| Data compared | Narrow strings, floats and SSE constants, jump tables | Wide strings; global initializers, EH and unwind tables, string and float pools, section placement (Phase 5) |
+| Data compared | Narrow and wide strings, floats and SSE constants, jump tables | Global initializers, EH and unwind tables, string and float pools, section placement (Phase 5) |
 | Thunks | ILT and import thunks followed; names moved off ILT entries | `dllimport` hint (Phase 2) |
 | Jump tables | x86 absolute, clang x64 relative and MSVC x64 RVA tables, compared as index lists | Two-level (byte index) tables; robust in-`.text` bounds for PDB-less MSVC targets (Phase 2) |
 | Hints | Register-only, stack-only, encoding, inverted branch, reordering, instruction count, branch target, binding, and reference (string, constant, callee) hints | `signature`, `gs_cookie`, `chkstk`, `dllimport`, `eh_frame` |

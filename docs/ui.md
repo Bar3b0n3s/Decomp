@@ -432,9 +432,8 @@ sources automatically, which is the default policy.
 
 **Data sources**
 
-- `log` events (defined, but nothing publishes them yet; feeding the logger into the event bus is
-  planned), `retry`, and any event that carries an error, such as `tool_call_finished` with
-  `is_error` and `session_finished` with outcome `error`. `RunState` keeps the last 50 error lines.
+- `log` events (warnings and errors logged during a run), `retry`, and any event that carries an
+  error, such as `tool_call_finished` with `is_error` and `session_finished` with outcome `error`. `RunState` keeps the last 50 error lines.
 
 ### Settings
 
@@ -612,7 +611,7 @@ Default bindings (provisional):
 ## CLI parity
 
 The CLI covers inspecting the target, matching by hand, and running, watching and steering one agent
-session. `--json` is a global option, given before the command name (`decomp --json status`), and
+session. `--json` is a global option, given before or after the command name (`decomp status --json`), and
 most commands honor it; `toolchain add` prints text only. Multi-function runs, approvals, manual mode
 and opening past runs are GUI features (Phase 1).
 
@@ -677,7 +676,7 @@ In `events.jsonl` an event is one line with its `type` and its payload under `da
 | `guidance` | `session`, `text` |
 | `status_changed` | `function`, `va`, `status` |
 | `file_written` | `path`, `reason` |
-| `log` | `level`, `message` (defined; nothing publishes it yet) |
+| `log` | `level`, `message` (warnings and errors logged during an agent run) |
 
 Planned with the GUI: `worker_phase_changed` (worker, phase, function), `compile_started`
 (toolchain and command line), `budget_updated` (budget used against limit), `rate_limit_updated`

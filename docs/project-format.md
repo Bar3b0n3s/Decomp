@@ -40,8 +40,9 @@ needed). It writes `decomp.json`, `symbols.txt` and `.gitignore`, creates the em
 `src/functions/` directories, and refuses to run where a `decomp.json` already exists. Its other
 options are `--toolchain <name>`, `--flag <flag>` (repeatable) and `--pdb <file>`. Every other command
 finds the project by searching upward from the current directory for `decomp.json`, or upward from
-the directory given with the global option `-C <dir>` (`--project <dir>`). Global options go before
-the command name (`decomp -C game status`), and `init` ignores `-C`.
+the directory given with the global option `-C <dir>` (`--project <dir>`). Global options may come
+before or after the command name (`decomp -C game status` or `decomp status -C game`); `init` creates
+the project in `--dir`, else in the `-C` directory, else in the current directory.
 
 ## `decomp.json`
 
@@ -81,7 +82,7 @@ The example below is shown exactly as `decomp init ../bin/GAME.EXE --toolchain v
 |---|---|---|
 | `version` | integer | Format version; must be `1` |
 | `target.path` | string | Required. The target binary, relative to the project directory (absolute paths are accepted; `init` writes a relative path whenever one exists) |
-| `target.sha1` | string | SHA-1 of the target. When the project loads its target and the SHA-1 differs, Decomp logs a warning and continues; refusing to run on a mismatch is planned. |
+| `target.sha1` | string | SHA-1 of the target. When the project loads its target and the SHA-1 differs, every command that opens the project fails with an error: the project's symbols and results describe the old binary. If the new binary is intended, update the value. |
 | `target.pdb` | string | Optional. The PDB, relative to the project directory. If it is set but cannot be used (missing, unreadable, or its GUID and age do not match the image's CodeView record), loading fails. If it is absent, Decomp looks next to the binary for the file named in the CodeView record, then for `<stem>.pdb`, and ignores a PDB that does not match. |
 | `toolchain` | string | The name of a toolchain in the [registry](#toolchain-registry) |
 | `flags` | array of strings | The target's code-generation flags, passed after the toolchain's base flags |
@@ -277,7 +278,7 @@ outcomes in [agent.md](agent.md#the-loop).
 | Status | Meaning | Set by |
 |---|---|---|
 | `unstarted` | No attempt has scored yet. This is the default, and it is not written to `symbols.txt`. | `init`; the runner, when a session ends without any scored attempt |
-| `in_progress` | An agent session is working on it | The runner, when a session starts; replaced when the session ends. After a crash it stays in `symbols.txt` until the next session on that function ends. |
+| `in_progress` | An agent session is working on it | The runner announces it (a `status` event) when a session starts, but never writes it to `symbols.txt`, so a crash leaves nothing stale. An older project may still contain it; the next session's end replaces it. |
 | `nonmatching` | At least one attempt scored above 0%, none matched; the best percentage is in `best=` | The runner, when a session ends without a match, give-up or refusal (budget, turn limit, no result, stop, abort or error) |
 | `matched` | A verified byte-exact source is in `src/functions/` | `submit_result` verification. A matched function stays matched, whatever later sessions do. |
 | `refused` | The model declined the request, including after fallbacks when they are enabled | The runner |
@@ -425,8 +426,7 @@ reads as extra command-line options (planned), so make sure they are not set whe
 - **Atomic writes:** whole files (`decomp.json`, `symbols.txt`, sources, `best.cpp`, `summary.json`,
   cache entries) are written to a temporary sibling and renamed into place, so an interrupted run
   never leaves a half-written file. Logs, transcripts, `attempts.jsonl` and `notes.md` are appended.
-  While a session runs, its function is `in_progress` in `symbols.txt`; after a crash that status
-  remains until the next session on the function ends.
+  `in_progress` is only announced while a session runs and is never written to `symbols.txt`.
 - **Machine independence:** toolchains are referenced by name, and paths in `decomp.json` are relative
   when a relative path exists. Nothing secret is stored in the project.
 - **Merge-friendly:** the symbol file is line-based with one symbol per line, so concurrent work on

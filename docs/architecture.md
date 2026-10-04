@@ -284,10 +284,12 @@ The built-in agent ([agent.md](agent.md) has the full design):
 ### cli
 
 Commands built with CLI11 (`src/cli/`): `init`, `info`, `funcs`, `disasm`, `diff`,
-`toolchain list|test|add`, `status` and `agent`. Global options, which go before the command name,
-are `--json`, `-v`/`--verbose` (repeat for trace), `-q`/`--quiet` and `-C`/`--project <dir>`, plus
+`toolchain list|test|add`, `status` and `agent`. Global options, which may come before or after the
+command name, are `--json`, `-v`/`--verbose` (repeat for trace), `-q`/`--quiet` and `-C`/`--project <dir>`, plus
 `--version`. `diff` takes `--source <file>` or `--obj <file>` (plus `--all` with `--obj`), and exits
-with 0 when byte-exact, 2 when the function differs and 3 when the compile failed. `agent` adds the
+with 0 when byte-exact, 2 when the function differs and 3 when the compile failed (with `--all`, 0
+only when every function the object shares with the target is byte-exact, and 2 when any differs or
+none is shared). `agent` adds the
 live progress view, `--replay <file>`, `--interactive`, `--guidance`, budget overrides and model
 options, and exits with 0 when matched, 2 when not matched, 3 when refused and 1 on error or abort.
 Errors are printed as `error: <message>` with exit code 1.
@@ -308,7 +310,8 @@ specification is in [ui.md](ui.md).
 3. The CLI creates a run ID and the run directory under `.decomp/runs/`, an `EventBus` with the JSONL
    log and the progress view, and publishes `run_started`. Ctrl+C (and `--interactive` input) are
    turned into `LoopControl` commands.
-4. `run_function()` marks the function `in_progress` in `symbols.txt`, builds the tools, the
+4. `run_function()` announces the function as `in_progress` (an event; it is not written to
+   `symbols.txt`), builds the tools, the
    conversation (system prompt and tool definitions) and the brief (annotated listing, referenced
    symbols, callers, history), and runs the loop.
 5. `run_loop()` sends each request and streams the response; text and thinking deltas become
@@ -399,8 +402,9 @@ Planned for Phase 1:
   script) end the session with outcome `error`. User stops and aborts end it with `stopped` and
   `aborted`.
 - Errors are logged once, where they are handled, not where they are created. Log lines go to stderr
-  (and optionally a file); feeding them into the event bus as `log` events, so that a Logs view sees
-  them, is planned.
+  (and optionally a file). During `decomp agent`, warnings and errors are also published as `log`
+  events, so they reach the run's `events.jsonl` and the views. Log sinks run outside the logger's
+  lock, so a sink may itself cause logging.
 - The CLI prints `error: <message>` and exits with 1. `decomp diff` uses 2 for "differs" and 3 for a
   failed compile, and `decomp agent` uses 2 for "not matched" and 3 for "refused"; argument errors
   are reported by CLI11 with its own exit codes.

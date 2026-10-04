@@ -105,9 +105,10 @@ the system prompt are abbreviated here:
 }
 ```
 
-Request parameters are model-specific, but Decomp sends this shape to every model. A model that does
-not accept adaptive thinking or `effort` (Claude Haiku 4.5, for example, takes a thinking token budget
-instead) fails with a 400; a per-model capability table is planned.
+Request parameters are model-specific, but Decomp sends this shape to every model. `decomp agent`
+refuses Claude Haiku models up front, because they do not accept adaptive thinking or `effort` (Haiku
+4.5 takes a thinking token budget instead) and would fail with a 400; a per-model capability table is
+planned.
 
 ## Prompt caching
 
@@ -798,7 +799,8 @@ usd = (input_tokens * input + output_tokens * output
 - A model ID matches its table row exactly, or through the longest row that is a prefix followed by
   `-` or `@` (dated or platform variants such as `claude-opus-5-5-20270101`).
 - A serving model without a row is priced at the configured model's rates. If the configured model
-  has no row either, everything is priced at the `claude-opus-5-5` row and a warning is logged.
+  has no row either, everything is priced at the `claude-opus-5-5` row, and a warning says which
+  prices the spend and the USD budget are estimated with.
 - Thinking is billed as output and is included in `output_tokens`. `input_tokens` covers only the
   uncached part of the prompt; the full prompt size is input plus cache write plus cache read.
 - Decomp uses the 5-minute cache TTL, so 1-hour cache writes (twice the input price) are not in the

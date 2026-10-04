@@ -77,11 +77,13 @@ repository at the time of writing; tick the others as they land.
 - [x] **12. Docs.** `README.md`, `docs/architecture.md`, `docs/matching.md`, `docs/agent.md`,
   `docs/ui.md`, `docs/project-format.md` and `docs/roadmap.md` (this set), reconciled with the
   implementation.
-- [ ] **13. CI.** `.github/workflows/ci.yml` on ubuntu (g++-14) and windows-latest (Visual Studio 2022
+- [x] **13. CI.** `.github/workflows/ci.yml` on ubuntu (g++-14) and windows-latest (Visual Studio 2022
   or 2026 through `premake5 vs2022` or `vs2026`, msbuild) builds and runs the unit tests. Linux also
   runs a CLI smoke test that includes a scripted agent run. Windows also runs the MSVC round trip
   (`tests/integration/msvc_roundtrip.ps1`, x86 and x64) with the real `cl.exe`, including a scripted
-  agent run. Status: Linux green; Windows MSVC round trip being brought up.
+  agent run. Both jobs are green: every fixture function is byte-exact with the real `cl.exe` on x86
+  and x64 (incremental-link thunks, `$LN` and RVA jump tables, image-base-relative operands), and the
+  scripted agent run matches `add()` with clang-cl on Linux and with `cl.exe` on Windows.
 
 **Slice exit criteria**
 

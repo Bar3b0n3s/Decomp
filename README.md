@@ -11,8 +11,8 @@ goes into that same edit-compile-compare loop, which Decomp automates while a pe
 > **Status: the first working slice is implemented.** The `decomp` command loads PE targets and their
 > PDBs, annotates disassembly, compiles candidates with the original toolchain, diffs them with
 > relocation awareness, and runs the built-in agent on one function at a time, with transcripts, event
-> logs and a live progress view. Linux CI is green; the Windows MSVC round trip in CI is being brought
-> up. The desktop GUI and the multi-function batch runner are Phase 1. See
+> logs and a live progress view. CI is green on Linux and Windows, including a round trip with the
+> real MSVC `cl.exe` for x86 and x64. The desktop GUI and the multi-function batch runner are Phase 1. See
 > [docs/roadmap.md](docs/roadmap.md).
 
 ## Key ideas
@@ -141,7 +141,7 @@ decomp status
 ```
 
 Commands find the project by searching upward from the current directory for `decomp.json`. Global
-options go before the command name: `-C <dir>` (`--project <dir>`) starts the search in another
+options may come before or after the command name: `-C <dir>` (`--project <dir>`) starts the search in another
 directory, `--json` makes most commands print JSON (`decomp --json status`), and `-v` or `-q` change
 the log level. `decomp <command> --help` lists every option.
 
