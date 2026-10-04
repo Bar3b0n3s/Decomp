@@ -295,3 +295,37 @@ TEST_CASE("the shell announces what a run did once, not again when it is reopene
     CHECK(texts().size() == announced.size());
     CHECK(ctx.id_conflicts() == 0);
 }
+
+TEST_CASE("cost and usage: every tab renders the project's runs, live and reopened") {
+    Fixture fx;
+    fx.open();
+    auto id = fx.workspace->start_run({});
+    REQUIRE(id);
+    REQUIRE(fx.until([&] { return !fx.workspace->run_live(); }));
+    HeadlessContext ctx;
+    Settings settings;
+    App app(fx.workspace->services(), settings);
+    REQUIRE(app.focus_view("cost"));
+    // Let the background jobs (run summaries, the report) finish.
+    auto settle = [&] {
+        for (int i = 0; i < 400; ++i) {
+            ctx.frames(1, [&] { app.frame(); });
+            if (app.jobs().pending() == 0) break;
+            std::this_thread::sleep_for(5ms);
+        }
+        ctx.frames(2, [&] { app.frame(); });
+    };
+    settle();
+    for (const char* tab : {"runs", "days", "models", "functions", "tokens", "cache", "projection"}) {
+        CAPTURE(tab);
+        app.context().view_state("cost")["tab"] = tab;
+        ctx.frames(3, [&] { app.frame(); });
+        CHECK(app.view_visible("cost"));
+    }
+    CHECK(json_string_or(app.context().view_state("cost"), "tab", "") == "projection");
+    fx.workspace->close_run();
+    REQUIRE(fx.workspace->open_run(*id));
+    fx.workspace->wait_loaded();
+    settle();
+    CHECK(ctx.id_conflicts() == 0);
+}

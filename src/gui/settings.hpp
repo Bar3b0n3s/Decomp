@@ -56,6 +56,8 @@ struct Settings {
     Theme theme = Theme::dark;
     float font_size = kDefaultFontSize;  // UI font size in pixels before DPI scaling
     DiffPaletteKind diff_palette = DiffPaletteKind::standard;
+    // The share of a budget (run or function) at which spend turns amber and a warning is raised.
+    double budget_alert = 0.8;
     std::vector<SavedLayout> layouts;
     std::vector<std::string> recent_projects;           // newest first, UTF-8 paths
     std::map<std::string, ProjectViewState> projects;   // "" holds the state used without a project

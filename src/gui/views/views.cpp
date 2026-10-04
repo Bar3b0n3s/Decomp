@@ -1,6 +1,7 @@
 #include "gui/views/views.hpp"
 
 #include "gui/views/changes_view.hpp"
+#include "gui/views/cost_view.hpp"
 #include "gui/views/logs_view.hpp"
 #include "gui/views/placeholder.hpp"
 #include "gui/views/run_monitor_view.hpp"
@@ -20,7 +21,7 @@ std::vector<std::unique_ptr<View>> make_all_views() {
     views.push_back(make_placeholder_view("binary_explorer"));   // V5
     views.push_back(make_placeholder_view("symbols"));           // V5
     views.push_back(make_changes_view());
-    views.push_back(make_placeholder_view("cost"));              // V6
+    views.push_back(make_cost_view());
     views.push_back(make_toolchains_view());
     views.push_back(make_logs_view());
     views.push_back(make_settings_view());

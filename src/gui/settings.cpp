@@ -157,6 +157,7 @@ Json to_json(const Settings& s) {
     }
     j["projects"] = std::move(projects);
     j["developer"] = {{"replay_dir", s.developer.replay_dir}};
+    j["budget_alert"] = s.budget_alert;
     return j;
 }
 
@@ -187,6 +188,7 @@ Settings settings_from_json(const Json& j) {
         }
     }
     if (const Json* dev = member(j, "developer")) s.developer.replay_dir = json_string_or(*dev, "replay_dir", "");
+    if (const double alert = json_number_or(j, "budget_alert", s.budget_alert); std::isfinite(alert)) s.budget_alert = std::clamp(alert, 0.05, 1.0);
     return s;
 }
 

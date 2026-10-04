@@ -192,6 +192,11 @@ void App::update_run_notifications() {
         notifications_primed_ = true;
     }
     if (!snap) return;
+    if (notification_rules_.options().budget_warning != settings_.budget_alert) {
+        vm::NotificationOptions options = notification_rules_.options();
+        options.budget_warning = settings_.budget_alert;
+        notification_rules_.set_options(options);
+    }
     for (vm::Notification& n : notification_rules_.update(*snap, std::chrono::system_clock::now())) {
         std::optional<NavEntry> link;
         if (!n.link.view.empty()) link = NavEntry{n.link.view, NavTarget{.va = n.link.va, .session = n.link.session, .anchor = n.link.anchor}};

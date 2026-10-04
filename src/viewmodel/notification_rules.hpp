@@ -80,6 +80,9 @@ public:
     bool waiting() const;
     // Forgets everything (another project).
     void reset();
+    // Changes the options for later updates (for example the budget warning threshold).
+    void set_options(const NotificationOptions& options) { options_ = options; }
+    const NotificationOptions& options() const { return options_; }
 
 private:
     struct Batch {

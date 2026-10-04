@@ -39,6 +39,33 @@ std::string local_clock(std::chrono::system_clock::time_point time) {
     return std::format("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec);
 }
 
+std::string local_month_day_time(std::chrono::system_clock::time_point time) {
+    std::time_t t = std::chrono::system_clock::to_time_t(time);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    return std::format("{:02}-{:02} {:02}:{:02}", tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+}
+
+std::chrono::minutes local_utc_offset(std::chrono::system_clock::time_point time) {
+    const std::time_t t = std::chrono::system_clock::to_time_t(time);
+    std::tm local{}, utc{};
+#ifdef _WIN32
+    localtime_s(&local, &t);
+    gmtime_s(&utc, &t);
+#else
+    localtime_r(&t, &local);
+    gmtime_r(&t, &utc);
+#endif
+    // The two wall clocks of one instant are at most a day apart.
+    int days = local.tm_yday - utc.tm_yday;
+    if (local.tm_year != utc.tm_year) days = local.tm_year > utc.tm_year ? 1 : -1;
+    return std::chrono::minutes(days * 1440 + (local.tm_hour - utc.tm_hour) * 60 + (local.tm_min - utc.tm_min));
+}
+
 void align_right(float item_width) {
     const float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
     const float x = right - item_width;

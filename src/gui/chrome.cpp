@@ -217,10 +217,10 @@ void App::draw_top_bar() {
         ImGui::Text("Workers %d/%d", run_.workers_active, run_.workers_total);
         vertical_separator();
 
-        // Spend against the run budget: amber from 80%, red at 100%.
+        // Spend against the run budget: amber from the alert threshold (80% by default), red at 100%.
         if (run_.budget_usd > 0) {
             const double used = run_.cost_usd / run_.budget_usd;
-            const ImVec4& color = used >= 1.0 ? c.error : used >= 0.8 ? c.warn : c.ok;
+            const ImVec4& color = used >= 1.0 ? c.error : used >= settings_.budget_alert ? c.warn : c.ok;
             ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color);
             ImGui::ProgressBar(static_cast<float>(std::min(used, 1.0)), ImVec2(ImGui::GetFontSize() * 9, 0),
                                std::format("${:.2f} / ${:.2f}", run_.cost_usd, run_.budget_usd).c_str());
