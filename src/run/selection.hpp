@@ -21,7 +21,8 @@ struct Selection {
 bool runnable_by_default(project::FunctionStatus status);
 
 // Resolves a selection to function addresses in address order. Explicitly named functions are
-// always included (whatever their status); otherwise every function symbol passes the filters.
+// always included (whatever their status); otherwise every function symbol that passes the filters,
+// except linker thunks and functions without a size or recoverable extent.
 Result<std::vector<u64>> select_functions(const Program& program, const project::Project* project, const Selection& selection);
 
 } // namespace decomp::run

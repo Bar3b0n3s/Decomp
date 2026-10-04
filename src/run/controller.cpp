@@ -414,6 +414,7 @@ Json RunController::run_json_locked() const {
                 {"limits", limits_json(limits_.value_or(options_.agent.loop.limits))},
                 {"policies", policies_json(approvals_->policies())},
                 {"replay", options_.replay},
+                {"replay_dir", options_.replay_dir},
                 {"selection", options_.selection},
                 {"counts",
                  {{"pending", queue_.count(ItemState::pending)},

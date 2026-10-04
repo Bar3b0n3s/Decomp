@@ -314,7 +314,9 @@ void RunState::apply(const Event& e) {
                        a.by = p.by;
                        a.reason = p.reason;
                        a.decided = e.time;
-                       activity(e, std::format("approval {} {} by {}{}", p.id, p.verdict, p.by, p.reason.empty() ? "" : ": " + p.reason));
+                       // Automatic approvals are implied by the file written next; the rest is news.
+                       if (p.by != "policy" || p.verdict != "approved")
+                           activity(e, std::format("approval {} {} by {}{}", p.id, p.verdict, p.by, p.reason.empty() ? "" : ": " + p.reason));
                    },
                    [&](const QueueUpdated& p) { data_.queue = std::make_shared<const std::vector<QueueEntry>>(p.items); },
                    [&](const Control& p) {

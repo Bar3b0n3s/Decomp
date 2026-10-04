@@ -31,54 +31,6 @@ struct AgentArgs {
     bool no_fallbacks = false, progress = false, no_progress = false, interactive = false;
 };
 
-// Ctrl+C: the first stops after the current turn, the second aborts the request in flight, the third
-// exits at once. The handler only bumps a counter; a watcher thread turns it into loop commands.
-std::atomic<int> g_interrupts{0};
-
-void on_interrupt(int) {
-    if (g_interrupts.fetch_add(1) + 1 >= 3) std::_Exit(130);
-    std::signal(SIGINT, on_interrupt);
-}
-
-class InterruptWatcher {
-public:
-    explicit InterruptWatcher(agent::LoopControl& control) : control_(control) {
-        g_interrupts = 0;
-        previous_ = std::signal(SIGINT, on_interrupt);
-        thread_ = std::jthread([this](std::stop_token stop) { watch(stop); });
-    }
-    ~InterruptWatcher() {
-        thread_.request_stop();
-        thread_.join();
-        if (previous_ != SIG_ERR) std::signal(SIGINT, previous_);
-    }
-    InterruptWatcher(const InterruptWatcher&) = delete;
-    InterruptWatcher& operator=(const InterruptWatcher&) = delete;
-
-private:
-    void watch(const std::stop_token& stop) {
-        int seen = 0;
-        while (!stop.stop_requested()) {
-            const int n = g_interrupts.load();
-            if (n > seen) {
-                seen = n;
-                if (n == 1) {
-                    log::warn("stopping after the current turn (Ctrl+C again to abort now)");
-                    control_.request_stop();
-                } else {
-                    log::warn("aborting");
-                    control_.request_abort();
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    }
-
-    agent::LoopControl& control_;
-    void (*previous_)(int) = SIG_DFL;
-    std::jthread thread_;
-};
-
 // --interactive: lines typed on stdin steer the session. The reader blocks on stdin, so it is detached
 // and owns a reference to the control block.
 void start_stdin_supervisor(std::shared_ptr<agent::LoopControl> control) {
@@ -202,7 +154,16 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     auto control = std::make_shared<agent::LoopControl>();
     agent::FunctionRunResult result;
     {
-        InterruptWatcher watcher(*control);
+        // Ctrl+C: the first stops after the current turn, the second aborts the request in flight.
+        InterruptWatcher watcher([&control](int presses) {
+            if (presses == 1) {
+                log::warn("stopping after the current turn (Ctrl+C again to abort now)");
+                control->request_stop();
+            } else {
+                log::warn("aborting");
+                control->request_abort();
+            }
+        });
         if (a.interactive) start_stdin_supervisor(control);
         const std::string file = sym ? project::safe_function_name(*sym) : std::format("sub_{:x}", va);
         const std::filesystem::path transcript = run_dir.empty() ? std::filesystem::path{} : run_dir / "sessions" / fs::from_utf8(file + ".jsonl");

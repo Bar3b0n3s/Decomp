@@ -11,6 +11,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace decomp::cli {
@@ -37,10 +38,27 @@ Result<matching::MatchSetup> make_match_setup(const GlobalOptions& g, const std:
 void print_json(const Json& value);
 bool is_tty(std::FILE* stream);
 
+// Ctrl+C for long-running commands: `on_interrupt(n)` runs on a watcher thread for the first and second
+// press (n = 1, 2); a third press exits the process at once. The previous handler is restored on
+// destruction.
+class InterruptWatcher {
+public:
+    explicit InterruptWatcher(std::function<void(int)> on_interrupt);
+    ~InterruptWatcher();
+    InterruptWatcher(const InterruptWatcher&) = delete;
+    InterruptWatcher& operator=(const InterruptWatcher&) = delete;
+
+private:
+    std::function<void(int)> on_interrupt_;
+    void (*previous_)(int) = nullptr;
+    std::jthread thread_;
+};
+
 using Registrar = void (*)(CLI::App& app, GlobalOptions& g);
 void register_analysis_commands(CLI::App& app, GlobalOptions& g);
 void register_matching_commands(CLI::App& app, GlobalOptions& g);
 void register_project_commands(CLI::App& app, GlobalOptions& g);
 void register_agent_commands(CLI::App& app, GlobalOptions& g);
+void register_run_commands(CLI::App& app, GlobalOptions& g);
 
 } // namespace decomp::cli

@@ -4,6 +4,10 @@
 #include "project/project.hpp"
 #include "project/setup.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
 #include <print>
 
 #ifdef _WIN32
@@ -51,6 +55,40 @@ bool is_tty(std::FILE* stream) {
 #else
     return isatty(fileno(stream)) != 0;
 #endif
+}
+
+namespace {
+
+// The handler only bumps a counter; the watcher thread turns presses into commands.
+std::atomic<int> g_interrupts{0};
+
+void on_sigint(int) {
+    if (g_interrupts.fetch_add(1) + 1 >= 3) std::_Exit(130);
+    std::signal(SIGINT, on_sigint);
+}
+
+} // namespace
+
+InterruptWatcher::InterruptWatcher(std::function<void(int)> on_interrupt) : on_interrupt_(std::move(on_interrupt)) {
+    g_interrupts = 0;
+    previous_ = std::signal(SIGINT, on_sigint);
+    thread_ = std::jthread([this](std::stop_token stop) {
+        int seen = 0;
+        while (!stop.stop_requested()) {
+            const int n = g_interrupts.load();
+            if (n > seen) {
+                seen = n;
+                on_interrupt_(n);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+}
+
+InterruptWatcher::~InterruptWatcher() {
+    thread_.request_stop();
+    thread_.join();
+    if (previous_ != SIG_ERR) std::signal(SIGINT, previous_);
 }
 
 } // namespace decomp::cli

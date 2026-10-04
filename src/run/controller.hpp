@@ -67,8 +67,9 @@ struct RunOptions {
     // others start with the shared prompt prefix already cached. 0 = no stagger.
     std::chrono::milliseconds stagger_timeout{30'000};
     std::string project_name;
-    bool replay = false;  // scripted responses (recorded in run.json)
-    Json selection;       // how the functions were chosen (recorded in run.json)
+    bool replay = false;      // scripted responses (recorded in run.json)
+    std::string replay_dir;   // where the scripts are (recorded, so a resume can find them)
+    Json selection;           // how the functions were chosen (recorded in run.json)
 };
 
 // The bus must outlive the controller.

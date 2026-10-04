@@ -43,6 +43,10 @@ Result<std::vector<u64>> select_functions(const Program& program, const project:
             if (re && !std::regex_search(f->name, *re) && !std::regex_search(f->display, *re) &&
                 !(f->pdb_name.size() && std::regex_search(f->pdb_name, *re)))
                 continue;
+            // Linker-made thunks (incremental-linking jumps, import stubs) have no source to write.
+            if (program.thunk_destination(f->va)) continue;
+            // Without a size or a recoverable extent there is nothing to compare a candidate against.
+            if (f->size == 0 && !program.function_extent(f->va)) continue;
             out.push_back(f->va);
         }
     }

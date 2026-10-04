@@ -47,7 +47,15 @@ TEST_CASE("selection: defaults skip finished functions; filters and explicit nam
     auto all = run::select_functions(fx.program, &fx.project, {}).value();
     CHECK(std::ranges::find(all, add) == all.end());
     CHECK(std::ranges::is_sorted(all));
-    CHECK(all.size() == fx.program.symbols().functions().size() - 1);
+    // Everything but the matched add() and the ExitProcess import thunk the linker made.
+    const u64 exit_thunk = fx.va("_ExitProcess@4");  // "ExitProcess" names the import's IAT slot
+    CHECK(fx.program.thunk_destination(exit_thunk));
+    CHECK(std::ranges::find(all, exit_thunk) == all.end());
+    CHECK(all.size() == fx.program.symbols().functions().size() - 2);
+    // Named explicitly, a thunk is still selected.
+    run::Selection thunk_by_name;
+    thunk_by_name.functions = {"_ExitProcess@4"};
+    CHECK(run::select_functions(fx.program, &fx.project, thunk_by_name).value() == std::vector<u64>{exit_thunk});
 
     run::Selection everything;
     everything.include_finished = true;

@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
     cli::register_matching_commands(app, g);
     cli::register_project_commands(app, g);
     cli::register_agent_commands(app, g);
+    cli::register_run_commands(app, g);
 
     // Global options may also follow the subcommand (`decomp status --json`).
     std::function<void(CLI::App*)> allow_fallthrough = [&](CLI::App* parent) {

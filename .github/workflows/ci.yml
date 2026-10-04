@@ -71,6 +71,19 @@ jobs:
           test -f "$p/src/functions/add_401060.cpp"
           test -f "$(ls -d "$p"/.decomp/runs/*/ | head -1)summary.json"
 
+      - name: Batch run smoke test
+        run: |
+          # Every function of the x86 fixture on 4 workers with scripted responses: 8 match, the rest give up.
+          p="$(mktemp -d)/project"
+          ./bin/Release/decomp init tests/fixtures/x86/basic.exe --dir "$p" --toolchain clang-cl-x86 \
+            --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+          ./bin/Release/decomp -C "$p" run --all --workers 4 --replay-dir tests/replay/run
+          ./bin/Release/decomp -C "$p" runs list
+          run_id="$(ls "$p/.decomp/runs" | head -1)"
+          ./bin/Release/decomp -C "$p" --json runs show "$run_id" > shown.json
+          python3 tests/integration/check_run_summary.py shown.json "$p/.decomp/runs/$run_id/summary.json" 8
+          test "$(ls "$p"/src/functions/*.cpp | wc -l)" -eq 8
+
   windows:
     name: Windows (MSVC)
     runs-on: windows-latest
