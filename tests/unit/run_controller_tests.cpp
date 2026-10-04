@@ -263,6 +263,9 @@ TEST_CASE("run controller: the first session runs alone until the API answers (s
     Harness h;
     RunOptions o = h.options(4);
     o.stagger_timeout = 10s;
+    // The order in which sessions were handed to a worker (FakeSessions::dispatch_order records when a
+    // session gets going, which for the first one is after the others were let in).
+    std::vector<u64> entered;
     // The fake session reports its first message only after being released.
     h.controller = std::make_unique<RunController>(
         RunDeps{.run_session =
@@ -272,6 +275,7 @@ TEST_CASE("run controller: the first session runs alone until the API answers (s
                         delayed.config.on_first_message = nullptr;
                         {
                             std::unique_lock lock(h.sessions.mutex);
+                            entered.push_back(r.va);
                             if (r.va == 0x1000)
                                 h.sessions.cv.wait_for(lock, 10s, [&] { return h.sessions.released.contains(0x1000); });
                         }
@@ -284,11 +288,13 @@ TEST_CASE("run controller: the first session runs alone until the API answers (s
     {
         std::lock_guard lock(h.sessions.mutex);
         CHECK(h.sessions.started == 0);  // the first one waits for its first message; nobody else started
+        CHECK(entered == std::vector<u64>{0x1000});
     }
     h.sessions.release(0x1000);
     h.controller->wait();
     CHECK(h.sessions.started == 8);
-    CHECK(h.sessions.dispatch_order.front() == 0x1000);
+    CHECK(entered.size() == 8);
+    CHECK(entered.front() == 0x1000);
 }
 
 TEST_CASE("run controller: pause, per-worker pause and resume") {
