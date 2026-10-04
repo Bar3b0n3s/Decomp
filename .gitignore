@@ -1,0 +1,14 @@
+# Build output
+/build/
+/bin/
+
+# Editor / OS
+.vs/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Decomp project working data (when a project lives inside this repo, e.g. examples)
+.decomp/

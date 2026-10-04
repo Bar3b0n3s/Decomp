@@ -1,0 +1,6 @@
+[submodule "external/zydis"]
+	path = external/zydis
+	url = https://github.com/zyantific/zydis
+[submodule "external/raw_pdb"]
+	path = external/raw_pdb
+	url = https://github.com/MolecularMatters/raw_pdb
