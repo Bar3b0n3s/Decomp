@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <map>
 
 extern char** environ;
@@ -52,6 +53,20 @@ std::optional<std::string> resolve_program(const std::string& program, const std
 
 void set_nonblocking(int fd) { ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK); }
 
+// Pipes are close-on-exec, so a process started concurrently by another thread never inherits our
+// pipe ends (it would keep them open and delay EOF until it exits). dup2() onto 0/1/2 in the child
+// clears the flag on the copies it keeps.
+int make_pipe(int fds[2]) {
+#ifdef __linux__
+    return ::pipe2(fds, O_CLOEXEC);
+#else
+    if (::pipe(fds) != 0) return -1;
+    ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#endif
+}
+
 } // namespace
 
 Result<ProcessResult> run_process(const ProcessSpec& spec) {
@@ -74,12 +89,12 @@ Result<ProcessResult> run_process(const ProcessSpec& spec) {
     std::string cwd = spec.cwd.empty() ? std::string() : spec.cwd.string();
 
     int out_pipe[2], err_pipe[2], in_pipe[2];
-    if (::pipe(out_pipe) != 0) return make_error(ErrorCode::process, "pipe: {}", std::strerror(errno));
-    if (::pipe(err_pipe) != 0) {
+    if (make_pipe(out_pipe) != 0) return make_error(ErrorCode::process, "pipe: {}", std::strerror(errno));
+    if (make_pipe(err_pipe) != 0) {
         ::close(out_pipe[0]); ::close(out_pipe[1]);
         return make_error(ErrorCode::process, "pipe: {}", std::strerror(errno));
     }
-    if (::pipe(in_pipe) != 0) {
+    if (make_pipe(in_pipe) != 0) {
         ::close(out_pipe[0]); ::close(out_pipe[1]); ::close(err_pipe[0]); ::close(err_pipe[1]);
         return make_error(ErrorCode::process, "pipe: {}", std::strerror(errno));
     }
@@ -123,7 +138,13 @@ Result<ProcessResult> run_process(const ProcessSpec& spec) {
     bool out_open = true, err_open = true;
     char buf[65536];
     while (out_open || err_open) {
-        int wait_ms = -1;
+        // Waits are sliced so that cancellation is noticed within about 100 ms.
+        int wait_ms = 100;
+        if (spec.cancelled && spec.cancelled()) {
+            result.cancelled = true;
+            ::kill(-pid, SIGKILL);
+            break;
+        }
         if (spec.timeout.count() > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
             if (elapsed >= spec.timeout) {
@@ -131,7 +152,7 @@ Result<ProcessResult> run_process(const ProcessSpec& spec) {
                 ::kill(-pid, SIGKILL);
                 break;
             }
-            wait_ms = static_cast<int>((spec.timeout - elapsed).count());
+            wait_ms = static_cast<int>(std::min<long long>(wait_ms, (spec.timeout - elapsed).count()));
         }
         pollfd fds[2];
         int nfds = 0;
@@ -167,7 +188,7 @@ Result<ProcessResult> run_process(const ProcessSpec& spec) {
     result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
     if (WIFEXITED(status)) result.exit_code = WEXITSTATUS(status);
     else if (WIFSIGNALED(status)) result.exit_code = 128 + WTERMSIG(status);
-    if (!result.timed_out && result.exit_code == 127 && result.err.empty())
+    if (!result.timed_out && !result.cancelled && result.exit_code == 127 && result.err.empty())
         return make_error(ErrorCode::process, "failed to execute '{}'", *program);
     return result;
 }

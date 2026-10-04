@@ -170,8 +170,8 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
         bus.subscribe([log = event_log.get()](const events::Event& e) { log->write(e); });
     }
     // Warnings and errors logged during the run become events, so the run log and the views keep them.
-    const int log_sink = log::add_sink([&bus](log::Level level, std::string_view, std::string_view message) {
-        if (level >= log::Level::warn) bus.publish(events::LogLine{std::string(log::to_string(level)), std::string(message)}, -1);
+    const int log_sink = log::add_sink([&bus](const log::Entry& e) {
+        if (e.level >= log::Level::warn) bus.publish(events::LogLine{std::string(log::to_string(e.level)), e.message}, e.worker);
     });
     struct SinkGuard {
         int id;

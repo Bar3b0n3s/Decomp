@@ -152,12 +152,17 @@ Result<ProcessResult> run_process(const ProcessSpec& spec) {
     std::thread out_reader([&] { read_all(out_r.get(), result.out); });
     std::thread err_reader([&] { read_all(err_r.get(), result.err); });
 
-    DWORD timeout_ms = spec.timeout.count() > 0 ? static_cast<DWORD>(spec.timeout.count()) : INFINITE;
-    if (WaitForSingleObject(process.get(), timeout_ms) == WAIT_TIMEOUT) {
-        result.timed_out = true;
+    // Waits are sliced so that cancellation is noticed within about 100 ms.
+    while (WaitForSingleObject(process.get(), 100) == WAIT_TIMEOUT) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+        const bool expired = spec.timeout.count() > 0 && elapsed >= spec.timeout;
+        const bool cancel = !expired && spec.cancelled && spec.cancelled();
+        if (!expired && !cancel) continue;
+        (expired ? result.timed_out : result.cancelled) = true;
         if (job.get()) TerminateJobObject(job.get(), 1);
         else TerminateProcess(process.get(), 1);
         WaitForSingleObject(process.get(), 5000);
+        break;
     }
     // Kill anything the child left behind that still holds our pipes open.
     if (job.get()) TerminateJobObject(job.get(), 0);

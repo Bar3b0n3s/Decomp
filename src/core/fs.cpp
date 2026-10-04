@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <random>
+#include <thread>
 
 namespace decomp::fs {
 
@@ -60,12 +61,19 @@ Result<void> write_impl(const stdfs::path& path, const char* data, usize size, b
         out.write(data, static_cast<std::streamsize>(size));
         if (!out) return make_error(ErrorCode::io, "cannot write '{}'", to_utf8(tmp));
     }
-    stdfs::rename(tmp, path, ec);
-    if (ec) {
-        stdfs::remove(tmp, ec);
-        return make_error(ErrorCode::io, "cannot replace '{}'", to_utf8(path));
+    // On Windows a replace fails while another process (a reader, an indexer, a virus scanner) has the
+    // target open; such failures are transient, so they are retried for a while.
+    for (int attempt = 0;; ++attempt) {
+        stdfs::rename(tmp, path, ec);
+        if (!ec) return {};
+        const bool transient = ec == std::errc::permission_denied || ec == std::errc::device_or_resource_busy ||
+                               ec == std::errc::resource_unavailable_try_again;
+        if (!transient || attempt >= 40) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::min(10 * (attempt + 1), 100)));
     }
-    return {};
+    std::error_code ignored;
+    stdfs::remove(tmp, ignored);
+    return make_error(ErrorCode::io, "cannot replace '{}': {}", to_utf8(path), ec.message());
 }
 
 } // namespace

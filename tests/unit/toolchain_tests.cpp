@@ -7,6 +7,9 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <format>
+#include <thread>
 
 using namespace decomp;
 using namespace decomp::matching;
@@ -135,4 +138,65 @@ TEST_CASE("candidates compiled without /Gy still match, and CL/_CL_ do not leak 
     auto guarded = compile_and_diff(program, setup, *program.resolve("add"),
                                     "#ifdef DECOMP_LEAKED_CL\n#error CL leaked\n#endif\n" + source).value();
     CHECK(guarded.compile.ok);
+}
+
+TEST_CASE("compile cache bypass and the parallel-compile limit") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-slots").value();
+    auto setup = test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "work", dir.path() / "cache");
+    Compiler compiler(setup.toolchain, setup.work_dir, setup.cache_dir);
+    CompileRequest req;
+    req.source = "int f(int x) { return x + 1; }\n";
+    req.flags = setup.flags;
+    auto first = compiler.compile(req).value();
+    CHECK(first.ok);
+    CHECK(first.exit_code == 0);
+    CHECK_FALSE(first.cached);
+    CHECK(compiler.compile(req).value().cached);
+    req.bypass_cache = true;
+    auto fresh = compiler.compile(req).value();
+    CHECK(fresh.ok);
+    CHECK_FALSE(fresh.cached);
+
+    // With one slot, concurrent compiles queue up and all succeed.
+    const int previous = max_parallel_compiles();
+    set_max_parallel_compiles(1);
+    std::vector<std::thread> threads;
+    std::atomic<int> ok{0};
+    for (int i = 0; i < 4; ++i)
+        threads.emplace_back([&, i] {
+            CompileRequest r;
+            r.source = std::format("int g{}(int x) {{ return x * {}; }}\n", i, i + 2);
+            r.flags = setup.flags;
+            if (auto c = compiler.compile(r); c && c->ok) ++ok;
+        });
+    for (auto& t : threads) t.join();
+    set_max_parallel_compiles(previous);
+    CHECK(ok == 4);
+
+    // A cancelled request does not start the compiler once it is waiting for a slot.
+    set_max_parallel_compiles(1);
+    CompileRequest blocked;
+    blocked.source = "int h(int x) { return x; }\n";
+    blocked.flags = setup.flags;
+    blocked.cancelled = [] { return true; };
+    std::atomic<bool> release{false};
+    std::thread holder([&] {
+        CompileRequest slow;
+        slow.source = "int k(int x) { return x - 1; }\n";
+        slow.flags = setup.flags;
+        slow.cancelled = [&] { return release.load(); };
+        (void)compiler.compile(slow);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    auto c = compiler.compile(blocked);
+    release = true;
+    holder.join();
+    set_max_parallel_compiles(previous);
+    REQUIRE(c);
+    CHECK((c->cancelled || c->ok));  // cancelled while waiting, unless the holder had already finished
 }

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -79,6 +80,8 @@ struct CompileRequest {
     std::vector<std::string> flags;                      // project flags, after the toolchain's
     std::vector<std::filesystem::path> include_dirs;     // project include directories
     std::string file_name = "candidate.cpp";
+    bool bypass_cache = false;                           // compile even when a cached result exists
+    std::function<bool()> cancelled;                     // polled while waiting and compiling
 };
 
 struct CompileResult {
@@ -91,7 +94,14 @@ struct CompileResult {
     std::chrono::milliseconds duration{0};
     bool cached = false;
     bool timed_out = false;
+    bool cancelled = false;
+    int exit_code = -1;  // of the compiler process (-1 when it did not run)
 };
+
+// At most this many compiler processes run at once in this process (default: the number of hardware
+// threads); compiles beyond it wait for a slot.
+void set_max_parallel_compiles(int count);
+int max_parallel_compiles();
 
 class Compiler {
 public:

@@ -1,9 +1,11 @@
 #pragma once
 
 #include "core/result.hpp"
+#include "core/types.hpp"
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -20,6 +22,8 @@ struct ProcessSpec {
     std::vector<std::pair<std::string, std::optional<std::string>>> env;
     std::chrono::milliseconds timeout{0};  // 0 = no timeout
     std::string stdin_data;
+    // Polled about every 100 ms while the process runs; returning true kills it (and its children).
+    std::function<bool()> cancelled;
 };
 
 struct ProcessResult {
@@ -27,9 +31,10 @@ struct ProcessResult {
     std::string out;
     std::string err;
     bool timed_out = false;
+    bool cancelled = false;
     std::chrono::milliseconds duration{0};
 
-    bool ok() const { return !timed_out && exit_code == 0; }
+    bool ok() const { return !timed_out && !cancelled && exit_code == 0; }
 };
 
 // Runs a process to completion, capturing stdout and stderr. Fails only when the process cannot be
@@ -38,6 +43,9 @@ Result<ProcessResult> run_process(const ProcessSpec& spec);
 
 // Reads an environment variable of the current process.
 std::optional<std::string> get_env(std::string_view name);
+
+// The id of the current process.
+u64 current_process_id();
 
 // Quotes one argument following the MSVCRT/CommandLineToArgvW rules.
 std::string quote_windows_arg(std::string_view arg);

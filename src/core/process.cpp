@@ -6,6 +6,8 @@
 #ifdef _WIN32
 #include "core/strings.hpp"
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace decomp {
@@ -63,6 +65,14 @@ std::optional<std::string> get_env(std::string_view name) {
     const char* v = std::getenv(std::string(name).c_str());
     if (!v) return std::nullopt;
     return std::string(v);
+#endif
+}
+
+u64 current_process_id() {
+#ifdef _WIN32
+    return GetCurrentProcessId();
+#else
+    return static_cast<u64>(::getpid());
 #endif
 }
 

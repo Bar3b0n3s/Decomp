@@ -8,6 +8,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <format>
 #include <regex>
 
@@ -332,6 +335,55 @@ std::string Compiler::cache_key(const CompileRequest& request) const {
     return to_hex(h.finish());
 }
 
+namespace {
+
+class CompileSlots {
+public:
+    bool acquire(const std::function<bool()>& cancelled) {
+        std::unique_lock lock(mutex_);
+        while (used_ >= limit_) {
+            if (cancelled && cancelled()) return false;
+            cv_.wait_for(lock, std::chrono::milliseconds(100));
+        }
+        ++used_;
+        return true;
+    }
+    void release() {
+        {
+            std::lock_guard lock(mutex_);
+            --used_;
+        }
+        cv_.notify_one();
+    }
+    void set_limit(int limit) {
+        {
+            std::lock_guard lock(mutex_);
+            limit_ = std::max(1, limit);
+        }
+        cv_.notify_all();
+    }
+    int limit() {
+        std::lock_guard lock(mutex_);
+        return limit_;
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    int limit_ = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    int used_ = 0;
+};
+
+CompileSlots& compile_slots() {
+    static CompileSlots slots;
+    return slots;
+}
+
+} // namespace
+
+void set_max_parallel_compiles(int count) { compile_slots().set_limit(count); }
+int max_parallel_compiles() { return compile_slots().limit(); }
+
 Result<CompileResult> Compiler::compile(const CompileRequest& request) const {
     CompileResult result;
     std::string key = cache_key(request);
@@ -340,7 +392,7 @@ Result<CompileResult> Compiler::compile(const CompileRequest& request) const {
         cached_obj = *cache_dir_ / (key + ".obj");
         cached_meta = *cache_dir_ / (key + ".json");
         std::error_code ec;
-        if (std::filesystem::exists(*cached_meta, ec)) {
+        if (!request.bypass_cache && std::filesystem::exists(*cached_meta, ec)) {
             auto meta = fs::read_text(*cached_meta).and_then([](const std::string& t) { return parse_json(t); });
             if (meta) {
                 result.ok = meta->value("ok", false);
@@ -357,8 +409,9 @@ Result<CompileResult> Compiler::compile(const CompileRequest& request) const {
         }
     }
 
+    // Unique across threads and processes sharing the work directory.
     static std::atomic<u64> counter{0};
-    auto dir = work_dir_ / std::format("c{}-{}", key.substr(0, 12), counter.fetch_add(1));
+    auto dir = work_dir_ / std::format("c{}-{}-{}", key.substr(0, 12), current_process_id(), counter.fetch_add(1));
     TRY(fs::create_directories(dir));
     auto source = dir / fs::from_utf8(request.file_name);
     auto object = dir / (toolchain_.msvc_style() ? "candidate.obj" : "candidate.o");
@@ -392,9 +445,19 @@ Result<CompileResult> Compiler::compile(const CompileRequest& request) const {
         spec.argv.push_back("@" + fs::to_utf8(rsp));
     }
 
-    TRY_ASSIGN(auto proc, run_process(spec));
+    spec.cancelled = request.cancelled;
+    if (!compile_slots().acquire(request.cancelled)) {
+        result.cancelled = true;
+        result.output = "[compile cancelled]";
+        return result;
+    }
+    auto proc_result = run_process(spec);
+    compile_slots().release();
+    TRY_ASSIGN(auto proc, std::move(proc_result));
     result.duration = proc.duration;
     result.timed_out = proc.timed_out;
+    result.cancelled = proc.cancelled;
+    result.exit_code = proc.exit_code;
     result.output = proc.out + proc.err;
     // MSVC echoes the source file name on success; drop that noise.
     if (toolchain_.msvc_style()) {
@@ -409,8 +472,9 @@ Result<CompileResult> Compiler::compile(const CompileRequest& request) const {
         TRY_ASSIGN(result.object_data, fs::read_file(object));
     }
     if (proc.timed_out) result.output += std::format("\n[compiler timed out after {}s]", toolchain_.timeout_seconds);
+    if (proc.cancelled) result.output += "\n[compile cancelled]";
 
-    if (cache_dir_) {
+    if (cache_dir_ && !proc.cancelled) {
         (void)fs::create_directories(*cache_dir_);
         if (result.ok && fs::write_file(*cached_obj, result.object_data)) result.object = *cached_obj;
         if (!proc.timed_out) (void)fs::write_text(*cached_meta, dump_compact(Json{{"ok", result.ok}, {"output", result.output}}));
