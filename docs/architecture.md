@@ -105,6 +105,7 @@ Lower layers never include higher ones:
 
 ```
 cli, gui                  entry points; argument parsing, rendering
+  viewmodel               what the GUI's views show, derived without ImGui (progress, tables, charts, notifications)
   run                     selection, work queue, run directories, RunController (N workers)
   agent                   run_loop, tools, Claude client, rate gate, approvals, MatchSession, runner
     project               decomp.json, symbols.txt, history, verified sources, locks, change logs
@@ -196,9 +197,13 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   and age do not match is ignored), builds the `SymbolDb`, and moves names off incremental-linking
   thunks. `with_symbols()` makes a new *symbol generation* that shares the image and decoder; workers
   hold a `shared_ptr<const Program>`, so a symbol edit during a run builds a new generation that later
-  sessions pick up while running sessions keep theirs. It resolves names and addresses (`resolve()`), finds function extents and instructions, scans
-  cross-references on first use (`xrefs_to()`, `callers_of()`), and follows linker thunks
+  sessions pick up while running sessions keep theirs. It resolves names and addresses (`resolve()`),
+  finds function extents and instructions, scans cross-references on first use (`xrefs_to()`,
+  `callers_of()`; `xrefs_from()` lists what one function references: calls, jumps out, reads, writes
+  and addresses), and follows linker thunks
   (`thunk_destination()`).
+- `scan_strings()` (`analysis/strings.hpp`): ASCII and UTF-16LE strings in the non-executable sections,
+  cut at symbol boundaries; `string_refs()` finds the functions that use one.
 - `SymbolDb`: `std::map<va, Symbol>` with `Symbol{name (decorated), display (demangled), pdb_name,
   kind: function | data | string | float | import | label | unknown, size, source: analysis | import |
   export | pdb_public | pdb | agent | user, is_static, aliases}` and both exact and containing-address
@@ -345,6 +350,26 @@ options, and exits with 0 when matched, 2 when not matched, 3 when refused and 1
 `--policy`, `--replay-dir`, `--resume <id>` and `--interactive`, and exits with 0 when the run
 completed, 2 when it stopped or ran out of budget (resumable) and 1 when it was aborted or failed.
 Errors are printed as `error: <message>` with exit code 1.
+
+### viewmodel
+
+Everything a GUI view displays beyond the raw snapshot is computed here (`src/viewmodel/`, namespace
+`decomp::vm`, part of `decomp_lib`), as pure functions over a `RunStateData` snapshot, the project's
+state and the run files, with no ImGui. Views only draw the results, and expensive derivations run as
+background jobs; each header says what its functions cost.
+
+| Header | Provides |
+|---|---|
+| `progress.hpp` | Dashboard progress: `decomp status`'s numbers, status segments with the live overlay, the best-match distribution, progress over time from run summaries |
+| `treemap.hpp` | Squarified treemap layout, the treemap of the code by section, hit testing |
+| `difficulty.hpp`, `eta.hpp` | Code features and a difficulty score per function; session durations by size bucket and the queue's ETA |
+| `function_table.hpp` | Function browser rows, filter and multi-column sort (an index permutation) |
+| `series.hpp` | Chart series: throughput per minute, spend, cache-hit rate, scores per attempt, the worker timeline |
+| `cost.hpp` | Spend by run, day, model and function; per-match figures; the projection for the remaining functions |
+| `transcript.hpp` | The incremental transcript reader and its Markdown export |
+| `line_diff.hpp` | Myers line diffs, unified hunks and side-by-side rows |
+| `notification_rules.hpp` | The [notifications](ui.md#notifications), each posted once |
+| `exports.hpp` | Progress, cost, function list and diff exports (Markdown, JSON, CSV) |
 
 ### gui
 

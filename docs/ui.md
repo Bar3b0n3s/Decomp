@@ -315,7 +315,8 @@ filtering run as background jobs over the snapshot.
 **Data sources**
 
 - `pe::Image` and `pdb::Reader`, `SymbolDb` and analysis. The slice provides callers, callees, a
-  cross-reference scan over the functions with known sizes (`Program::xrefs_to`) and Rich-header
+  cross-reference scan over the functions with known sizes (`Program::xrefs_to`, and
+  `Program::xrefs_from` for one function), the string scan (`scan_strings`) and Rich-header
   descriptions for VC6 to Visual Studio 2005; Phase 2 adds a full cross-reference index, a complete
   compiler table and RTTI class names.
 
@@ -580,6 +581,16 @@ Default bindings (provisional):
 | Approval requested (Phase 1) | Warning | Yes | Changes and approvals |
 | A fallback model served a turn | Info | No, history only | Agent session |
 
+The rules are `vm::NotificationRules` (`src/viewmodel/notification_rules.hpp`), applied to every new
+snapshot. A notification is keyed by what the run recorded (session, approval id, event time), so a
+repeated or replayed snapshot and a resumed run never repeat one, and a past run opened after
+`prime()` posts nothing. Three or more per-function notifications of one kind within 1.5 seconds become
+one summary. Detection is limited to what the snapshot records: an authentication error is a 401 or
+403 (or a missing key) in a session's error or in the log; a storm is five or more retries after a 429
+in two consecutive minutes; a toolchain failure is a compile that timed out, crashed, wrote no object,
+or failed without a single diagnostic, or a compile tool call that failed because the compiler could
+not be started. Health checks report through the Toolchains view.
+
 ## Accessibility
 
 - **Colorblind-safe palettes.** The default diff palette is chosen to stay distinguishable under the
@@ -765,7 +776,8 @@ which `events.jsonl` omits and the transcript holds in full.
 - **Progress view tests** (in the slice). The rendered status block and the plain-line output are
   checked for a scripted run.
 - **View-model tests** (Phase 1). Pure derivations (table rows, feed sentences, chart series, ETAs) are
-  tested without ImGui.
+  tested without ImGui: `src/viewmodel/` and `tests/unit/viewmodel_*_tests.cpp`, including transcripts
+  written by the real runner and 100,000-function tables and treemaps.
 - **Headless ImGui smoke test** (Phase 1). An ImGui context with no window or GPU backend (font atlas
   built, display size set) renders every view for several frames against synthetic snapshots: empty,
   huge, mid-stream and error states. ImGui assertions are turned into test failures. This runs in CI
