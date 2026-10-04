@@ -1,7 +1,12 @@
 #include "core/fs.hpp"
+#include "matching/match.hpp"
 #include "matching/toolchain.hpp"
+#include "llvm_fixture.hpp"
+#include "test_util.hpp"
 
 #include <doctest/doctest.h>
+
+#include <algorithm>
 
 using namespace decomp;
 using namespace decomp::matching;
@@ -92,4 +97,42 @@ TEST_CASE("compiler command lines") {
     Compiler g(gcc, "work");
     auto gcmd = g.command_line(CompileRequest{}, "a.cpp", "a.o");
     CHECK(gcmd == std::vector<std::string>{"g++", "-c", "-o", "a.o", "a.cpp"});
+
+    // MSVC-style candidates always get /Gy (one COMDAT per function), even when the target used /Gy-.
+    CompileRequest plain;
+    plain.flags = {"/O2"};
+    auto with_gy = c.command_line(plain, "x.cpp", "x.obj");
+    CHECK(std::ranges::count(with_gy, std::string("/Gy")) == 1);
+    plain.flags = {"/Gy-", "/O1"};
+    auto overridden = c.command_line(plain, "x.cpp", "x.obj");
+    CHECK(std::ranges::find(overridden, std::string("/Gy")) > std::ranges::find(overridden, std::string("/Gy-")));
+}
+
+TEST_CASE("candidates compiled without /Gy still match, and CL/_CL_ do not leak into compiles") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-gy").value();
+    auto exe = test::build_fixture_program(Arch::x86, *tools, dir.path() / "target");
+    REQUIRE(exe);
+    auto program = Program::open(*exe).value();
+    auto setup = test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "work");
+    std::erase(setup.flags, std::string("/Gy"));
+    setup.flags.push_back("/Gy-");
+    const auto source = fs::read_text(test::fixture("src/basic.cpp")).value();
+    for (const char* fn : {"dispatch", "add", "entry"}) {
+        CAPTURE(fn);
+        auto r = compile_and_diff(program, setup, *program.resolve(fn), source).value();
+        REQUIRE(r.compile.ok);
+        REQUIRE(r.diff);
+        CHECK(r.diff->byte_exact);
+    }
+
+    // CL is read by cl.exe and clang-cl as extra options; the driver clears it.
+    test::ScopedEnv cl("CL", "/DDECOMP_LEAKED_CL");
+    auto guarded = compile_and_diff(program, setup, *program.resolve("add"),
+                                    "#ifdef DECOMP_LEAKED_CL\n#error CL leaked\n#endif\n" + source).value();
+    CHECK(guarded.compile.ok);
 }

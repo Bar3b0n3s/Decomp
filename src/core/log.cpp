@@ -6,6 +6,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #ifdef _WIN32
 #include <io.h>
@@ -96,33 +97,37 @@ void remove_sink(int id) {
 
 void write(Level level, std::string_view module, std::string_view message) {
     auto& s = state();
-    std::lock_guard lock(s.mutex);
-    if (s.to_stderr && enabled(level)) {
-        std::string line;
-        if (s.color) line += color_for(level);
-        if (level != Level::info) {
-            line += to_string(level);
-            line += ": ";
+    std::vector<Sink> sinks;
+    {
+        std::lock_guard lock(s.mutex);
+        if (s.to_stderr && enabled(level)) {
+            std::string line;
+            if (s.color) line += color_for(level);
+            if (level != Level::info) {
+                line += to_string(level);
+                line += ": ";
+            }
+            if (!module.empty()) {
+                line += "[";
+                line += module;
+                line += "] ";
+            }
+            line += message;
+            if (s.color && !color_for(level).empty()) line += "\x1b[0m";
+            line += '\n';
+            std::fwrite(line.data(), 1, line.size(), stderr);
         }
-        if (!module.empty()) {
-            line += "[";
-            line += module;
-            line += "] ";
+        if (s.file.is_open()) {
+            auto now = std::chrono::system_clock::now();
+            s.file << std::format("{:%Y-%m-%dT%H:%M:%S} {} {}{}\n", std::chrono::floor<std::chrono::seconds>(now),
+                                  to_string(level), module.empty() ? "" : std::string(module) + ": ", message);
+            s.file.flush();
         }
-        line += message;
-        if (s.color && !color_for(level).empty()) line += "\x1b[0m";
-        line += '\n';
-        std::fwrite(line.data(), 1, line.size(), stderr);
+        if (enabled(level))
+            for (const auto& [id, sink] : s.sinks) sinks.push_back(sink);
     }
-    if (s.file.is_open()) {
-        auto now = std::chrono::system_clock::now();
-        s.file << std::format("{:%Y-%m-%dT%H:%M:%S} {} {}{}\n", std::chrono::floor<std::chrono::seconds>(now),
-                              to_string(level), module.empty() ? "" : std::string(module) + ": ", message);
-        s.file.flush();
-    }
-    if (enabled(level)) {
-        for (auto& [id, sink] : s.sinks) sink(level, module, message);
-    }
+    // Sinks run outside the lock, so a sink may itself log (for example through event handlers).
+    for (const auto& sink : sinks) sink(level, module, message);
 }
 
 } // namespace decomp::log

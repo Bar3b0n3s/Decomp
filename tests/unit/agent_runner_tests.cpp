@@ -275,12 +275,17 @@ TEST_CASE("agent runner: a stop request ends the session between turns") {
         tool_turn("toolu_1", "lookup_symbol", {{"query", "add"}}),
         tool_turn("toolu_2", "lookup_symbol", {{"query", "never sent"}}),
     });
+    bool saved_in_progress = true;
     auto transport = std::make_shared<HookTransport>(replay, [&](int n) {
-        if (n == 1) control.request_stop();
+        if (n != 1) return;
+        control.request_stop();
+        // While the session runs, symbols.txt keeps the last real status (a crash leaves nothing stale).
+        saved_in_progress = fs::read_text(fx.project.root() / "symbols.txt").value().find("in_progress") != std::string::npos;
     });
     events::EventBus bus("run-stop");
     const FunctionRunResult r = run_function(fx.program, &fx.project, fx.setup(), fx.add, replay_config(transport), bus, {}, &control);
     CHECK(r.outcome == "stopped");
+    CHECK_FALSE(saved_in_progress);
     CHECK(r.turns == 1);
     CHECK(replay->requests().size() == 1);
     CHECK(fx.project.function_info(fx.add).status == project::FunctionStatus::unstarted);

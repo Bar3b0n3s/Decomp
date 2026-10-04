@@ -171,8 +171,9 @@ void register_matching_commands(CLI::App& app, GlobalOptions& g) {
                     else std::println("{:#010x} {:6.1f}% {} {}", f->va, d->match_percent, d->byte_exact ? "OK " : "   ", f->display);
                 }
                 if (g.json) print_json({{"functions", arr}, {"matched", matched}, {"total", total}});
+                else if (total == 0) std::println("no function in {} corresponds to a target function", a->obj);
                 else std::println("{}/{} functions byte-exact", matched, total);
-                return matched == total ? 0 : 2;
+                return total > 0 && matched == total ? 0 : 2;
             }
             if (a->function.empty()) return make_error(ErrorCode::invalid_argument, "give a function, or --all");
             TRY_ASSIGN(u64 va, resolve_function(program, a->function));

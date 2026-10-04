@@ -94,7 +94,8 @@ public:
         const ResponseCost cost = response_cost(response, model_);
         if (cost.unknown_model && !warned_price_) {
             warned_price_ = true;
-            log::warn("no price known for model '{}': spend is not tracked and the USD budget cannot stop the run", response.model);
+            log::warn("no price known for model '{}': spend and the USD budget are estimated with {} prices", response.model,
+                      price_for(model_).model);
         }
         const auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - turn_started_);
         bus_.publish(events::TurnFinished{session_, turn, response.stop_reason, to_event_usage(cost.usage), cost.usd, latency.count()}, worker_);
@@ -201,13 +202,9 @@ FunctionRunResult run_function(const Program& program, project::Project* project
     const std::string display = sym.display.empty() ? sym.name : sym.display;
     bus.publish(events::SessionStarted{session_id, sym.name, display, va}, worker);
 
+    // "in_progress" is only announced, not saved: a crash must not leave it behind in symbols.txt.
     const project::FunctionInfo before = project ? project->function_info(va) : project::FunctionInfo{};
-    if (project && before.status != project::FunctionStatus::matched) {
-        project::FunctionInfo info = before;
-        info.status = project::FunctionStatus::in_progress;
-        if (auto r = project->update_function(va, info); !r) log::warn("cannot update symbols.txt: {}", r.error().message);
-        else bus.publish(events::StatusChanged{display, va, "in_progress"}, worker);
-    }
+    if (before.status != project::FunctionStatus::matched) bus.publish(events::StatusChanged{display, va, "in_progress"}, worker);
 
     ToolRegistry tools = make_tools(session);
     Conversation conversation(config.conversation, system_prompt(), tools.definitions());

@@ -106,6 +106,7 @@ public:
 
 private:
     std::string cache_key(const CompileRequest& request) const;
+    bool needs_function_sections(const CompileRequest& request) const;
     Toolchain toolchain_;
     std::filesystem::path work_dir_;
     std::optional<std::filesystem::path> cache_dir_;

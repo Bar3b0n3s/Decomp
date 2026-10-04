@@ -249,7 +249,10 @@ Result<Program> Project::open_program() const {
     if (!config_.target_sha1.empty()) {
         auto actual = sha1_hex(program.image().data());
         if (actual != config_.target_sha1)
-            log::warn("target '{}' SHA-1 is {} but decomp.json expects {}", config_.target, actual, config_.target_sha1);
+            return make_error(ErrorCode::invalid_argument,
+                              "target '{}' has changed: its SHA-1 is {} but decomp.json expects {}. The project's symbols and "
+                              "results describe the old binary; if the new one is intended, update target.sha1 in decomp.json",
+                              config_.target, actual, config_.target_sha1);
     }
     for (const auto& s : symbol_overrides_) program.symbols().add(s);
     return program;

@@ -5,6 +5,8 @@
 
 #include <doctest/doctest.h>
 
+#include <fstream>
+
 using namespace decomp;
 using namespace decomp::project;
 
@@ -96,4 +98,21 @@ TEST_CASE("Project::find reports a helpful error outside a project") {
     REQUIRE_FALSE(r);
     CHECK(r.error().code == ErrorCode::not_found);
     CHECK(r.error().message.find("decomp init") != std::string::npos);
+}
+
+TEST_CASE("a changed target binary is refused") {
+    auto dir = fs::TempDir::create("decomp-sha").value();
+    auto target = dir.path() / "basic.exe";
+    std::filesystem::copy_file(test::fixture("x86/basic.exe"), target);
+    std::filesystem::copy_file(test::fixture("x86/basic.pdb"), dir.path() / "basic.pdb");
+    auto p = Project::init(dir.path() / "proj", target, std::nullopt, "clang-cl-x86").value();
+    REQUIRE(p.open_program());
+    // Append a byte: the image still loads, but it is no longer the binary the project describes.
+    {
+        std::ofstream out(target, std::ios::app | std::ios::binary);
+        out.put('\0');
+    }
+    auto changed = p.open_program();
+    REQUIRE_FALSE(changed);
+    CHECK(changed.error().message.find("has changed") != std::string::npos);
 }

@@ -141,6 +141,12 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     if (a.max_tokens >= 0) settings.max_tokens_per_function = a.max_tokens;
     if (a.max_minutes >= 0) settings.max_minutes_per_function = a.max_minutes;
     if (a.no_fallbacks) settings.fallbacks = false;
+    // The agent always sends adaptive thinking and an effort level; models without them answer 400.
+    if (settings.model.starts_with("claude-haiku"))
+        return make_error(ErrorCode::invalid_argument,
+                          "model '{}' does not support the adaptive thinking and effort settings the agent sends; use claude-opus-5-5 "
+                          "or claude-sonnet-5-5",
+                          settings.model);
     agent::AgentRunConfig config = agent::run_config_from(settings);
 
     if (!a.replay.empty()) {
@@ -163,6 +169,14 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
         event_log = std::move(opened);
         bus.subscribe([log = event_log.get()](const events::Event& e) { log->write(e); });
     }
+    // Warnings and errors logged during the run become events, so the run log and the views keep them.
+    const int log_sink = log::add_sink([&bus](log::Level level, std::string_view, std::string_view message) {
+        if (level >= log::Level::warn) bus.publish(events::LogLine{std::string(log::to_string(level)), std::string(message)}, -1);
+    });
+    struct SinkGuard {
+        int id;
+        ~SinkGuard() { log::remove_sink(id); }
+    } sink_guard{log_sink};
     const bool show_progress = a.progress || (!a.no_progress && !g.quiet && !g.json);
     events::ProgressRenderer renderer(is_tty(stderr));
     if (show_progress) renderer.attach(bus);

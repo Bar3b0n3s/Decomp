@@ -4,6 +4,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include <functional>
 #include <print>
 
 int main(int argc, char** argv) {
@@ -26,6 +27,15 @@ int main(int argc, char** argv) {
     cli::register_matching_commands(app, g);
     cli::register_project_commands(app, g);
     cli::register_agent_commands(app, g);
+
+    // Global options may also follow the subcommand (`decomp status --json`).
+    std::function<void(CLI::App*)> allow_fallthrough = [&](CLI::App* parent) {
+        for (CLI::App* sub : parent->get_subcommands([](CLI::App*) { return true; })) {
+            sub->fallthrough();
+            allow_fallthrough(sub);
+        }
+    };
+    allow_fallthrough(&app);
 
     try {
         app.parse(argc, argv);

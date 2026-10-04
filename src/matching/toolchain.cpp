@@ -274,6 +274,7 @@ std::vector<std::string> Compiler::command_line(const CompileRequest& request, c
         cmd.push_back("/c");
         cmd.insert(cmd.end(), toolchain_.flags.begin(), toolchain_.flags.end());
         cmd.insert(cmd.end(), request.flags.begin(), request.flags.end());
+        if (needs_function_sections(request)) cmd.push_back("/Gy");
         add_includes("/I");
         cmd.push_back("/Fo" + fs::to_utf8(object));
         cmd.push_back(fs::to_utf8(source));
@@ -289,10 +290,29 @@ std::vector<std::string> Compiler::command_line(const CompileRequest& request, c
     return cmd;
 }
 
+// Candidates are always compiled with /Gy: every function gets its own COMDAT section, so it can be
+// cut out of the object exactly (no padding, calls to neighbours carry relocations). /Gy changes
+// packaging only, not the code generated for a function, so targets built without it still match.
+bool Compiler::needs_function_sections(const CompileRequest& request) const {
+    if (!toolchain_.msvc_style()) return false;
+    std::optional<bool> gy;
+    auto scan = [&](const std::vector<std::string>& flags) {
+        for (const auto& f : flags) {
+            const std::string lower = to_lower(f);
+            if (lower == "/gy" || lower == "-gy") gy = true;
+            else if (lower == "/gy-" || lower == "-gy-") gy = false;
+        }
+    };
+    scan(toolchain_.flags);
+    scan(request.flags);
+    return gy != true;
+}
+
 std::string Compiler::cache_key(const CompileRequest& request) const {
     Sha1 h;
     h.update(dump_compact(toolchain_.to_json()));
     h.update(join(request.flags, "\x1f"));
+    if (needs_function_sections(request)) h.update("\x1f/Gy");
     h.update(request.source);
     // Headers can change between compiles: fold in every include directory's file sizes and timestamps.
     for (const auto& dir : request.include_dirs) {
@@ -355,6 +375,11 @@ Result<CompileResult> Compiler::compile(const CompileRequest& request) const {
     }
     if (toolchain_.kind == ToolchainKind::msvc)  // keep concurrent /Zi compiles from sharing one mspdbsrv
         spec.env.emplace_back("_MSPDBSRV_ENDPOINT_", "decomp-" + key.substr(0, 16));
+    // cl.exe and clang-cl read extra options from CL and _CL_; only the configured flags may apply.
+    if (toolchain_.msvc_style())
+        for (const char* var : {"CL", "_CL_"})
+            if (std::ranges::none_of(toolchain_.env, [&](const auto& kv) { return kv.first == var; }))
+                spec.env.emplace_back(var, std::nullopt);
     result.command = spec.argv;
 
     // Long command lines go through a response file (old cl.exe has small limits).
