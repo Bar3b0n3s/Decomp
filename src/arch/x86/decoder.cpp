@@ -100,6 +100,7 @@ std::optional<Instruction> Decoder::decode(ByteSpan bytes, u64 address) const {
         const auto& zo = zops[i];
         Operand op;
         op.size_bits = zo.size;
+        op.write = (zo.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0;
         switch (zo.type) {
         case ZYDIS_OPERAND_TYPE_REGISTER:
             op.kind = OperandKind::reg;

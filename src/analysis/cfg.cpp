@@ -1,7 +1,6 @@
 #include "analysis/cfg.hpp"
 
 #include <algorithm>
-#include <functional>
 #include <map>
 
 namespace decomp {
@@ -82,18 +81,30 @@ Cfg build_cfg(const std::vector<x86::Instruction>& ins, const std::vector<JumpTa
         }
     }
 
-    // Back edges via DFS from the entry: an edge to a block on the current DFS stack closes a loop.
+    // Back edges via DFS from the entry: an edge to a block on the current DFS stack closes a loop. The
+    // DFS keeps its own stack, so huge functions cannot overflow a thread's stack (GUI jobs run this for
+    // every function on pool threads).
     std::vector<int> state(cfg.blocks.size(), 0);  // 0 = new, 1 = on stack, 2 = done
     std::vector<std::pair<usize, usize>> back_edges;
-    std::function<void(usize)> dfs = [&](usize b) {
-        state[b] = 1;
-        for (usize s : cfg.blocks[b].successors) {
-            if (state[s] == 0) dfs(s);
-            else if (state[s] == 1) back_edges.emplace_back(b, s);
+    std::vector<std::pair<usize, usize>> stack;  // block, index of its next successor to visit
+    state[0] = 1;
+    stack.emplace_back(0, 0);
+    while (!stack.empty()) {
+        const usize b = stack.back().first;
+        const auto& successors = cfg.blocks[b].successors;
+        if (stack.back().second == successors.size()) {
+            state[b] = 2;
+            stack.pop_back();
+            continue;
         }
-        state[b] = 2;
-    };
-    dfs(0);
+        const usize s = successors[stack.back().second++];
+        if (state[s] == 0) {
+            state[s] = 1;
+            stack.emplace_back(s, 0);
+        } else if (state[s] == 1) {
+            back_edges.emplace_back(b, s);
+        }
+    }
     for (auto [from, header] : back_edges) {
         cfg.blocks[header].loop_header = true;
         // Natural loop body: blocks that reach `from` without passing through `header`.

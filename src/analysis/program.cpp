@@ -20,6 +20,7 @@ std::string_view to_string(XrefKind kind) {
     case XrefKind::jump: return "jump";
     case XrefKind::read: return "read";
     case XrefKind::address: return "address";
+    case XrefKind::write: return "write";
     }
     return "?";
 }
@@ -251,7 +252,7 @@ std::optional<JumpTable> Program::read_jump_table(const x86::Instruction& jmp, u
     return table;
 }
 
-std::optional<JumpTable> Program::read_x64_jump_table(const std::vector<x86::Instruction>& before, const x86::Instruction& jmp,
+std::optional<JumpTable> Program::read_x64_jump_table(std::span<const x86::Instruction> before, const x86::Instruction& jmp,
                                                       u64 fn_start, u64 fn_limit) const {
     // clang:  lea B, [rip+T]; movsxd R, dword ptr [B+I*4]; add R, B; jmp R          (entries: T + int32)
     // MSVC:   lea B, [rip+__ImageBase]; mov R, dword ptr [B+I*4+T_rva]; add R, B; jmp R   (entries: RVAs)
@@ -312,10 +313,7 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
         for (usize i = 0; i < list.size(); ++i) {
             const auto& ins = list[i];
             std::optional<JumpTable> table = read_jump_table(ins, start, ext.end);
-            if (!table) {
-                std::vector<x86::Instruction> before(list.begin(), list.begin() + static_cast<std::ptrdiff_t>(i));
-                table = read_x64_jump_table(before, ins, start, ext.end);
-            }
+            if (!table) table = read_x64_jump_table(std::span<const x86::Instruction>(list).first(i), ins, start, ext.end);
             if (table) {
                 if (table->table_va >= start && table->table_va < ext.end) {
                     table->inside_code = true;
@@ -410,6 +408,46 @@ Result<std::vector<x86::Instruction>> Program::function_instructions(u64 start) 
     return function_instructions(ext);
 }
 
+std::vector<Xref> Program::xrefs_in(const FunctionExtent& ext, std::span<const x86::Instruction> list) const {
+    std::vector<Xref> out;
+    const auto rva_fields = image_relative_fields(*image_, list);
+    for (const auto& ins : list) {
+        if (ins.branch_target && !ext.contains(*ins.branch_target)) {
+            auto kind = ins.flow == x86::Flow::call ? XrefKind::call : XrefKind::jump;
+            out.push_back({ins.address, ext.start, kind, *ins.branch_target});
+        }
+        for (usize i = 0; i < ins.fields.size(); ++i) {
+            const auto& f = ins.fields[i];
+            if (f.kind == x86::FieldKind::rel) continue;
+            u64 target = f.absolute;
+            bool address_like = f.rip_relative || image_->is_relocated(ins.address + f.offset) ||
+                                (!image_->has_relocations() && f.size >= 4 && image_->contains(f.absolute));
+            if (!address_like && rva_fields.contains({ins.address, i})) {
+                target = image_->image_base() + static_cast<u64>(f.raw);
+                address_like = true;
+            }
+            if (!address_like || !image_->contains(target)) continue;
+            auto kind = XrefKind::address;
+            if (f.kind == x86::FieldKind::disp) {
+                const bool stored = f.operand >= 0 && static_cast<usize>(f.operand) < ins.operands.size() &&
+                                    ins.operands[static_cast<usize>(f.operand)].write;
+                kind = stored ? XrefKind::write : XrefKind::read;
+            }
+            if (ins.flow == x86::Flow::indirect_call) kind = XrefKind::call;
+            out.push_back({ins.address, ext.start, kind, target});
+        }
+    }
+    return out;
+}
+
+std::vector<Xref> Program::xrefs_from(u64 function_va) const {
+    auto ext = function_extent(function_va);
+    if (!ext) return {};
+    auto list = function_instructions(*ext);
+    if (!list) return {};
+    return xrefs_in(*ext, *list);
+}
+
 void Program::build_xrefs() const {
     for (const auto* fn : symbols_.functions()) {
         if (fn->size == 0 || !image_->is_code(fn->va)) continue;
@@ -417,21 +455,7 @@ void Program::build_xrefs() const {
         if (!ext) continue;
         auto list = function_instructions(*ext);
         if (!list) continue;
-        for (const auto& ins : *list) {
-            if (ins.branch_target && !ext->contains(*ins.branch_target)) {
-                auto kind = ins.flow == x86::Flow::call ? XrefKind::call : XrefKind::jump;
-                xrefs_[*ins.branch_target].push_back({ins.address, fn->va, kind});
-            }
-            for (const auto& f : ins.fields) {
-                if (f.kind == x86::FieldKind::rel) continue;
-                bool address_like = f.rip_relative || image_->is_relocated(ins.address + f.offset) ||
-                                    (!image_->has_relocations() && f.size >= 4 && image_->contains(f.absolute));
-                if (!address_like || !image_->contains(f.absolute)) continue;
-                auto kind = f.kind == x86::FieldKind::disp ? XrefKind::read : XrefKind::address;
-                if (ins.flow == x86::Flow::indirect_call) kind = XrefKind::call;
-                xrefs_[f.absolute].push_back({ins.address, fn->va, kind});
-            }
-        }
+        for (auto& x : xrefs_in(*ext, *list)) xrefs_[x.to].push_back(x);
     }
 }
 

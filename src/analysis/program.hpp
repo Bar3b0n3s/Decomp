@@ -45,13 +45,17 @@ struct FunctionExtent {
     bool contains(u64 va) const { return va >= start && va < end; }
 };
 
-enum class XrefKind : u8 { call, jump, read, address };
+// call/jump: a branch that leaves the function (an indirect call through memory is a call too);
+// read/write: a memory operand the instruction reads or stores to; address: an address-valued
+// immediate (`push offset`, `mov reg, offset`).
+enum class XrefKind : u8 { call, jump, read, address, write };
 std::string_view to_string(XrefKind kind);
 
 struct Xref {
     u64 from = 0;      // instruction address
     u64 function = 0;  // start of the function containing `from` (0 if unknown)
     XrefKind kind = XrefKind::read;
+    u64 to = 0;        // the referenced address
 };
 
 // Displacements that are RVAs because their base or index register holds the image base. MSVC x64
@@ -102,6 +106,13 @@ public:
     std::vector<Xref> xrefs_to(u64 target) const;
     // Functions that call `target`.
     std::vector<u64> callers_of(u64 target) const;
+    // What the function at `function_va` references, by the rules of xrefs_to(): branches that leave
+    // it, memory operands and address-valued immediates that hold an address (relocated, RIP-relative,
+    // image-base-relative on x64, or an in-image value in an image without relocations). In
+    // instruction order; empty when there is no function to decode. Decodes the function (no index).
+    std::vector<Xref> xrefs_from(u64 function_va) const;
+    // The same for a function that is already decoded.
+    std::vector<Xref> xrefs_in(const FunctionExtent& extent, std::span<const x86::Instruction> instructions) const;
 
     // Display name for an address: symbol (+offset), import, or hex.
     std::string describe_address(u64 va) const;
@@ -117,7 +128,7 @@ private:
     void build_xrefs() const;
     std::optional<JumpTable> read_jump_table(const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const;
     // x64 tables are reached through registers; `before` holds the instructions preceding the jump.
-    std::optional<JumpTable> read_x64_jump_table(const std::vector<x86::Instruction>& before, const x86::Instruction& jmp,
+    std::optional<JumpTable> read_x64_jump_table(std::span<const x86::Instruction> before, const x86::Instruction& jmp,
                                                  u64 fn_start, u64 fn_limit) const;
     std::vector<u64> read_table_entries(const JumpTable& table, u64 fn_start, u64 fn_limit) const;
 

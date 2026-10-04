@@ -53,6 +53,7 @@ struct Operand {
     i8 field = -1;  // imm operands
     u16 ptr_segment = 0;
     u32 ptr_offset = 0;
+    bool write = false;  // the instruction writes it (for a memory operand: a store)
 };
 
 struct Instruction {
