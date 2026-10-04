@@ -265,3 +265,29 @@ TEST_CASE("snapshots are immutable and share unchanged sessions") {
     CHECK(store.snapshot()->session("a")->live_text.size() == std::string("new text").size() + 2000);
     store.detach();
 }
+
+TEST_CASE("reducer: errors are kept by kind; rate limits keep a history") {
+    RunState st;
+    u64 seq = 1;
+    auto apply = [&](Payload p, int worker = 0) { st.apply(ev(seq++, std::move(p), worker)); };
+    apply(SessionStarted{"s1", "add", "add", 0x401060});
+    apply(Retry{"s1", 1, "HTTP 529 overloaded_error: busy", 2000, 529, 0});
+    apply(ToolCallFinished{"s1", "t1", "read_memory", true, "0x9 is outside the image", 1});
+    apply(CompileFinished{"s1", false, false, 30, 3, 2, "clang-cl", "x.cpp(1): error: ..."});   // the candidate's errors: normal
+    apply(CompileFinished{"s1", false, false, 30, 0, -1, "clang-cl", "cannot start", "clang-cl-x86"});  // the compiler failed
+    apply(LogLine{"warn", "slow disk", "s1"});
+    apply(SessionFinished{"s1", "error", "HTTP 401 authentication_error: invalid x-api-key", 0, 1, 0});
+    apply(SessionFinished{"s1", "error", "again", 0, 1, 0});  // a duplicate is not counted twice
+    apply(RateLimitUpdated{50, 10, -1, -1, -1, -1, "", 0}, -1);
+    apply(RateLimitUpdated{50, 9, -1, -1, -1, -1, "", 0}, -1);
+    std::map<std::string, int> kinds;
+    for (const auto& r : st.data().error_log) ++kinds[r.kind];
+    CHECK(kinds == std::map<std::string, int>{{"api", 1}, {"compiler", 1}, {"log", 1}, {"session", 1}, {"tool", 1}});
+    const auto& api = *std::ranges::find(st.data().error_log, std::string("api"), &ErrorRecord::kind);
+    CHECK(api.status == 529);
+    CHECK(api.delay_ms == 2000);
+    CHECK(api.session == "s1");
+    CHECK(api.worker == 0);
+    REQUIRE(st.data().rate_history.size() == 2);
+    CHECK(st.data().rate_history.back().snapshot.requests_remaining == 9);
+}

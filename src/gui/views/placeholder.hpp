@@ -25,8 +25,4 @@ const std::vector<PlaceholderSpec>& placeholder_specs();
 // placeholder.
 std::unique_ptr<View> make_placeholder_view(std::string_view id);
 
-// The Settings placeholder also edits what the shell already supports (theme, font size, diff palette,
-// developer options) until the Settings view (V6) replaces it.
-std::unique_ptr<View> make_settings_placeholder_view();
-
 } // namespace decomp::gui

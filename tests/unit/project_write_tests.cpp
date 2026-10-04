@@ -107,6 +107,36 @@ TEST_CASE("matched sources keep the content they replace") {
     CHECK(changes[1]["path"].get<std::string>().find("add_401060.cpp") != std::string::npos);
 }
 
+TEST_CASE("revert_change restores the replaced content or removes a new file") {
+    Fixture fx;
+    auto program = fx.project.open_program().value();
+    const Symbol& add = *program.symbols().at(0x401060);
+    REQUIRE(fx.project.update_function(0x401060, {FunctionStatus::matched, 100, 2, 0.5}));
+    const std::string v1 = "int add(int a, int b) { return a + b; }\n";
+    fx.project.write_matched_source(add, v1, {SymbolSource::agent, "s-1", "verified match"}).value();
+    fx.project.write_matched_source(add, "// v2\n", {SymbolSource::agent, "s-2", "verified match"}).value();
+    auto changes = fx.project.changes();
+    REQUIRE(changes.size() == 2);
+    // Only the latest write of a file can be reverted: the older one no longer matches the file.
+    CHECK_FALSE(fx.project.revert_change(changes[0], {SymbolSource::user, "", ""}));
+    REQUIRE(fx.project.revert_change(changes[1], {SymbolSource::user, "", ""}));
+    const auto path = fx.project.matched_source_path(add);
+    CHECK(fs::read_text(path).value() == v1);
+    CHECK(fx.project.function_info(0x401060).status == FunctionStatus::matched);  // the restored source is a match too
+    changes = fx.project.changes();
+    REQUIRE(changes.size() == 3);
+    CHECK(changes[2]["reason"] == "revert");
+    CHECK(changes[2]["source"] == "user");
+    // Reverting the first write removes the file and the match.
+    REQUIRE(fx.project.revert_change(changes[0], {SymbolSource::user, "", ""}));
+    CHECK_FALSE(std::filesystem::exists(path));
+    CHECK(fx.project.function_info(0x401060).status == FunctionStatus::nonmatching);
+    CHECK(fx.project.function_info(0x401060).best_match == 100);
+    // The removed content is kept as a blob, like any replaced content.
+    CHECK(fx.project.read_blob(changes[0]["sha1"].get<std::string>()).value() == v1);
+    CHECK_FALSE(fx.project.revert_change(Json{{"path", "x"}}, {}));
+}
+
 TEST_CASE("target status reports SHA-1 and PDB state; one active run per project") {
     Fixture fx;
     auto program = fx.project.open_program().value();

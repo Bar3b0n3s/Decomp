@@ -86,6 +86,23 @@ struct RateLimitState {
     bool known = false;
 };
 
+struct RateLimitRecord {
+    TimePoint time{};
+    RateLimitUpdated snapshot;
+};
+
+// One problem, grouped by kind for Logs and errors.
+struct ErrorRecord {
+    TimePoint time{};
+    std::string kind;  // api (a retried request), tool, session, compiler, log
+    std::string session;
+    int worker = -1;
+    std::string message;
+    int status = 0;          // api: HTTP status (0: network or stream failure)
+    long long delay_ms = 0;  // api: the retry's delay
+    u64 seq = 0;
+};
+
 struct BudgetState {
     BudgetChanged run, function;
 };
@@ -135,6 +152,8 @@ struct RunStateData {
     std::deque<std::string> activity;  // recent human-readable lines, newest last
     u64 activity_total = 0;            // lines ever added (activity keeps only the newest)
     std::deque<std::string> errors;
+    std::deque<ErrorRecord> error_log;          // structured, newest last
+    std::deque<RateLimitRecord> rate_history;  // rate-limit snapshots, newest last
     std::deque<FileRecord> files_written;
     std::deque<std::shared_ptr<const CompileRecord>> recent_compiles;
     std::deque<std::shared_ptr<const LogRecord>> log_tail;
@@ -173,10 +192,13 @@ public:
     static constexpr usize kFiles = 500;
     static constexpr usize kControls = 200;
     static constexpr usize kSymbolChanges = 500;
+    static constexpr usize kErrorLog = 300;
+    static constexpr usize kRateHistory = 240;
 
 private:
     void activity(const Event& e, std::string line);
     void error_line(std::string line);
+    void error_record(const Event& e, std::string kind, std::string session, std::string message, int status = 0, long long delay_ms = 0);
     SessionState& session(const std::string& id);
     void set_worker_phase(const Event& e, const std::string& session_id, const std::string& phase);
     MinuteStats& minute(const Event& e);

@@ -523,6 +523,57 @@ Result<WriteReceipt> Project::write_matched_source(const Symbol& fn, const std::
     return receipt;
 }
 
+Result<void> Project::revert_change(const Json& change, const ChangeOrigin& origin) {
+    const std::string rel = json_string_or(change, "path", "");
+    const std::string sha1 = json_string_or(change, "sha1", "");
+    if (rel.empty() || sha1.empty()) return make_error(ErrorCode::invalid_argument, "not a recorded change: {}", dump_compact(change));
+    const auto path = root_ / fs::from_utf8(rel);
+    const std::optional<std::string> previous =
+        change.contains("previous_sha1") && change["previous_sha1"].is_string() ? std::optional(change["previous_sha1"].get<std::string>()) : std::nullopt;
+    const u64 va = change.contains("va") && change["va"].is_number_unsigned() ? change["va"].get<u64>() : 0;
+    std::optional<std::string> restored;
+    {
+        std::lock_guard lock(state_->mutex);
+        TRY_ASSIGN(auto file_lock, lock_project());
+        auto current = fs::read_text(path);
+        if (!current || sha1_hex(as_bytes(current->data(), current->size())) != sha1)
+            return make_error(ErrorCode::invalid_argument, "{} has changed since that write; revert the later change first", rel);
+        if (previous) {
+            TRY_ASSIGN(auto content, read_blob(*previous));
+            // The version being replaced stays available, so the revert can be undone too.
+            const auto blob = blobs_dir() / sha1;
+            std::error_code ec;
+            if (!std::filesystem::exists(blob, ec)) TRY(fs::write_text(blob, *current));
+            TRY(fs::write_text(path, content));
+            restored = std::move(content);
+        } else {
+            const auto blob = blobs_dir() / sha1;
+            std::error_code ec;
+            if (!std::filesystem::exists(blob, ec)) TRY(fs::write_text(blob, *current));
+            std::filesystem::remove(path, ec);
+            if (ec) return make_error(ErrorCode::io, "cannot remove {}: {}", rel, ec.message());
+        }
+        Json record = {{"time", now_iso()},
+                       {"path", rel},
+                       {"function", json_string_or(change, "function", "")},
+                       {"va", va},
+                       {"size", restored ? restored->size() : 0},
+                       {"sha1", restored ? Json(sha1_hex(as_bytes(restored->data(), restored->size()))) : Json(nullptr)},
+                       {"previous_sha1", sha1},
+                       {"source", std::string(to_string(origin.source))},
+                       {"session", origin.session},
+                       {"reason", origin.reason.empty() ? std::string("revert") : origin.reason}};
+        TRY(fs::append_text(root_ / ".decomp" / "changes.jsonl", dump_compact(record) + "\n"));
+    }
+    // Without its source the function is no longer matched in the project.
+    if (!restored && va != 0) {
+        TRY(modify_function(va, [](FunctionInfo& info) {
+            if (info.status == FunctionStatus::matched) info.status = FunctionStatus::nonmatching;
+        }));
+    }
+    return {};
+}
+
 Result<std::string> Project::read_blob(const std::string& sha1) const {
     if (sha1.size() != 40 || sha1.find_first_not_of("0123456789abcdef") != std::string::npos)
         return make_error(ErrorCode::invalid_argument, "not a blob id: '{}'", sha1);

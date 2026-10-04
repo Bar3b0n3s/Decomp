@@ -123,89 +123,8 @@ const PlaceholderSpec& spec_for(std::string_view id) {
     return unknown;
 }
 
-class SettingsPlaceholderView final : public View {
-public:
-    std::string_view id() const override { return "settings"; }
-    std::string_view title() const override { return "Settings"; }
-
-    void draw(ViewContext& ctx) override {
-        draw_header(ctx, spec_for("settings"));
-        ImGui::Spacing();
-        ImGui::SeparatorText("Available now");
-        Settings& s = ctx.settings;
-
-        const float field = ImGui::GetFontSize() * 14;
-        ImGui::SetNextItemWidth(field);
-        if (ImGui::BeginCombo("Theme", std::string(theme_label(s.theme)).c_str())) {
-            for (Theme t : {Theme::dark, Theme::light, Theme::high_contrast}) {
-                if (ImGui::Selectable(std::string(theme_label(t)).c_str(), s.theme == t)) {
-                    s.theme = t;
-                    ctx.mark_settings_dirty();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::SetNextItemWidth(field);
-        if (ImGui::SliderFloat("Font size", &s.font_size, Settings::kMinFontSize, Settings::kMaxFontSize, "%.0f px")) {
-            s.font_size = std::round(s.font_size);
-            ctx.mark_settings_dirty();
-        }
-        ImGui::SetNextItemWidth(field);
-        if (ImGui::BeginCombo("Diff palette", std::string(diff_palette_label(s.diff_palette)).c_str())) {
-            for (DiffPaletteKind k : {DiffPaletteKind::standard, DiffPaletteKind::okabe_ito}) {
-                if (ImGui::Selectable(std::string(diff_palette_label(k)).c_str(), s.diff_palette == k)) {
-                    s.diff_palette = k;
-                    ctx.mark_settings_dirty();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        draw_palette_preview(ctx);
-
-        ImGui::Spacing();
-        ImGui::SeparatorText("Developer");
-        ImGui::SetNextItemWidth(field * 2);
-        if (ImGui::InputTextWithHint("Replay directory", "Recorded transcripts to replay instead of calling the API",
-                                     &s.developer.replay_dir))
-            ctx.mark_settings_dirty();
-        if (s.dir.empty()) ImGui::TextDisabled("Settings are not saved (no configuration directory).");
-        else ImGui::TextDisabled("Saved in %s", fs_label(s.file()).c_str());
-    }
-
-private:
-    static std::string fs_label(const std::filesystem::path& p) { return fs::to_utf8(p); }
-
-    static void draw_palette_preview(ViewContext& ctx) {
-        const DiffPalette p = ctx.diff_palette();
-        struct Row {
-            const char* glyph;
-            ImU32 color;
-            const char* kind;
-            const char* text;
-        };
-        const Row rows[] = {
-            {"=", p.equal, "equal", "push    ebp"},
-            {"e", p.encoding, "encoding", "mov     ebp, esp"},
-            {"~", p.operand, "operand", "mov     eax, [ebp+8]"},
-            {"@", p.symbol, "symbol", "call    ?helper@@YAHH@Z"},
-            {"!", p.opcode, "opcode", "add     eax, ecx"},
-            {"+", p.insert, "insert", "nop"},
-            {"-", p.del, "delete", "pop     ebp"},
-        };
-        ImGui::PushFont(ctx.fonts.mono, 0.0f);
-        for (const Row& r : rows) {
-            ImGui::PushStyleColor(ImGuiCol_Text, r.color);
-            ImGui::Text("%s  %-24s ; %s", r.glyph, r.text, r.kind);
-            ImGui::PopStyleColor();
-        }
-        ImGui::PopFont();
-    }
-};
-
 } // namespace
 
 std::unique_ptr<View> make_placeholder_view(std::string_view id) { return std::make_unique<PlaceholderView>(spec_for(id)); }
-
-std::unique_ptr<View> make_settings_placeholder_view() { return std::make_unique<SettingsPlaceholderView>(); }
 
 } // namespace decomp::gui

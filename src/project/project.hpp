@@ -151,6 +151,11 @@ public:
     Result<WriteReceipt> write_matched_source(const Symbol& fn, const std::string& source, const ChangeOrigin& origin = {}) const;
     // Content kept for a replaced file (see WriteReceipt::previous_sha1).
     Result<std::string> read_blob(const std::string& sha1) const;
+    // Undoes a write recorded in changes.jsonl (one of changes()): restores the content it replaced, or
+    // removes the file when there was none. Refused when the file has changed since that write. The
+    // revert is recorded in changes.jsonl; a function whose matched source is removed goes back to
+    // nonmatching (its best source and attempts stay).
+    Result<void> revert_change(const Json& change, const ChangeOrigin& origin);
     std::vector<Json> changes() const;  // .decomp/changes.jsonl, oldest first
     std::vector<Json> symbol_log() const;  // .decomp/symbols.log.jsonl, oldest first
 

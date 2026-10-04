@@ -217,3 +217,29 @@ TEST_CASE("the shell drives the workspace: runs window, project dialog, quitting
     CHECK(app.wants_quit());
     CHECK(ctx.id_conflicts() == 0);
 }
+
+TEST_CASE("every view renders with a project open and a finished run, and with a past run") {
+    Fixture fx;
+    fx.open();
+    auto id = fx.workspace->start_run({});
+    REQUIRE(id);
+    REQUIRE(fx.until([&] { return !fx.workspace->run_live(); }));
+    HeadlessContext ctx;
+    Settings settings;
+    App app(fx.workspace->services(), settings);
+    auto render_all = [&](const char* label) {
+        CAPTURE(label);
+        for (const auto& view : all_view_ids()) {
+            CAPTURE(view);
+            REQUIRE(app.focus_view(view));
+            ctx.frames(3, [&] { app.frame(); });
+            CHECK(app.view_visible(view));
+        }
+        CHECK(ctx.id_conflicts() == 0);
+    };
+    render_all("finished live run");
+    fx.workspace->close_run();
+    REQUIRE(fx.workspace->open_run(*id));
+    fx.workspace->wait_loaded();
+    render_all("past run");
+}

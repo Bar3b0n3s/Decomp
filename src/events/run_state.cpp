@@ -49,6 +49,11 @@ void RunState::activity(const Event& e, std::string line) {
 
 void RunState::error_line(std::string line) { push_capped(data_.errors, std::move(line), kErrors); }
 
+void RunState::error_record(const Event& e, std::string kind, std::string session, std::string message, int status, long long delay_ms) {
+    push_capped(data_.error_log, ErrorRecord{e.time, std::move(kind), std::move(session), e.worker, std::move(message), status, delay_ms, e.seq},
+                kErrorLog);
+}
+
 void RunState::set_worker_phase(const Event& e, const std::string& session_id, const std::string& phase) {
     if (e.worker < 0) return;
     auto& w = data_.workers[e.worker];
@@ -154,6 +159,7 @@ void RunState::apply(const Event& e) {
                            ++data_.finished;
                            if (s.matched) ++data_.matched;
                        }
+                       if (p.outcome == "error" && !counted) error_record(e, "session", p.session, p.detail.empty() ? "the session failed" : p.detail);
                        set_worker_phase(e, {}, "idle");
                        activity(e, std::format("{}: {} (best {:.1f}%, {} turns, ${:.2f}){}", name_of(p.session), p.outcome, s.best_match,
                                                p.turns, s.cost_usd, p.detail.empty() ? "" : " - " + p.detail));
@@ -208,7 +214,10 @@ void RunState::apply(const Event& e) {
                    [&](const ToolCallFinished& p) {
                        auto& s = session(p.session);
                        s.last_tool_summary = p.summary;
-                       if (p.is_error) error_line(std::format("{}: {} failed: {}", name_of(p.session), p.tool, p.summary));
+                       if (p.is_error) {
+                           error_line(std::format("{}: {} failed: {}", name_of(p.session), p.tool, p.summary));
+                           error_record(e, "tool", p.session, std::format("{}: {}", p.tool, p.summary));
+                       }
                        activity(e, std::format("{}: turn {} {} -> {}", name_of(p.session), s.turn, p.tool, p.summary));
                    },
                    [&](const CompileStarted& p) {
@@ -237,6 +246,11 @@ void RunState::apply(const Event& e) {
                        rec->duration_ms = p.duration_ms;
                        rec->exit_code = p.exit_code;
                        rec->errors = p.errors;
+                       // The compiler could not run, crashed or timed out: not a candidate's compile errors.
+                       if (!p.ok && p.errors == 0 && p.exit_code != 0)
+                           error_record(e, "compiler", p.session,
+                                        std::format("{} exited with {}{}", p.toolchain.empty() ? "the compiler" : p.toolchain, p.exit_code,
+                                                    p.output.empty() ? "" : ": " + std::string(p.output.substr(0, p.output.find('\n')))));
                        push_capped(data_.recent_compiles, std::shared_ptr<const CompileRecord>(std::move(rec)), kCompiles);
                    },
                    [&](const DiffComputed& p) {
@@ -251,6 +265,7 @@ void RunState::apply(const Event& e) {
                        ++s.retries;
                        ++data_.retries;
                        ++minute(e).retries;
+                       error_record(e, "api", p.session, std::format("retry {}: {}", p.attempt, p.error), p.status, p.delay_ms);
                        s.phase = "backoff";
                        set_worker_phase(e, p.session, s.phase);
                        activity(e, std::format("{}: retry {} in {} ms ({})", name_of(p.session), p.attempt, p.delay_ms, p.error));
@@ -275,7 +290,10 @@ void RunState::apply(const Event& e) {
                        rec->session = p.session;
                        rec->worker = e.worker;
                        push_capped(data_.log_tail, std::shared_ptr<const LogRecord>(std::move(rec)), kLogTail);
-                       if (p.level == "error" || p.level == "warn") error_line(p.message);
+                       if (p.level == "error" || p.level == "warn") {
+                           error_line(p.message);
+                           error_record(e, "log", p.session, p.message);
+                       }
                    },
                    [&](const WorkerPhaseChanged& p) {
                        if (!p.session.empty() && data_.sessions.contains(p.session)) session(p.session).phase = p.phase;
@@ -287,6 +305,7 @@ void RunState::apply(const Event& e) {
                        data_.rate_limit.last = p;
                        data_.rate_limit.time = e.time;
                        data_.rate_limit.known = true;
+                       push_capped(data_.rate_history, RateLimitRecord{e.time, p}, kRateHistory);
                    },
                    [&](const BudgetChanged& p) {
                        (p.scope == "function" ? data_.budget.function : data_.budget.run) = p;
