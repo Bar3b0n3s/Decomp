@@ -157,7 +157,9 @@ struct Harness {
 
     void attach() {
         log = events::JsonlEventLog::open(dir.path() / "runs" / id / "events.jsonl").value();
-        bus.subscribe([this](const events::Event& e) { log->write(e); });
+        bus.subscribe([this](const events::Event& e) {
+            if (log) log->write(e);
+        });
         bus.subscribe([this](const events::Event& e) {
             std::lock_guard lock(events_mutex);
             events.push_back(e);
@@ -195,6 +197,8 @@ struct Harness {
         return out;
     }
     Json run_json() { return parse_json(fs::read_text(dir.path() / "runs" / id / "run.json").value()).value(); }
+    // Closes the harness's handle on events.jsonl (Windows cannot replace a file that is open).
+    void close_log() { log.reset(); }
     std::filesystem::path run_dir() const { return dir.path() / "runs" / id; }
 };
 
@@ -589,6 +593,7 @@ TEST_CASE("run controller: resuming an interrupted run uses the event log") {
     REQUIRE(h.start(8, 2, h.options(2)));
     h.controller->wait();
     h.controller.reset();
+    h.close_log();
     auto all = events::read_event_log(h.run_dir() / "events.jsonl").value();
     // Keep the first 5 sessions; of those, only the first 3 finish.
     std::set<std::string> kept_sessions, finished_sessions;
