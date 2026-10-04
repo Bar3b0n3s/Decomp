@@ -452,6 +452,20 @@ dropping libcurl.
   in `premake/deps.lua` with warnings off, extend `use_thirdparty()`/`link_thirdparty()`, and update
   `external/README.md`.
 
+**GUI libraries.** The GUI adds four submodules, built by `premake/deps.lua` as static libraries with
+warnings off: `imgui` (Dear ImGui v1.92.9b-docking with `imgui_stdlib` and the null backend),
+`implot` (v1.0), `imgui_text_edit` (ImGuiColorTextEdit v1.92.9, which includes `imgui_internal.h` and
+so needs that exact ImGui) and `glfw` (3.5.1: Win32 on Windows, X11 only on Linux). Every translation
+unit that includes `imgui.h` is compiled with `IMGUI_USER_CONFIG="imgui_config.h"`
+(`src/gui/imgui_config.h`), which keeps `IM_ASSERT` on in Release builds; `use_imgui()` and
+`link_imgui()` give a project the include paths, the define and the libraries. `decomp_gui_lib`
+(`src/gui/` without `platform/`) needs no window system; `decomp-gui` adds GLFW and ImGui's GLFW and
+OpenGL 3 backends, whose bundled GL loader means no GL headers or GL link; `decomp_gui_tests` renders
+the shell headless with the null backend. On Windows the GUI links only libraries that ship with the
+OS (`user32`, `gdi32`, `shell32`, `imm32`); on Linux the build needs the X11 development headers, and
+GLFW and the GL loader open libX11 and libGL at run time.
+The fonts (Roboto Medium and JetBrains Mono) are compiled in, and stb_image_write writes screenshots.
+
 ## Platform notes
 
 - **Windows** is the primary platform. Old MSVC toolchains run natively, the process runner uses
