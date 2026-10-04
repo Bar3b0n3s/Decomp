@@ -208,6 +208,7 @@ described in [docs/agent.md](docs/agent.md).
 | [docs/ui.md](docs/ui.md) | The supervision GUI, view by view, its event-driven architecture, and CLI parity |
 | [docs/project-format.md](docs/project-format.md) | Project files, symbol file, history, toolchain registry |
 | [docs/roadmap.md](docs/roadmap.md) | First slice checklist, Phases 1-7 with exit criteria, risks |
+| [docs/acceptance.md](docs/acceptance.md) | The manual Phase 1 acceptance checklist |
 
 ## Repository layout
 

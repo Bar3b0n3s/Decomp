@@ -137,6 +137,8 @@ repository at the time of writing; tick the others as they land.
   - reopen the finished run from its log.
 - Reducer, replay and headless GUI tests pass in CI on both platforms.
 
+The manual part is the checklist in [acceptance.md](acceptance.md).
+
 ### Phase 2: Analysis depth
 
 **Goal:** accurate function bounds, names and context for targets without a PDB.

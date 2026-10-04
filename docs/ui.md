@@ -562,12 +562,16 @@ appended as guidance. Manual attempts are recorded in the history like the agent
 
 One input (Ctrl+P) searches:
 
-- functions and symbols by decorated or demangled name (fuzzy);
+- functions and symbols by readable or decorated name (case-insensitive, anywhere in the name; names
+  that start with the query and functions come first);
 - addresses (typing `0x401000` jumps there);
-- strings (prefix `"`);
-- actions (prefix `>`), such as "Start run on selection", "Toggle raw bytes" or "Export transcript".
+- strings in the image (prefix `"`);
+- actions (fuzzy; prefix `>` for actions only), such as "Start run", "Open project..." or "Reset
+  layout".
 
-Every action in the UI is reachable from the palette.
+Every action in the UI is reachable from the palette. The names and strings are indexed in the
+background for each program generation (`src/gui/search_index.hpp`), and each query runs as a
+latest-wins job, so typing never waits for a search of 100,000 names.
 
 ### Keyboard shortcuts
 
@@ -646,28 +650,32 @@ announced; toasts link to the view named in the table.
 
 | What | Where |
 |---|---|
-| Window and dock layout, named saved layouts, recent projects, theme, font size, palette | User config directory (`%APPDATA%\decomp\` or `~/.config/decomp/`) |
-| Per-project view state (open views, filters, column layout, sort order) | User config directory, keyed by project path |
-| Agent settings and budgets (and, with Phase 1, approval policies) chosen per project | `decomp.json` (shared through git) |
+| Window and dock layout, named saved layouts, recent projects, theme, font size, diff palette, budget alert threshold, replay directory | User config directory (`%APPDATA%\decomp\` or `~/.config/decomp/`): `gui.json` and `imgui.ini` |
+| Per-project view state (open views, filters, column layout, sort order, selected tabs) | `gui.json`, keyed by project path |
+| Agent settings, budgets, workers and approval policies chosen per project | `decomp.json` (shared through git) |
+| Exports (reports, lists, transcripts, diffs) | `.decomp/exports/` |
 | Runs, transcripts and history | Already on disk under `.decomp/`. The UI only reads them. |
 | Anything about the API key | Nowhere |
 
 ## CLI parity
 
-The CLI covers inspecting the target, matching by hand, and running, watching and steering one agent
-session. `--json` is a global option, given before or after the command name (`decomp status --json`), and
-most commands honor it; `toolchain add` prints text only. Multi-function runs, approvals, manual mode
-and opening past runs are GUI features (Phase 1).
+The CLI covers inspecting the target, matching by hand, and running, watching and steering agent
+sessions, one (`decomp agent`) or many (`decomp run`). `--json` is a global option, given before or
+after the command name (`decomp status --json`), and most commands honor it; `toolchain add` prints
+text only. Approvals that wait for a person (`ask`), manual mode and browsing past runs view by view
+are GUI features; the CLI takes the policies `auto` and `deny`, and `decomp runs show` summarizes a
+past run.
 
 | GUI | CLI |
 |---|---|
 | Dashboard | `decomp status`: functions and code bytes matched, status buckets, spend (the sum of the functions' `cost=` in `symbols.txt`) |
-| Run monitor | `decomp agent <func>`: a live progress view on stderr, on by default (`--no-progress` hides it, `--progress` keeps it with `--json` or `-q`). On a terminal it is a block redrawn in place: a run header (run ID, status, model and effort, elapsed time, spend, cache-hit rate, functions matched), one line per worker (function, turn, phase, best score, spend, elapsed time) and the last four activity lines. Otherwise it prints the activity lines as they happen. |
-| Agent session | Steering with `--interactive` (guidance lines, `:pause`, `:resume`, `:stop`, `:abort`) and `--guidance`; Ctrl+C to stop, twice to abort; the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl` |
+| Run monitor | `decomp run` and `decomp agent <func>`: a live progress view on stderr, on by default (`--no-progress` hides it, `--progress` keeps it with `--json` or `-q`). On a terminal it is a block redrawn in place: a run header (run ID, status, model and effort, elapsed time, spend, cache-hit rate, functions matched), the queue length, one line per worker (function, turn, phase, best score, spend, elapsed time; at most twelve) and the last four activity lines. Otherwise it prints the activity lines as they happen. `decomp run --interactive` takes the run controls on stdin. |
+| Agent session | Steering with `--interactive` (guidance lines and `:pause`, `:resume`, `:stop`, `:abort` for `decomp agent`; `:guide <fn> <text>` and the run controls for `decomp run`) and `--guidance`; Ctrl+C to stop, twice to abort; the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl` |
 | Diff viewer | `decomp diff <func> --source <file>` or `--obj <file>` (with `--compact`, `--context`, `--bytes`) |
 | Function browser | `decomp funcs` (address, size, symbol source and name; `--filter <regex>`); statuses, scores and spend are in `symbols.txt` |
 | Binary explorer | `decomp info`, `decomp disasm <func>` |
-| Toolchains and compiles | `decomp toolchain list`, `decomp toolchain test <name>`, `decomp toolchain add <name>` |
+| Toolchains and compiles | `decomp toolchain list`, `decomp toolchain test <name>` (with the compiler's version), `decomp toolchain add <name>` |
+| Past runs | `decomp runs list`, `decomp runs show <id>` (equal to its `summary.json`), `decomp run --resume <id>` |
 
 ## Architecture
 
@@ -802,22 +810,29 @@ which `events.jsonl` omits and the transcript holds in full.
 
 ## Testing strategy
 
-- **Reducer unit tests** (in the slice). Synthetic event sequences fold into the expected `RunState`:
-  sessions, workers, scores, counters and the activity feed.
-- **Log round trip** (in the slice). Events are written to JSONL, read back and replayed, and must
-  produce the same `RunState` apart from the streamed text, which the log omits.
-- **Progress view tests** (in the slice). The rendered status block and the plain-line output are
-  checked for a scripted run.
-- **View-model tests** (Phase 1). Pure derivations (table rows, feed sentences, chart series, ETAs) are
-  tested without ImGui: `src/viewmodel/` and `tests/unit/viewmodel_*_tests.cpp`, including transcripts
-  written by the real runner and 100,000-function tables and treemaps.
-- **Headless ImGui smoke test** (Phase 1). An ImGui context with no window or GPU backend (font atlas
-  built, display size set) renders every view for several frames against synthetic snapshots: empty,
-  huge, mid-stream and error states. ImGui assertions are turned into test failures. This runs in CI
-  on all platforms.
-- **Performance check** (Phase 1). A synthetic run with 100,000 functions and a high event rate must
-  keep frame build time and snapshot publication within budget in Release builds.
-- **Manual acceptance.** The Phase 1 exit scenario, on Windows and Linux.
+- **Reducer unit tests.** Synthetic event sequences fold into the expected `RunState`: sessions,
+  workers, the queue, approvals, rate limits, budgets, compiles, errors and the activity feed
+  (`tests/unit/events_tests.cpp`, `events_store_tests.cpp`).
+- **Log round trip.** Events are written to JSONL, read back and replayed, and must produce the same
+  `RunState` apart from the streamed text, which the log omits; a slice-era log still replays; a live
+  run's state equals its replay.
+- **Progress view tests.** The rendered status block and the plain-line output are checked for a
+  scripted run.
+- **View-model tests.** Pure derivations (table rows, feed sentences, chart series, ETAs, costs,
+  notifications, exports) are tested without ImGui: `src/viewmodel/` and
+  `tests/unit/viewmodel_*_tests.cpp`, including transcripts written by the real runner and
+  100,000-function tables and treemaps.
+- **Headless GUI tests** (`decomp_gui_tests`). An ImGui context with no window or GPU backend renders
+  the shell and every view for several frames against synthetic snapshots (no run, empty, mid-stream,
+  error), against a real project with a live, finished and reopened run driven by fake sessions, and
+  every tab of the views with tabs. ImGui assertions are turned into test failures, and every item is
+  checked for conflicting IDs. This runs in CI on Linux and Windows; Linux CI also runs `decomp-gui`
+  under Xvfb through a whole scripted run and keeps its screenshot.
+- **Performance checks.** In Release builds, folding events, taking snapshots and replaying a log of a
+  run over 100,000 functions with 1,000 sessions (`tests/unit/perf_tests.cpp`), and drawing every view
+  for that run (`tests/gui/perf_tests.cpp`), print their times and fail only at five times their budget.
+- **Manual acceptance.** The Phase 1 exit scenario, on Windows and Linux
+  ([acceptance.md](acceptance.md)).
 
 ## Phasing
 
