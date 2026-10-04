@@ -329,3 +329,12 @@ TEST_CASE("cost and usage: every tab renders the project's runs, live and reopen
     settle();
     CHECK(ctx.id_conflicts() == 0);
 }
+
+TEST_CASE("workspace: a project named with a trailing separator or a dot opens as its directory") {
+    Fixture fx;
+    REQUIRE(fx.workspace->open_project(fx.root / "."));
+    fx.workspace->wait_loaded();
+    CHECK(fx.workspace->project_state().phase == ProjectPhase::open);
+    CHECK(fx.workspace->project_state().root.filename() == fx.root.filename());
+    CHECK(fx.workspace->project_state().root == std::filesystem::absolute(fx.root).lexically_normal());
+}

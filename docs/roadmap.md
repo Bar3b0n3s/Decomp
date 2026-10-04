@@ -117,8 +117,8 @@ repository at the time of writing; tick the others as they land.
   - a staggered start, so later workers read the shared prompt prefix from the cache;
   - live concurrency and budget changes;
   - an approvals queue with per-action policies.
-- Resumable runs. After a restart, the remaining queue continues. Whether interrupted sessions resume
-  from their last committed turn or restart with their history is open.
+- Resumable runs. After a restart, the remaining queue continues; interrupted sessions start again with
+  a fresh conversation whose brief carries their attempts, notes and best source.
 - `decomp-gui`, with the top bar, the status bar, the notification center, and every view in
   [ui.md](ui.md) except the later-phase ones: Dashboard, Run monitor, Agent session, Diff viewer,
   Function browser and inspector, Binary explorer, Symbols and provenance, Changes and approvals, Cost

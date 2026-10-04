@@ -135,7 +135,7 @@ void App::open_project(const std::filesystem::path& root) {
         return;
     }
     reported_project_error_.clear();
-    settings_.add_recent_project(absolute);
+    settings_.add_recent_project(ws->project_state().root);  // the workspace's normalized form
     ctx_.mark_settings_dirty();
 }
 

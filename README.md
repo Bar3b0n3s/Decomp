@@ -8,12 +8,13 @@ decompilation yields source that is mechanically proven equivalent to the origin
 what preservation, porting and research projects need. Doing it by hand is slow, and most of the time
 goes into that same edit-compile-compare loop, which Decomp automates while a person supervises.
 
-> **Status: the first working slice is implemented.** The `decomp` command loads PE targets and their
-> PDBs, annotates disassembly, compiles candidates with the original toolchain, diffs them with
-> relocation awareness, and runs the built-in agent on one function at a time, with transcripts, event
-> logs and a live progress view. CI is green on Linux and Windows, including a round trip with the
-> real MSVC `cl.exe` for x86 and x64. The desktop GUI and the multi-function batch runner are Phase 1. See
-> [docs/roadmap.md](docs/roadmap.md).
+> **Status: the first working slice and the Phase 1 runner and GUI are implemented.** The `decomp`
+> command loads PE targets and their PDBs, annotates disassembly, compiles candidates with the original
+> toolchain, diffs them with relocation awareness, and runs the built-in agent on one function
+> (`decomp agent`) or on many with several workers (`decomp run`), with transcripts, event logs, a live
+> progress view, budgets, approvals and resumable runs. `decomp-gui` opens projects and starts,
+> watches, steers and reopens runs. CI is green on Linux and Windows, including a round trip with the
+> real MSVC `cl.exe` for x86 and x64. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Key ideas
 
@@ -29,8 +30,8 @@ goes into that same edit-compile-compare loop, which Decomp automates while a pe
   See [docs/agent.md](docs/agent.md).
 - **Supervision.** Every request, response, tool call, compile, diff, file write and dollar is recorded
   in the run's event log and the session's transcript. The CLI shows a live progress view, and the
-  user can steer, pause, stop or abort a session (`--interactive`, Ctrl+C). The desktop GUI, with the
-  same views for live and past runs, approvals and manual take-over, arrives in Phase 1.
+  user can steer, pause, stop or abort (`--interactive`, Ctrl+C). The desktop GUI, `decomp-gui`, shows
+  live and past runs in the same views, with approvals, budgets, notifications and manual take-over.
   See [docs/ui.md](docs/ui.md).
 - **No external applications.** Decomp does not depend on disassembler suites, build systems or
   scripting runtimes. Its libraries are vendored and built from source. The one external program is
@@ -44,7 +45,8 @@ Decomp is written in C++23 and built with [premake5](https://github.com/premake/
 
 ### Get the source
 
-Zydis and raw_pdb are git submodules:
+Zydis, raw_pdb and the GUI libraries (Dear ImGui, ImPlot, GLFW, ImGuiColorTextEdit) are git
+submodules:
 
 ```sh
 git clone --recursive https://github.com/Bar3b0n3s/Decomp.git
@@ -68,14 +70,17 @@ From a Developer Command Prompt you can build without the IDE:
 msbuild build\Decomp.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 
-The executables link the C runtime statically, so `bin\Release\decomp.exe` runs on its own.
+The executables link the C runtime statically, so `bin\Release\decomp.exe` and
+`bin\Release\decomp-gui.exe` run on their own.
 
 ### Linux
 
-Requirements: GCC 14+ or Clang 19+, GNU make, the libcurl development package and premake5.
+Requirements: GCC 14+ or Clang 19+, GNU make, the libcurl development package, the X11 development
+headers (for `decomp-gui`, which uses X11; on Wayland desktops it runs through XWayland) and premake5.
 
 ```sh
-sudo apt install g++-14 libcurl4-openssl-dev      # Debian/Ubuntu package names
+sudo apt install g++-14 libcurl4-openssl-dev \
+    libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev   # Debian/Ubuntu
 premake5 gmake
 make -C build config=release_x64 CC=gcc-14 CXX=g++-14 -j"$(nproc)"
 ```
@@ -92,11 +97,13 @@ make -C premake-core -f Bootstrap.mak linux       # produces premake-core/bin/re
 
 ### Running the tests
 
-The unit and integration tests are a single [doctest](https://github.com/doctest/doctest) binary:
+The unit and integration tests are a [doctest](https://github.com/doctest/doctest) binary, and the
+GUI's tests (the shell and every view rendered headless, without a window or GPU) are another:
 
 ```sh
 bin/Release/decomp_tests                          # Windows: bin\Release\decomp_tests.exe
 bin/Release/decomp_tests -tc="*quoting*"          # run matching test cases only
+bin/Release/decomp_gui_tests
 ```
 
 Most tests use committed fixtures under `tests/fixtures/` and need no compiler. Tests that compile
@@ -136,8 +143,15 @@ decomp diff sum_array --obj sum_array.obj         # diff an object compiled else
 # Let the agent match a function (needs ANTHROPIC_API_KEY, see below)
 decomp agent sum_array
 
+# ...or many: every function not matched yet, 4 at a time, at most $20 in all
+decomp run --all --workers 4 --run-budget-usd 20
+decomp runs list                                  # the project's runs; `decomp run --resume <id>` continues one
+
 # Overall progress: functions and code bytes matched, status buckets, spend
 decomp status
+
+# The supervision GUI: open the project, start a run, watch and steer it
+decomp-gui --project .
 ```
 
 Commands find the project by searching upward from the current directory for `decomp.json`. Global
@@ -158,6 +172,14 @@ decomp -C /tmp/basic status
 The session ends `matched`, the verified source is in `/tmp/basic/src/functions/add_401060.cpp`, and
 the run's event log, transcript and summary are under `/tmp/basic/.decomp/runs/`.
 
+A whole scripted batch, in the CLI or the GUI (scripts for every fixture function: 8 match, the rest
+give up):
+
+```sh
+decomp -C /tmp/basic run --all --workers 4 --replay-dir tests/replay/run
+decomp-gui --project /tmp/basic --replay-dir tests/replay/run --run-all
+```
+
 ## The agent and your API key
 
 `decomp agent` sends requests to the Claude API (`https://api.anthropic.com/v1/messages`, or the base
@@ -167,9 +189,11 @@ URL in `ANTHROPIC_BASE_URL`) and reads the key from the `ANTHROPIC_API_KEY` envi
 export ANTHROPIC_API_KEY=<your key>               # PowerShell: $env:ANTHROPIC_API_KEY = "<your key>"
 ```
 
-Without a key, `decomp agent` stops with an error. The key stays in memory: it is only sent in the
-request header, and it is never written to project files, transcripts, event logs or log files. Every
-other command works without a key, and `--replay` runs the agent offline. The default model is
+Without a key, `decomp agent` and `decomp run` stop with an error, and `decomp-gui` refuses to start a
+run (its Settings view shows whether a key is present and can check it, but never shows the key). The
+key stays in memory: it is only sent in the request header, and it is never written to project files,
+transcripts, event logs, GUI settings or log files. Every other command works without a key, and
+`--replay` (`--replay-dir` for runs) runs the agent offline. The default model is
 `claude-opus-5-5`; per-function budgets cap turns, spend, tokens and time, and Ctrl+C stops a session
 after the current turn (twice: aborts). What is sent, what it costs and how to change the defaults is
 described in [docs/agent.md](docs/agent.md).
@@ -181,7 +205,7 @@ described in [docs/agent.md](docs/agent.md).
 | [docs/architecture.md](docs/architecture.md) | Goals, pipeline, modules, data flow, threading, errors, build, platforms |
 | [docs/matching.md](docs/matching.md) | What "matched" means, the relocation-aware diff, MSVC specifics, driving compilers |
 | [docs/agent.md](docs/agent.md) | The built-in agent: API usage, tools, loop, budgets, refusals and fallbacks, cost |
-| [docs/ui.md](docs/ui.md) | The supervision UI (Phase 1), view by view, its event-driven architecture, and CLI parity |
+| [docs/ui.md](docs/ui.md) | The supervision GUI, view by view, its event-driven architecture, and CLI parity |
 | [docs/project-format.md](docs/project-format.md) | Project files, symbol file, history, toolchain registry |
 | [docs/roadmap.md](docs/roadmap.md) | First slice checklist, Phases 1-7 with exit criteria, risks |
 
@@ -194,11 +218,13 @@ src/formats/             PE, COFF and PDB readers
 src/arch/x86/            x86 and x64 decoding over Zydis
 src/analysis/            symbols, bounds, CFG, annotation, demangling
 src/matching/            toolchains, compile driver and cache, the diff
-src/events/              events, event bus, RunState, progress view
-src/agent/               the built-in agent: transports, client, conversation, tools, loop
-src/project/             decomp.json, symbols.txt, history
+src/events/              events, event bus, RunState and snapshots, progress view
+src/agent/               the built-in agent: transports, client, conversation, tools, loop, rate gate, approvals
+src/project/             decomp.json, symbols.txt, history, locks, change logs
+src/run/                 batch runs: selection, work queue, run directories, the run controller
+src/viewmodel/           what the GUI's views show, computed without ImGui
 src/cli/                 the decomp command
-src/gui/                 decomp-gui (Phase 1; not present yet)
+src/gui/                 decomp-gui: the shell, the views, and (platform/) GLFW and OpenGL
 tests/                   unit, integration, fixtures, replay
 external/                third-party code
 docs/                    design documentation
@@ -206,6 +232,7 @@ docs/                    design documentation
 
 ## Third-party code
 
-Decomp builds on Zydis/Zycore, raw_pdb, LLVM's Demangle library, nlohmann/json, doctest and CLI11.
-Phase 1 adds Dear ImGui, ImPlot, GLFW and ImGuiColorTextEdit. Versions, upstream locations and licenses
-are listed in [external/README.md](external/README.md), and each library keeps its license file next to it.
+Decomp builds on Zydis/Zycore, raw_pdb, LLVM's Demangle library, nlohmann/json, doctest and CLI11;
+`decomp-gui` adds Dear ImGui, ImPlot, GLFW, ImGuiColorTextEdit, stb_image_write and two fonts.
+Versions, upstream locations and licenses are listed in [external/README.md](external/README.md), and
+each library keeps its license file next to it.

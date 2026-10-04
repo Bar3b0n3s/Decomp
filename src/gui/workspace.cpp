@@ -90,8 +90,13 @@ void Workspace::poll() {
 
 // ---- project ----------------------------------------------------------------------------------------
 
-Result<void> Workspace::open_project(const std::filesystem::path& root) {
+Result<void> Workspace::open_project(const std::filesystem::path& given) {
     if (run_live()) return make_error(ErrorCode::invalid_argument, "a run is in progress: stop it before opening another project");
+    // "." or "dir/" name the same project as "dir": one absolute form, so it is labeled and remembered once.
+    std::error_code ec;
+    std::filesystem::path root = std::filesystem::absolute(given, ec).lexically_normal();
+    if (ec) root = given;
+    if (root.filename().empty() && root.has_parent_path() && root != root.root_path()) root = root.parent_path();
     close_run();
     close_project();
     project_state_ = ProjectState{ProjectPhase::loading, root, {}, {}};
