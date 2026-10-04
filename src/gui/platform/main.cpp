@@ -13,6 +13,7 @@
 #include "gui/app.hpp"
 #include "gui/settings.hpp"
 #include "gui/theme.hpp"
+#include "gui/workspace.hpp"
 
 #include <CLI/CLI.hpp>
 #include <imgui.h>
@@ -89,6 +90,9 @@ struct Options {
     std::string screenshot;
     std::string config_dir;
     std::string theme;
+    std::string replay_dir;
+    bool run_all = false;
+    bool exit_when_done = false;
     int frames = 0;
     int width = 1600;
     int height = 1000;
@@ -155,7 +159,7 @@ void attach_parent_console() {
 
 gui::App* g_app = nullptr;  // for GLFW callbacks (ImGui's backend owns the window user pointer)
 
-int run(const Options& opt) {
+int run_app(const Options& opt) {
     if (opt.verbose >= 2) log::set_level(log::Level::trace);
     else if (opt.verbose == 1) log::set_level(log::Level::debug);
 
@@ -196,9 +200,12 @@ int run(const Options& opt) {
     if (!opt.project.empty()) {
         std::error_code ec;
         project_root = stdfs::absolute(fs::from_utf8(opt.project), ec).lexically_normal();
-        settings.add_recent_project(project_root);
     }
     if (theme) settings.theme = *theme;
+    if (!opt.replay_dir.empty()) {
+        std::error_code ec;
+        settings.developer.replay_dir = fs::to_utf8(stdfs::absolute(fs::from_utf8(opt.replay_dir), ec).lexically_normal());
+    }
 
     glfwSetErrorCallback([](int code, const char* description) { log::error("GLFW error {:#x}: {}", code, description ? description : "?"); });
     if (!glfwInit()) {
@@ -246,12 +253,12 @@ int run(const Options& opt) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    gui::AppServices services;
-    services.post_empty_event = [] { glfwPostEmptyEvent(); };
-    if (!project_root.empty()) services.project = [project_root] { return gui::ProjectInfo{project_root, {}, false}; };
-    auto app = std::make_unique<gui::App>(std::move(services), settings);
+    // The workspace holds the project and the run; its workers wake the event loop.
+    auto workspace = std::make_unique<gui::Workspace>(gui::Workspace::Options{.wake = [] { glfwPostEmptyEvent(); }});
+    auto app = std::make_unique<gui::App>(workspace->services(), settings);
     g_app = app.get();
-    if (!project_root.empty() || theme) app->context().mark_settings_dirty();  // the recent project, the theme
+    if (!project_root.empty()) app->open_project(project_root);
+    if (theme || !opt.replay_dir.empty()) app->context().mark_settings_dirty();  // saved like menu choices
     if (!settings_problem.empty()) app->notifications().notify(gui::Severity::warning, settings_problem);
     app->set_dpi_scale(ImGui_ImplGlfw_GetContentScaleForWindow(window));
     glfwSetWindowContentScaleCallback(window, [](GLFWwindow*, float x, float) {
@@ -271,9 +278,29 @@ int run(const Options& opt) {
     // continuously and stops after that many frames.
     int frame = 0;
     int settle = 3;
+    bool run_requested = false;
+    int frames_after_run = -1;  // --exit-when-done: frames rendered since the run ended
     while (exit_code == 0 && !app->wants_quit()) {
-        if (opt.frames > 0) {
-            if (frame >= opt.frames) break;
+        // --run-all: once the project is loaded, start a run over the default selection.
+        if (opt.run_all && !run_requested && workspace->project_state().phase != gui::ProjectPhase::loading) {
+            run_requested = true;
+            if (workspace->project_state().phase != gui::ProjectPhase::open) {
+                log::error("--run-all: the project did not open: {}", workspace->project_state().error);
+                exit_code = 1;
+                break;
+            }
+            if (auto started = workspace->start_run({}); !started) {
+                log::error("--run-all: {}", started.error().message);
+                exit_code = 1;
+                break;
+            } else {
+                log::info("run {} started", *started);
+            }
+        }
+        if (opt.exit_when_done && run_requested && !workspace->run_live() && frames_after_run < 0) frames_after_run = 0;
+        const bool last_frame = (opt.frames > 0 && frame + 1 == opt.frames) || frames_after_run == 10;
+        if (opt.frames > 0 || frames_after_run >= 0 || opt.run_all) {
+            if (opt.frames > 0 && frame >= opt.frames) break;
             glfwPollEvents();
         } else if (settle > 0) {
             glfwPollEvents();
@@ -303,16 +330,19 @@ int run(const Options& opt) {
         gl.clear(Gl::kColorBufferBit);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         ++frame;
-        if (opt.frames > 0 && frame == opt.frames && !opt.screenshot.empty()) {
+        if (frames_after_run >= 0) ++frames_after_run;
+        if (last_frame && !opt.screenshot.empty()) {
             const stdfs::path path = fs::from_utf8(opt.screenshot);
             if (write_screenshot(gl, width, height, path)) log::info("wrote {} ({}x{})", opt.screenshot, width, height);
             else exit_code = 1;
         }
         glfwSwapBuffers(window);
+        if (frames_after_run > 10) break;  // --exit-when-done: the run ended and the final state is drawn
     }
 
     g_app = nullptr;
-    app.reset();  // saves the settings
+    app.reset();       // saves the settings
+    workspace.reset();  // ends a live run and joins its workers (they wake GLFW, so before glfwTerminate)
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImPlot::DestroyContext();
@@ -340,15 +370,23 @@ int main(int argc, char** argv) {
     cli.add_option("--height", opt.height, "Window height")->check(CLI::Range(240, 16384));
     cli.add_option("--theme", opt.theme, "Theme: dark, light or high-contrast (saved like a menu choice)");
     cli.add_option("--config-dir", opt.config_dir, "Directory for gui.json, imgui.ini and the log (default: the user config directory)");
+    cli.add_option("--replay-dir", opt.replay_dir,
+                   "Scripted API responses per function instead of the live API (a developer setting, saved)");
+    cli.add_flag("--run-all", opt.run_all, "Start a run over the default selection once the project is open (needs --project)");
+    cli.add_flag("--exit-when-done", opt.exit_when_done, "With --run-all: exit when the run ends (after a screenshot, if asked)");
     cli.add_flag("-v,--verbose", opt.verbose, "More logging (repeat for trace)");
     try {
         cli.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
         return cli.exit(e);
     }
-    if (!opt.screenshot.empty() && opt.frames == 0) {
-        std::fputs("error: --screenshot needs --frames\n", stderr);
+    if (!opt.screenshot.empty() && opt.frames == 0 && !opt.exit_when_done) {
+        std::fputs("error: --screenshot needs --frames or --exit-when-done\n", stderr);
         return 2;
     }
-    return run(opt);
+    if ((opt.run_all || opt.exit_when_done) && opt.project.empty()) {
+        std::fputs("error: --run-all and --exit-when-done need --project\n", stderr);
+        return 2;
+    }
+    return run_app(opt);
 }

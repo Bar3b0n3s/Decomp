@@ -12,6 +12,7 @@
 
 #include "gui/actions.hpp"
 #include "gui/jobs.hpp"
+#include "project/progress.hpp"
 #include "gui/notifications.hpp"
 #include "gui/palette.hpp"
 #include "gui/run_summary.hpp"
@@ -40,9 +41,13 @@ public:
     // Draws the whole UI; call between ImGui::NewFrame() and ImGui::Render().
     void frame();
 
-    // The user asked to quit (File > Quit, or request_quit() for the window's close button).
+    // The user asked to quit (File > Quit, or request_quit() for the window's close button). With a live
+    // run, request_quit() first asks whether to stop or abort it, and quitting waits for the workers.
     bool wants_quit() const { return quit_; }
     void request_quit();
+
+    // Opens a project in the workspace (in the background) and records it in the recent projects.
+    void open_project(const std::filesystem::path& root);
 
     // Monitor content scale (glfwGetWindowContentScale): scales fonts and sizes from the next frame on.
     void set_dpi_scale(float scale);
@@ -105,6 +110,10 @@ private:
     void draw_views();
     void draw_tools();
     void draw_dialogs();
+    void draw_runs_window();
+    void draw_project_dialog();
+    void draw_quit_dialogs();
+    void poll_workspace();
 
     bool can_start() const;
     void wake() const;
@@ -148,6 +157,18 @@ private:
     bool show_demo_ = false;
     bool open_about_ = false;
     bool open_save_layout_ = false;
+    bool show_runs_ = false;
+    bool open_project_dialog_ = false;
+    std::string project_path_;
+    bool open_quit_dialog_ = false;
+    bool quit_after_run_ = false;  // quit once the live run has ended
+    std::string reported_project_error_;
+    // Project-wide progress for the status bar, recomputed when the project or program changes.
+    struct ProgressCache {
+        u64 version = ~u64{0};
+        const void* program = nullptr;
+        std::optional<project::Progress> progress;
+    } progress_;
     std::string layout_name_;
     std::vector<std::string> layout_action_ids_;
 };

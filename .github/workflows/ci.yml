@@ -52,10 +52,23 @@ jobs:
       - name: GUI smoke test (Xvfb)
         run: xvfb-run -a ./bin/Release/decomp-gui --frames 60 --screenshot gui-shell.png --config-dir "$(mktemp -d)"
 
+      - name: GUI end to end (Xvfb)
+        run: |
+          # The real app opens a project, runs every function with scripted responses and exits when done.
+          p="$(mktemp -d)/project"
+          ./bin/Release/decomp init tests/fixtures/x86/basic.exe --dir "$p" --toolchain clang-cl-x86 \
+            --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+          xvfb-run -a ./bin/Release/decomp-gui --config-dir "$(mktemp -d)" --project "$p" --replay-dir tests/replay/run \
+            --run-all --exit-when-done --screenshot gui-run.png
+          ./bin/Release/decomp -C "$p" runs list
+          ./bin/Release/decomp -C "$p" --json runs list | python3 -c "import json,sys; r=json.load(sys.stdin); assert r[0]['status'] == 'completed' and r[0]['matched'] == 8, r"
+
       - uses: actions/upload-artifact@v4
         with:
           name: gui-screenshots
-          path: gui-shell.png
+          path: |
+            gui-shell.png
+            gui-run.png
 
       - name: CLI smoke test
         run: |

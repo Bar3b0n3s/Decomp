@@ -2,6 +2,7 @@
 // (docs/ui.md#keyboard-shortcuts).
 
 #include "gui/app.hpp"
+#include "gui/workspace.hpp"
 
 #include <format>
 
@@ -141,6 +142,26 @@ void App::register_actions() {
     actions_.add({.id = "dev.style", .label = "Style editor", .category = "Developer", .run = [this] { show_style_editor_ = true; }});
     actions_.add({.id = "dev.demo", .label = "Dear ImGui demo", .category = "Developer", .run = [this] { show_demo_ = true; }});
     actions_.add({.id = "app.quit", .label = "Quit", .category = "General", .run = [this] { request_quit(); }});
+
+    // Projects and runs (the workspace).
+    const auto workspace = [this] { return services_.workspace; };
+    const auto idle = [workspace] { return workspace() && !workspace()->run_live(); };
+    actions_.add({.id = "project.open", .label = "Open project...", .category = "File", .enabled = idle, .run = [this] { open_project_dialog_ = true; }});
+    actions_.add({.id = "project.close",
+                  .label = "Close project",
+                  .category = "File",
+                  .enabled = [workspace, idle] { return idle() && workspace()->project_state().phase != ProjectPhase::none; },
+                  .run = [workspace] { workspace()->close_project(); }});
+    actions_.add({.id = "runs.show",
+                  .label = "Runs (open, resume or repeat a run)",
+                  .category = "Run",
+                  .enabled = [workspace] { return workspace() != nullptr; },
+                  .run = [this] { show_runs_ = true; }});
+    actions_.add({.id = "run.close",
+                  .label = "Close run",
+                  .category = "Run",
+                  .enabled = [workspace, idle] { return idle() && !workspace()->run_id().empty(); },
+                  .run = [workspace] { workspace()->close_run(); }});
 
     register_layout_actions();
 }

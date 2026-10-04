@@ -8,6 +8,7 @@
 #include "gui/fonts.hpp"
 #include "gui/layout.hpp"
 #include "gui/widgets.hpp"
+#include "gui/workspace.hpp"
 
 #include <imgui_internal.h>
 #include <implot.h>
@@ -58,25 +59,32 @@ const ImVec4& phase_color(RunPhase phase, const std::string& status, const Theme
 
 void App::draw_menu_bar() {
     if (!ImGui::BeginMainMenuBar()) return;
+    Workspace* ws = services_.workspace;
+    const bool live = ws && ws->run_live();
     if (ImGui::BeginMenu("File")) {
-        ImGui::MenuItem("Open project...", nullptr, false, false);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Opening projects is coming in step S6.");
-        if (ImGui::BeginMenu("Recent projects", !settings_.recent_projects.empty())) {
-            for (const auto& path : settings_.recent_projects) {
-                ImGui::MenuItem(path.c_str(), nullptr, false, false);
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Opening projects is coming in step S6.");
-            }
+        actions_.menu_item("project.open");
+        if (ImGui::BeginMenu("Recent projects", ws && !live && !settings_.recent_projects.empty())) {
+            std::optional<std::string> chosen;
+            for (const auto& path : settings_.recent_projects)
+                if (ImGui::MenuItem(path.c_str())) chosen = path;
+            if (chosen) open_project(fs::from_utf8(*chosen));
             ImGui::EndMenu();
         }
+        actions_.menu_item("project.close");
+        ImGui::Separator();
+        actions_.menu_item("runs.show", "Runs...", show_runs_);
+        actions_.menu_item("run.close");
         ImGui::Separator();
         actions_.menu_item("app.quit");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Run")) {
         for (const char* id : {"run.start", "run.resume", "run.pause", "run.stop", "run.abort"}) actions_.menu_item(id);
+        ImGui::Separator();
+        actions_.menu_item("runs.show", "Runs...", show_runs_);
         if (!services_.commands->available()) {
             ImGui::Separator();
-            ImGui::TextDisabled("No run controller is attached.");
+            ImGui::TextDisabled(ws && ws->run_read_only() ? "A past run is shown (read-only)." : "Open a project to start a run.");
         }
         ImGui::EndMenu();
     }
@@ -207,9 +215,53 @@ void App::draw_top_bar() {
         ImGui::AlignTextToFramePadding();
         ImGui::Text("Workers %d/%d", run_.workers_active, run_.workers_total);
         vertical_separator();
-        ImGui::Text("Spend $%.2f", run_.cost_usd);
+
+        // Spend against the run budget: amber from 80%, red at 100%.
+        if (run_.budget_usd > 0) {
+            const double used = run_.cost_usd / run_.budget_usd;
+            const ImVec4& color = used >= 1.0 ? c.error : used >= 0.8 ? c.warn : c.ok;
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color);
+            ImGui::ProgressBar(static_cast<float>(std::min(used, 1.0)), ImVec2(ImGui::GetFontSize() * 9, 0),
+                               std::format("${:.2f} / ${:.2f}", run_.cost_usd, run_.budget_usd).c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+                ImGui::SetTooltip("Run spend against the run budget (%.0f%%). Open Cost and usage.", used * 100.0);
+            if (ImGui::IsItemClicked()) ctx_.open("cost");
+        } else {
+            ImGui::Text("Spend $%.2f", run_.cost_usd);
+        }
         vertical_separator();
-        status_label("API: no requests yet", c.muted);
+
+        // API health, always with text.
+        switch (run_.api) {
+        case ApiHealth::unknown: status_label("API: no requests yet", c.muted); break;
+        case ApiHealth::ok: status_label("API: ok", c.ok); break;
+        case ApiHealth::degraded: status_label(run_.backoff_left_ms > 0 ? "API: rate limited" : "API: retrying", c.warn); break;
+        case ApiHealth::failing: status_label("API: key rejected", c.error); break;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+            std::string tip;
+            if (run_.last_ttft_ms > 0) tip += std::format("Time to first token: {} ms\n", run_.last_ttft_ms);
+            tip += std::format("Retries in the last five minutes: {}", run_.recent_retries);
+            if (!run_.last_error.empty()) tip += "\nLast error: " + run_.last_error;
+            ImGui::SetTooltip("%s", tip.c_str());
+        }
+        // Rate limits from the latest response headers, and the backoff countdown.
+        if (run_.rate_known && run_.requests_limit > 0) {
+            vertical_separator();
+            ImGui::Text("Requests %lld/%lld", run_.requests_remaining, run_.requests_limit);
+            if (run_.backoff_left_ms > 0) {
+                ImGui::SameLine();
+                ImGui::TextColored(c.warn, "backoff %.1f s", static_cast<double>(run_.backoff_left_ms) / 1000.0);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                std::string tip = std::format("Requests remaining: {} of {}", run_.requests_remaining, run_.requests_limit);
+                if (run_.input_limit > 0) tip += std::format("\nInput tokens remaining: {} of {}", run_.input_remaining, run_.input_limit);
+                if (run_.output_limit > 0)
+                    tip += std::format("\nOutput tokens remaining: {} of {}", run_.output_remaining, run_.output_limit);
+                ImGui::SetTooltip("%s", tip.c_str());
+            }
+        }
 
         // Search and command palette, right-aligned.
         const float width = ImGui::GetFontSize() * 18;
@@ -245,14 +297,23 @@ void App::draw_status_bar() {
     ImGui::PopStyleVar();
     if (visible) {
         const char* dash = "\xE2\x80\x94";  // em dash: not known yet
-        ImGui::TextUnformatted("Bytes matched");
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", dash);
+        // Project-wide progress (what `decomp status` prints); the run's own figures otherwise.
+        if (progress_.progress) {
+            const project::Progress& p = *progress_.progress;
+            ImGui::Text("Bytes matched %.1f%%", p.percent_bytes());
+            vertical_separator();
+            ImGui::Text("Functions %zu/%zu matched", p.matched_functions, p.functions);
+        } else {
+            ImGui::TextUnformatted("Bytes matched");
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", dash);
+            vertical_separator();
+            if (run_.phase == RunPhase::none && run_.planned == 0) ImGui::Text("Functions %s", dash);
+            else ImGui::Text("Functions %d/%d matched", run_.matched, run_.planned);
+        }
         vertical_separator();
-        if (run_.phase == RunPhase::none && run_.planned == 0) ImGui::Text("Functions %s", dash);
-        else ImGui::Text("Functions %d/%d matched", run_.matched, run_.planned);
-        vertical_separator();
-        ImGui::Text("Queue %s", dash);
+        if (run_.phase == RunPhase::none) ImGui::Text("Queue %s", dash);
+        else ImGui::Text("Queue %zu", run_.queued);
         vertical_separator();
         ImGui::Text("ETA %s", dash);
         vertical_separator();
@@ -319,6 +380,7 @@ void App::draw_views() {
 
 void App::draw_tools() {
     notifications_.draw_history(&show_notifications_, ctx_.nav, ctx_.colors());
+    draw_runs_window();
     if (show_shortcuts_) {
         ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 30, ImGui::GetFontSize() * 26), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Keyboard shortcuts###shortcuts", &show_shortcuts_)) {
@@ -356,6 +418,8 @@ void App::draw_tools() {
 }
 
 void App::draw_dialogs() {
+    draw_project_dialog();
+    draw_quit_dialogs();
     if (open_about_) {
         ImGui::OpenPopup("About Decomp###about");
         open_about_ = false;
@@ -401,6 +465,173 @@ void App::draw_dialogs() {
         }
         ImGui::EndPopup();
     }
+}
+
+void App::draw_project_dialog() {
+    if (open_project_dialog_) {
+        ImGui::OpenPopup("Open project###open_project");
+        if (project_path_.empty() && !settings_.recent_projects.empty()) project_path_ = settings_.recent_projects.front();
+        open_project_dialog_ = false;
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("Open project###open_project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::TextUnformatted("Project directory (the one with decomp.json):");
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 32);
+    const bool enter = ImGui::InputTextWithHint("##path", "/path/to/project", &project_path_, ImGuiInputTextFlags_EnterReturnsTrue);
+    std::error_code ec;
+    const std::string path(trim(project_path_));
+    const bool exists = !path.empty() && std::filesystem::exists(fs::from_utf8(path) / project::Project::kConfigFile, ec);
+    if (!path.empty() && !exists) ImGui::TextColored(ctx_.colors().warn, "No decomp.json there (decomp init creates a project).");
+    if (!settings_.recent_projects.empty()) {
+        ImGui::SeparatorText("Recent");
+        for (const auto& recent : settings_.recent_projects)
+            if (ImGui::Selectable(recent.c_str(), recent == path)) project_path_ = recent;
+    }
+    ImGui::Spacing();
+    ImGui::BeginDisabled(!exists);
+    const bool open = ImGui::Button("Open") || (enter && exists);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+    if (open && exists) {
+        open_project(fs::from_utf8(path));
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+void App::draw_quit_dialogs() {
+    Workspace* ws = services_.workspace;
+    if (open_quit_dialog_) {
+        ImGui::OpenPopup("Quit###quit_run");
+        open_quit_dialog_ = false;
+    }
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Quit###quit_run", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("A run is in progress. Quitting ends it; it can be resumed later (Runs...).");
+        ImGui::Spacing();
+        if (ImGui::Button("Stop and quit")) {
+            if (ws) ws->end_run(false);
+            quit_after_run_ = true;
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("Sessions finish their current turn first.");
+        ImGui::SameLine();
+        if (ImGui::Button("Abort and quit")) {
+            if (ws) ws->end_run(true);
+            quit_after_run_ = true;
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("Requests and compiles in flight are cancelled.");
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    // While the run winds down before quitting.
+    if (quit_after_run_ && ws && ws->run_live()) {
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        if (ImGui::Begin("Quitting###quitting", nullptr,
+                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+            ImGui::Text("Waiting for %d session(s) to end...", run_.workers_active);
+            if (ImGui::Button("Abort now")) ws->end_run(true);
+            ImGui::SameLine();
+            if (ImGui::Button("Keep running")) quit_after_run_ = false;
+        }
+        ImGui::End();
+    }
+}
+
+void App::draw_runs_window() {
+    if (!show_runs_) return;
+    Workspace* ws = services_.workspace;
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 52, ImGui::GetFontSize() * 22), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Runs###runs", &show_runs_)) {
+        ImGui::End();
+        return;
+    }
+    if (!ws || ws->project_state().phase != ProjectPhase::open) {
+        ImGui::TextDisabled("Open a project to see its runs.");
+        ImGui::End();
+        return;
+    }
+    const bool live = ws->run_live();
+    bool refresh = ImGui::Button("Refresh");
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", fs::to_utf8(ws->project()->runs_dir()).c_str());
+    if (ws->run_loading()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("loading a run...");
+    }
+    const auto& runs = ws->runs(refresh);
+    if (runs.empty()) ImGui::TextDisabled("No runs yet. Start one with Run > Start run (F5).");
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+    std::optional<std::string> open, resume;
+    std::optional<std::vector<u64>> again;
+    if (!runs.empty() && ImGui::BeginTable("##runs", 7, flags)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Run");
+        ImGui::TableSetupColumn("Status");
+        ImGui::TableSetupColumn("Done", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("Matched", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("Spent", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("Model");
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableHeadersRow();
+        for (const auto& r : runs) {
+            ImGui::PushID(r.id.c_str());
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const bool shown = r.id == ws->run_id();
+            if (shown) ImGui::TextColored(ctx_.colors().accent, "%s (shown)", r.id.c_str());
+            else ImGui::TextUnformatted(r.id.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(r.status.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%zu/%zu", r.done, r.functions);
+            ImGui::TableNextColumn();
+            ImGui::Text("%zu", r.matched);
+            ImGui::TableNextColumn();
+            ImGui::Text("$%.2f", r.spent_usd);
+            ImGui::TableNextColumn();
+            ImGui::Text("%s%s", r.model.c_str(), r.replay ? " (replay)" : "");
+            ImGui::TableNextColumn();
+            ImGui::BeginDisabled(live || r.live);
+            if (ImGui::SmallButton("Open")) open = r.id;
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Show this run (read-only), replayed from its event log.");
+            ImGui::SameLine();
+            const bool resumable = r.status == "stopped" || r.status == "budget_exhausted" || r.status == "interrupted" || r.status == "aborted";
+            ImGui::BeginDisabled(!resumable);
+            if (ImGui::SmallButton("Resume")) resume = r.id;
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Continue the run: finished functions stay finished; the others start over.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Run again")) {
+                std::vector<u64> vas;
+                if (auto q = r.run.find("queue"); q != r.run.end() && q->is_array())
+                    for (const auto& item : *q)
+                        if (item.contains("va") && item["va"].is_number_unsigned()) vas.push_back(item["va"].get<u64>());
+                again = std::move(vas);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("A new run over the same functions.");
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (open) {
+        if (auto r = ws->open_run(*open); !r) notifications_.notify(Severity::error, std::format("Cannot open run {}: {}", *open, r.error().message));
+    }
+    if (resume) {
+        if (auto r = ws->resume_run(*resume); !r)
+            notifications_.notify(Severity::error, std::format("Cannot resume run {}: {}", *resume, r.error().message));
+    }
+    if (again && !again->empty()) services_.commands->start_functions(std::move(*again));
+    ImGui::End();
 }
 
 } // namespace decomp::gui

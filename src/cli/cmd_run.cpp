@@ -165,19 +165,7 @@ Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
     project::AgentSettings settings = project.config().agent;
     std::string replay_dir = a.replay_dir;
     if (recorded.is_object()) {
-        settings.model = json_string_or(recorded, "model", settings.model);
-        settings.effort = json_string_or(recorded, "effort", settings.effort);
-        settings.workers = static_cast<int>(json_int_or(recorded, "workers", settings.workers));
-        settings.max_usd_per_run = json_number_or(recorded, "run_budget_usd", settings.max_usd_per_run);
-        if (auto l = recorded.find("limits"); l != recorded.end() && l->is_object()) {
-            settings.max_turns = static_cast<int>(json_int_or(*l, "max_turns", settings.max_turns));
-            settings.max_usd_per_function = json_number_or(*l, "max_usd", settings.max_usd_per_function);
-            settings.max_tokens_per_function = json_int_or(*l, "max_tokens", settings.max_tokens_per_function);
-            settings.max_minutes_per_function = static_cast<int>(json_int_or(*l, "max_seconds", settings.max_minutes_per_function * 60) / 60);
-        }
-        if (auto p = recorded.find("policies"); p != recorded.end() && p->is_object())
-            for (auto it = p->begin(); it != p->end(); ++it)
-                if (it->is_string()) settings.approvals[it.key()] = it->get<std::string>();
+        run::apply_recorded_settings(recorded, settings);
         if (replay_dir.empty() && json_bool_or(recorded, "replay", false)) {
             replay_dir = json_string_or(recorded, "replay_dir", "");
             if (replay_dir.empty()) return make_error(ErrorCode::invalid_argument, "run {} was a scripted run: pass --replay-dir", store->id());

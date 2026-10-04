@@ -1,10 +1,12 @@
 #include "gui/app.hpp"
 
+#include "core/fs.hpp"
 #include "core/log.hpp"
 #include "gui/fonts.hpp"
 #include "gui/layout.hpp"
 #include "gui/theme.hpp"
 #include "gui/views/views.hpp"
+#include "gui/workspace.hpp"
 
 #include <imgui_internal.h>
 
@@ -102,7 +104,56 @@ bool App::focus_view(std::string_view name) {
     return true;
 }
 
-void App::request_quit() { quit_ = true; }
+void App::request_quit() {
+    // A live run is ended first, the way the user chooses (draw_quit_dialogs).
+    if (services_.workspace && services_.workspace->run_live()) {
+        if (!quit_after_run_) open_quit_dialog_ = true;
+        return;
+    }
+    quit_ = true;
+}
+
+void App::open_project(const std::filesystem::path& root) {
+    Workspace* ws = services_.workspace;
+    if (!ws) return;
+    std::error_code ec;
+    const auto absolute = std::filesystem::absolute(root, ec).lexically_normal();
+    if (auto r = ws->open_project(absolute); !r) {
+        notifications_.notify(Severity::error, std::format("Cannot open {}: {}", fs::to_utf8(absolute), r.error().message));
+        return;
+    }
+    reported_project_error_.clear();
+    settings_.add_recent_project(absolute);
+    ctx_.mark_settings_dirty();
+}
+
+void App::poll_workspace() {
+    Workspace* ws = services_.workspace;
+    if (!ws) return;
+    // The developer setting may change in Settings; new runs use the current value.
+    if (fs::to_utf8(ws->replay_dir()) != settings_.developer.replay_dir) ws->set_replay_dir(fs::from_utf8(settings_.developer.replay_dir));
+    ws->poll();
+    if (auto error = ws->take_error(); !error.empty()) notifications_.notify(Severity::error, error);
+    const ProjectState& project = ws->project_state();
+    if (project.phase == ProjectPhase::failed && project.error != reported_project_error_) {
+        reported_project_error_ = project.error;
+        notifications_.notify(Severity::error, std::format("Cannot open the project {}: {}", fs::to_utf8(project.root), project.error));
+    }
+    if (quit_after_run_ && !ws->run_live()) quit_ = true;
+
+    // Project-wide progress (status bar), recomputed only when symbols or function states change.
+    if (project.phase == ProjectPhase::open) {
+        const auto program = ws->program();
+        const u64 version = ws->project()->version();
+        if (!progress_.progress || progress_.version != version || progress_.program != program.get()) {
+            progress_.progress = project::compute_progress(program->symbols(), *ws->project());
+            progress_.version = version;
+            progress_.program = program.get();
+        }
+    } else {
+        progress_ = {};
+    }
+}
 
 void App::set_dpi_scale(float scale) {
     if (scale > 0.25f && scale < 8.0f) dpi_scale_ = scale;
@@ -229,6 +280,7 @@ bool App::can_start() const {
 
 void App::frame() {
     frame_number_ = ImGui::GetFrameCount();
+    poll_workspace();
     ctx_.snapshot = services_.snapshot();
     ctx_.project = services_.project();
     run_ = summarize(ctx_.snapshot.get());

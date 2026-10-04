@@ -658,3 +658,17 @@ TEST_CASE("run controller: resuming an interrupted run uses the event log") {
     for (const auto& id : again.session_ids) restarts += id.ends_with("-2");
     CHECK(restarts == 2);
 }
+
+TEST_CASE("run controller: the shared rate gate reports to the run's events") {
+    Harness h;
+    REQUIRE(h.start(1, 1, h.options(1)));
+    h.controller->wait();
+    // A session's client feeds the gate; here the test plays that part.
+    h.controller->rate_gate()->observe({{"anthropic-ratelimit-requests-limit", "50"}, {"anthropic-ratelimit-requests-remaining", "7"}});
+    h.controller->rate_gate()->on_throttled(429, std::chrono::milliseconds(1500));
+    const auto snap = h.state.snapshot();
+    REQUIRE(snap->rate_limit.known);
+    CHECK(snap->rate_limit.last.requests_limit == 50);
+    CHECK(snap->rate_limit.last.requests_remaining == 7);
+    CHECK(snap->rate_limit.last.backoff_ms > 1000);
+}

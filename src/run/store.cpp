@@ -125,6 +125,23 @@ Result<std::filesystem::path> find_run(const std::filesystem::path& runs_dir, st
     return matches.front();
 }
 
+void apply_recorded_settings(const Json& run, project::AgentSettings& settings) {
+    if (!run.is_object()) return;
+    settings.model = json_string_or(run, "model", settings.model);
+    settings.effort = json_string_or(run, "effort", settings.effort);
+    settings.workers = static_cast<int>(json_int_or(run, "workers", settings.workers));
+    settings.max_usd_per_run = json_number_or(run, "run_budget_usd", settings.max_usd_per_run);
+    if (auto l = run.find("limits"); l != run.end() && l->is_object()) {
+        settings.max_turns = static_cast<int>(json_int_or(*l, "max_turns", settings.max_turns));
+        settings.max_usd_per_function = json_number_or(*l, "max_usd", settings.max_usd_per_function);
+        settings.max_tokens_per_function = json_int_or(*l, "max_tokens", settings.max_tokens_per_function);
+        settings.max_minutes_per_function = static_cast<int>(json_int_or(*l, "max_seconds", settings.max_minutes_per_function * 60LL) / 60);
+    }
+    if (auto p = run.find("policies"); p != run.end() && p->is_object())
+        for (auto it = p->begin(); it != p->end(); ++it)
+            if (it->is_string()) settings.approvals[it.key()] = it->get<std::string>();
+}
+
 Json run_summary(const events::RunStateData& state) {
     struct PerFunction {
         const events::SessionState* latest = nullptr;

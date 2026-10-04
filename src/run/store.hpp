@@ -12,6 +12,7 @@
 #include "core/json.hpp"
 #include "core/result.hpp"
 #include "events/run_state.hpp"
+#include "project/project.hpp"
 
 #include <filesystem>
 #include <optional>
@@ -67,6 +68,10 @@ std::vector<RunInfo> list_runs(const std::filesystem::path& runs_dir);
 Result<RunInfo> read_run_info(const std::filesystem::path& dir);
 // A run by id, or by a unique prefix of its id.
 Result<std::filesystem::path> find_run(const std::filesystem::path& runs_dir, std::string_view id);
+
+// A resumed run keeps the settings it recorded in run.json (model, effort, workers, run budget,
+// per-function limits, approval policies) unless the caller changes them afterwards.
+void apply_recorded_settings(const Json& run, project::AgentSettings& settings);
 
 // What a run did, from its (replayed or live) state: totals and, per function, the outcome of its
 // latest session plus the totals of all its sessions. summary.json holds this; `decomp runs show`

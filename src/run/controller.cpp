@@ -43,6 +43,11 @@ std::string transcript_file(const Symbol& fn, int session_number) {
 
 RunController::RunController(RunDeps deps, events::EventBus& bus) : deps_(std::move(deps)), bus_(bus) {
     approvals_ = std::make_shared<agent::ApprovalGate>(&bus_);
+    // The shared rate gate's view of the account's limits, for the top bar's gauge and the Run monitor.
+    gate_->set_listener([this](const agent::RateLimitSnapshot& s) {
+        bus_.publish(events::RateLimitUpdated{s.requests_limit, s.requests_remaining, s.input_limit, s.input_remaining, s.output_limit,
+                                              s.output_remaining, s.reset, s.backoff_ms});
+    });
     needs_program_ = !deps_.run_session;
     if (!deps_.run_session)
         deps_.run_session = [](const SessionRequest& r, events::EventBus& b) {
@@ -58,6 +63,7 @@ RunController::~RunController() {
     }
     if (live) abort();
     wait();
+    gate_->set_listener(nullptr);
     summary_state_.detach();
 }
 
