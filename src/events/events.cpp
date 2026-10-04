@@ -137,8 +137,8 @@ Json to_json(const Event& e) {
             [](const QueueUpdated& p) -> Json {
                 Json items = Json::array();
                 for (const auto& q : p.items)
-                    items.push_back({{"va", q.va}, {"function", q.function}, {"pinned", q.pinned}, {"difficulty", q.difficulty}});
-                return {{"items", items}};
+                    items.push_back({{"va", q.va}, {"function", q.function}, {"pinned", q.pinned}, {"difficulty", q.difficulty}, {"sessions", q.sessions}});
+                return {{"items", items}, {"total", p.total}};
             },
             [](const Control& p) -> Json { return {{"command", p.command}, {"target", p.target}, {"detail", p.detail}}; },
         },
@@ -211,7 +211,9 @@ Result<Event> event_from_json(const Json& j) {
         if (auto it = d.find("items"); it != d.end() && it->is_array())
             for (const auto& item : *it)
                 q.items.push_back({static_cast<u64>(json_int_or(item, "va", 0)), json_string_or(item, "function", ""),
-                                   json_bool_or(item, "pinned", false), json_number_or(item, "difficulty", 0)});
+                                   json_bool_or(item, "pinned", false), json_number_or(item, "difficulty", 0),
+                                   static_cast<int>(json_int_or(item, "sessions", -1))});
+        q.total = static_cast<u64>(json_int_or(d, "total", 0));
         e.payload = std::move(q);
     } else if (type == "control") e.payload = Control{s("command"), s("target"), s("detail")};
     else return make_error(ErrorCode::parse, "unknown event type '{}'", type);

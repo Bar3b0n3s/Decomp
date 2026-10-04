@@ -18,10 +18,10 @@ RunSummary summarize(const events::RunStateData* s, std::chrono::system_clock::t
     r.workers_total = s->worker_count;
     for (const auto& [id, w] : s->workers)
         if (!w.session.empty()) ++r.workers_active;
-    r.planned = static_cast<int>(std::max(s->planned.size(), s->planned_vas.size()));
+    r.planned = static_cast<int>(s->planned_count());
     r.finished = s->finished;
     r.matched = s->matched;
-    r.queued = s->queue ? s->queue->size() : 0;
+    r.queued = s->queue_total;
     r.cost_usd = s->cost_usd;
     r.budget_usd = s->budget.run.usd;
     r.cache_hit_rate = s->cache_hit_rate();

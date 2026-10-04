@@ -2,6 +2,7 @@
 
 #include "events/events.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <deque>
 #include <map>
@@ -134,14 +135,19 @@ struct FileRecord {
 struct RunStateData {
     std::string run_id, project, model, effort, status;
     int worker_count = 0;
-    std::vector<std::string> planned;
-    std::vector<u64> planned_vas;
+    // The run's selection (readable names and addresses). Shared between snapshots: a run may plan
+    // 100,000 functions, and the lists change only when it starts.
+    std::shared_ptr<const std::vector<std::string>> planned = std::make_shared<const std::vector<std::string>>();
+    std::shared_ptr<const std::vector<u64>> planned_vas = std::make_shared<const std::vector<u64>>();
     Json config;
     std::vector<u64> interrupted;  // sessions cut off before a resume
     TimePoint started{}, ended{};
     std::map<std::string, std::shared_ptr<SessionState>> sessions;
     std::map<int, WorkerState> workers;
+    // The head of the queue of pending functions (all of it unless the run is large), and the number
+    // of pending functions in all.
     std::shared_ptr<const std::vector<QueueEntry>> queue = std::make_shared<const std::vector<QueueEntry>>();
+    usize queue_total = 0;
     std::map<u64, ApprovalState> approvals;
     int approvals_pending = 0;
     RateLimitState rate_limit;
@@ -162,6 +168,7 @@ struct RunStateData {
     std::map<i64, MinuteStats> minutes;  // minutes since the epoch -> stats
     u64 last_seq = 0;
 
+    usize planned_count() const { return std::max(planned->size(), planned_vas->size()); }
     double cache_hit_rate() const {
         long long input_total = usage.input + usage.cache_read + usage.cache_write;
         return input_total ? static_cast<double>(usage.cache_read) / static_cast<double>(input_total) : 0.0;

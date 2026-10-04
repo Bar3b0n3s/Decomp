@@ -125,6 +125,9 @@ public:
     std::shared_ptr<agent::ApprovalGate> approvals() const { return approvals_; }
 
     static constexpr int kMaxWorkers = 64;
+    // queue_updated carries at most this many pending functions (and their total), so the events of a
+    // large run stay small; the head is published again once half of it has been dispatched.
+    static constexpr usize kQueueEventItems = 500;
 
 private:
     struct Running {
@@ -139,6 +142,7 @@ private:
         QueueItem item;      // run
         std::string session;
         std::shared_ptr<agent::LoopControl> control;
+        bool refresh_queue = false;  // run: the published head of the queue is half used up
     };
 
     void begin_locked(RunStore store, RunOptions options);
@@ -190,6 +194,9 @@ private:
 
     std::mutex persist_mutex_;      // orders run.json and summary.json writes
     std::mutex queue_event_mutex_;  // orders queue_updated events
+    usize queue_event_head_ = 0;    // functions in the last queue_updated (under mutex_)
+    bool queue_event_truncated_ = false;
+    usize dispatched_since_queue_event_ = 0;
     std::chrono::steady_clock::time_point last_persist_{}, last_summary_{};
     std::mutex join_mutex_;
 };

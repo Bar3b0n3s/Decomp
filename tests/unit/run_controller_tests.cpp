@@ -259,6 +259,39 @@ TEST_CASE("run controller: 200 functions on 4 workers") {
     CHECK(info->matched == 100);
 }
 
+TEST_CASE("run controller: a large queue is published as its head, refilled as it drains") {
+    Harness h;
+    h.sessions.turns = 1;
+    h.sessions.turn_time = 0ms;
+    // A viewer's own reducer: the head it shows must not run dry while functions are pending.
+    std::mutex viewer_mutex;
+    events::RunState viewer;
+    usize largest_event = 0, queue_events = 0, ran_dry = 0;
+    h.bus.subscribe([&](const events::Event& e) {
+        std::lock_guard lock(viewer_mutex);
+        viewer.apply(e);
+        if (const auto* q = std::get_if<events::QueueUpdated>(&e.payload)) {
+            largest_event = std::max(largest_event, q->items.size());
+            ++queue_events;
+        }
+        if (viewer.data().queue->empty() && viewer.data().queue_total > 0) ++ran_dry;
+    });
+    REQUIRE(h.start(2000, 4, h.options(4)));
+    h.controller->wait();
+    CHECK(h.controller->status() == "completed");
+    std::lock_guard lock(viewer_mutex);
+    CHECK(largest_event == RunController::kQueueEventItems);
+    // Refilled after every half head until the rest fits: 2,000, 1,750, ..., 500 pending.
+    CHECK(queue_events >= 1 + (2000 - RunController::kQueueEventItems) / (RunController::kQueueEventItems / 2));
+    CHECK(queue_events < 40);
+    CHECK(ran_dry == 0);
+    CHECK(viewer.data().queue_total == 0);
+    CHECK(viewer.data().queue->empty());
+    CHECK(viewer.data().finished == 2000);
+    // The events stay small: the whole log is far below 2,000 functions times the queue.
+    CHECK(std::filesystem::file_size(h.run_dir() / "events.jsonl") < 4'000'000);
+}
+
 TEST_CASE("run controller: the first session runs alone until the API answers (stagger)") {
     Harness h;
     RunOptions o = h.options(4);

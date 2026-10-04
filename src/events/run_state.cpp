@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <format>
+#include <set>
 
 namespace decomp::events {
 
@@ -91,8 +92,8 @@ void RunState::apply(const Event& e) {
                        data_.model = p.model;
                        data_.effort = p.effort;
                        data_.worker_count = p.workers;
-                       data_.planned = p.functions;
-                       data_.planned_vas = p.vas;
+                       data_.planned = std::make_shared<const std::vector<std::string>>(p.functions);
+                       data_.planned_vas = std::make_shared<const std::vector<u64>>(p.vas);
                        data_.config = p.config;
                        data_.started = e.time;
                        data_.status = "running";
@@ -127,9 +128,11 @@ void RunState::apply(const Event& e) {
                        // The dispatched function leaves the queue of pending work.
                        if (std::ranges::any_of(*data_.queue, [&](const QueueEntry& q) { return q.va == p.va; })) {
                            auto rest = std::make_shared<std::vector<QueueEntry>>();
+                           rest->reserve(data_.queue->size());
                            for (const auto& q : *data_.queue)
                                if (q.va != p.va) rest->push_back(q);
                            data_.queue = std::move(rest);
+                           if (data_.queue_total > 0) --data_.queue_total;
                        }
                        auto& s = session(p.session);
                        s.function = p.function;
@@ -337,7 +340,28 @@ void RunState::apply(const Event& e) {
                        if (p.by != "policy" || p.verdict != "approved")
                            activity(e, std::format("approval {} {} by {}{}", p.id, p.verdict, p.by, p.reason.empty() ? "" : ": " + p.reason));
                    },
-                   [&](const QueueUpdated& p) { data_.queue = std::make_shared<const std::vector<QueueEntry>>(p.items); },
+                   [&](const QueueUpdated& p) {
+                       // A worker may have started one of these functions between the controller taking
+                       // the queue and publishing it: then more sessions of it are known here than the
+                       // entry says (logs without session counts: it is still running).
+                       std::map<u64, int> seen;
+                       for (const auto& [id, session] : data_.sessions) ++seen[session->va];
+                       std::set<u64> running;
+                       for (const auto& [w, worker] : data_.workers)
+                           if (const SessionState* r = worker.session.empty() ? nullptr : data_.session(worker.session); r && !r->finished)
+                               running.insert(r->va);
+                       auto items = std::make_shared<std::vector<QueueEntry>>();
+                       items->reserve(p.items.size());
+                       usize dropped = 0;
+                       for (const auto& q : p.items) {
+                           const auto known = seen.find(q.va);
+                           const bool stale = q.sessions >= 0 ? known != seen.end() && known->second > q.sessions : running.contains(q.va);
+                           if (stale) ++dropped;
+                           else items->push_back(q);
+                       }
+                       data_.queue_total = std::max<usize>(static_cast<usize>(p.total), p.items.size()) - dropped;
+                       data_.queue = std::move(items);
+                   },
                    [&](const Control& p) {
                        push_capped(data_.controls, ControlRecord{e.time, p}, kControls);
                        // Run-wide commands change what the run is doing (per-worker ones name a target).

@@ -77,7 +77,7 @@ public:
                 draw_activity(*s);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(std::format("Queue ({})###queue", s->queue ? s->queue->size() : 0).c_str())) {
+            if (ImGui::BeginTabItem(std::format("Queue ({})###queue", s->queue_total).c_str())) {
                 draw_queue(ctx, *s, commands, live);
                 ImGui::EndTabItem();
             }
@@ -282,7 +282,7 @@ private:
                     if (ImGui::SmallButton("Up")) commands.move(q.va, static_cast<usize>(i - 1));
                     ImGui::EndDisabled();
                     ImGui::SameLine();
-                    ImGui::BeginDisabled(i + 1 == static_cast<int>(queue.size()));
+                    ImGui::BeginDisabled(static_cast<usize>(i) + 1 >= s.queue_total);
                     if (ImGui::SmallButton("Down")) commands.move(q.va, static_cast<usize>(i + 1));
                     ImGui::EndDisabled();
                     ImGui::SameLine();
@@ -297,32 +297,48 @@ private:
             }
             ImGui::EndTable();
         }
+        if (s.queue_total > queue.size())
+            ImGui::TextDisabled("... and %zu more. The first %zu are listed; pin a function in the Function browser to run it sooner.",
+                                s.queue_total - queue.size(), queue.size());
         // Finished functions can go back into the queue while the run is live.
-        std::map<u64, const events::SessionState*> finished;
-        for (const auto& [id, session] : s.sessions)
-            if (session->finished) {
-                auto& slot = finished[session->va];
-                if (!slot || session->started > slot->started) slot = session.get();
+        if (s.finished > 0 && ImGui::CollapsingHeader("Finished functions###finished")) {
+            if (finished_version_ != s.last_seq || finished_run_ != s.run_id) {
+                // Latest session per function, rebuilt only when the run changed.
+                std::map<u64, const events::SessionState*> latest;
+                for (const auto& [id, session] : s.sessions)
+                    if (session->finished) {
+                        auto& slot = latest[session->va];
+                        if (!slot || session->started > slot->started) slot = session.get();
+                    }
+                finished_.clear();
+                for (const auto& [va, session] : latest)
+                    finished_.push_back(FinishedRow{va, session->id, session->display.empty() ? session->function : session->display, session->outcome});
+                finished_version_ = s.last_seq;
+                finished_run_ = s.run_id;
             }
-        if (!finished.empty() && ImGui::CollapsingHeader(std::format("Finished functions ({})###finished", finished.size()).c_str())) {
-            if (ImGui::BeginTable("##finished", 3, flags)) {
+            if (ImGui::BeginTable("##finished", 3, flags | ImGuiTableFlags_ScrollY, ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 12))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupColumn("Outcome");
                 ImGui::TableSetupColumn("");
-                for (const auto& [va, session] : finished) {
-                    ImGui::PushID(static_cast<int>(va));
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    const std::string name = session->display.empty() ? session->function : session->display;
-                    if (ImGui::TextLink(name.c_str())) ctx.open("agent_session", NavTarget{.va = va, .session = session->id});
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(session->outcome.c_str());
-                    ImGui::TableNextColumn();
-                    ImGui::BeginDisabled(!live);
-                    if (ImGui::SmallButton("Requeue")) commands.requeue(va);
-                    ImGui::EndDisabled();
-                    ImGui::PopID();
-                }
+                ImGui::TableHeadersRow();
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(finished_.size()));
+                while (clipper.Step())
+                    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                        const FinishedRow& row = finished_[static_cast<usize>(i)];
+                        ImGui::PushID(static_cast<int>(row.va));
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        if (ImGui::TextLink(row.name.c_str())) ctx.open("agent_session", NavTarget{.va = row.va, .session = row.session});
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(row.outcome.c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::BeginDisabled(!live);
+                        if (ImGui::SmallButton("Requeue")) commands.requeue(row.va);
+                        ImGui::EndDisabled();
+                        ImGui::PopID();
+                    }
                 ImGui::EndTable();
             }
         }
@@ -481,6 +497,13 @@ private:
     bool editing_budget_ = false;
     agent::LoopLimits limits_;
     int window_minutes_ = 10;
+    struct FinishedRow {
+        u64 va = 0;
+        std::string session, name, outcome;
+    };
+    std::vector<FinishedRow> finished_;
+    u64 finished_version_ = ~u64{0};
+    std::string finished_run_;
 };
 
 } // namespace

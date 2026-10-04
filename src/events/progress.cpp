@@ -30,8 +30,8 @@ std::string ProgressRenderer::render_block(const RunStateData& st, std::chrono::
     auto end = st.status == "running" || st.status.empty() ? now : st.ended;
     out += std::format("run {}  {}  model {} ({})  elapsed {}  spend ${:.2f}  cache {:.0f}%  matched {}/{}\n", st.run_id,
                        st.status.empty() ? "starting" : st.status, st.model, st.effort, duration_text(end - st.started), st.cost_usd,
-                       100 * st.cache_hit_rate(), st.matched, st.planned.size());
-    if (st.queue && !st.queue->empty()) out += std::format("  queue {} function(s)\n", st.queue->size());
+                       100 * st.cache_hit_rate(), st.matched, st.planned_count());
+    if (st.queue_total > 0) out += std::format("  queue {} function(s)\n", st.queue_total);
     // At most kMaxWorkerLines worker lines, so the block stays small with many workers.
     constexpr usize kMaxWorkerLines = 12;
     usize shown = 0, idle = 0;

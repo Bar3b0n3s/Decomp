@@ -163,7 +163,7 @@ TEST_CASE("reducer: workers, queue, approvals, rate limits, budgets, logs, compi
     apply(RunStarted{"p", "m", "high", 2, {"add", "dispatch"}, {0x401060, 0x4010f0}, Json{{"run_budget_usd", 10}}});
     apply(QueueUpdated{{{0x401060, "add", false, 1}, {0x4010f0, "dispatch", true, 3}}});
     CHECK(st.data().queue->size() == 2);
-    CHECK(st.data().planned_vas.size() == 2);
+    CHECK(st.data().planned_vas->size() == 2);
     apply(WorkerPhaseChanged{"waiting for slot", "", ""}, 1, 1);
     apply(SessionStarted{"s1", "add", "add", 0x401060, "sessions/add.jsonl"}, 0, 2);
     apply(TurnStarted{"s1", 1}, 0, 3);
@@ -232,6 +232,45 @@ TEST_CASE("reducer: workers, queue, approvals, rate limits, budgets, logs, compi
     // A duplicate session_finished does not count twice.
     apply(SessionFinished{"s1", "stopped", "", 50, 2, 0.5}, 0, 71);
     CHECK(st.data().finished == 0);
+}
+
+TEST_CASE("reducer: a large queue arrives as its head and a total") {
+    RunState st;
+    u64 seq = 1;
+    auto apply = [&](Payload p, int worker = -1) { st.apply(ev(seq++, std::move(p), worker)); };
+    // An older log: no total, so the items are the whole queue.
+    apply(QueueUpdated{{{0x10, "a", false, 1}, {0x20, "b", false, 1}}});
+    CHECK(st.data().queue_total == 2);
+    // A head of three out of a thousand pending functions.
+    apply(QueueUpdated{{{0x10, "a", false, 1}, {0x20, "b", false, 1}, {0x30, "c", false, 1}}, 1000});
+    CHECK(st.data().queue->size() == 3);
+    CHECK(st.data().queue_total == 1000);
+    apply(SessionStarted{"s1", "a", "a", 0x10, ""}, 0);
+    CHECK(st.data().queue->size() == 2);
+    CHECK(st.data().queue_total == 999);
+    // A head taken just before a worker started one of its functions: the running one is not pending.
+    apply(SessionStarted{"s2", "b", "b", 0x20, ""}, 1);
+    CHECK(st.data().queue_total == 998);
+    apply(QueueUpdated{{{0x20, "b", false, 1}, {0x30, "c", false, 1}, {0x40, "d", false, 1}}, 999});
+    REQUIRE(st.data().queue->size() == 2);
+    CHECK(st.data().queue->front().va == 0x30);
+    CHECK(st.data().queue_total == 998);
+    // Taken before "c" started and published after its session already finished: still stale. A
+    // requeued "a" (its one session known) is pending again.
+    apply(SessionStarted{"s3", "c", "c", 0x30, ""}, 2);
+    apply(SessionFinished{"s3", "matched", "", 100, 1, 0.1}, 2);
+    apply(QueueUpdated{{{0x10, "a", false, 1, 1}, {0x30, "c", false, 1, 0}, {0x40, "d", false, 1, 0}}, 3});
+    REQUIRE(st.data().queue->size() == 2);
+    CHECK(st.data().queue->front().va == 0x10);
+    CHECK(st.data().queue->back().va == 0x40);
+    CHECK(st.data().queue_total == 2);
+    apply(QueueUpdated{{}, 0});
+    CHECK(st.data().queue_total == 0);
+    // The total survives the log.
+    const Event e = ev(9, QueueUpdated{{{0x30, "c", true, 2}}, 77});
+    auto back = event_from_json(to_json(e));
+    REQUIRE(back);
+    CHECK(std::get<QueueUpdated>(back->payload).total == 77);
 }
 
 TEST_CASE("snapshots are immutable and share unchanged sessions") {

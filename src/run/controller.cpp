@@ -225,6 +225,7 @@ void RunController::worker_main(int worker) {
             continue;
         }
         announced.clear();
+        if (d.refresh_queue) notify_queue();
         run_item(worker, d);
     }
     if (last) finish_run();
@@ -284,6 +285,11 @@ RunController::Dispatch RunController::next_dispatch(int worker, const std::stri
         if (limits_) d.control->set_limits(*limits_);
         running_[worker] = Running{d.item.va, d.session, d.control};
         ++dispatched_;
+        // Viewers drop dispatched functions from the head they were sent; refill it before it runs out.
+        if (queue_event_truncated_ && ++dispatched_since_queue_event_ >= std::max<usize>(1, queue_event_head_ / 2)) {
+            queue_event_truncated_ = false;  // until notify_queue() has sent the new head
+            d.refresh_queue = true;
+        }
         return d;
     }
 }
@@ -460,12 +466,20 @@ void RunController::write_summary(bool force) {
 
 void RunController::notify_queue() {
     std::lock_guard order(queue_event_mutex_);
-    std::vector<events::QueueEntry> entries;
+    events::QueueUpdated update;
     {
         std::lock_guard lock(mutex_);
-        for (const QueueItem* item : queue_.pending()) entries.push_back(events::QueueEntry{item->va, display_of(*item), item->pinned, item->difficulty});
+        const auto pending = queue_.pending();
+        update.total = pending.size();
+        for (const QueueItem* item : pending) {
+            if (update.items.size() == kQueueEventItems) break;
+            update.items.push_back(events::QueueEntry{item->va, display_of(*item), item->pinned, item->difficulty, item->sessions});
+        }
+        queue_event_head_ = update.items.size();
+        queue_event_truncated_ = update.total > update.items.size();
+        dispatched_since_queue_event_ = 0;
     }
-    bus_.publish(events::QueueUpdated{std::move(entries)});
+    bus_.publish(std::move(update));
 }
 
 void RunController::control_event(std::string command, std::string target, std::string detail) {

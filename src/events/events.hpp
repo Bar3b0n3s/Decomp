@@ -179,9 +179,13 @@ struct QueueEntry {
     std::string function;
     bool pinned = false;
     double difficulty = 0;
+    int sessions = -1;  // sessions the function had when the queue was taken (-1: unknown, older logs)
 };
+// The pending functions in dispatch order. Large queues are sent as their head: `items` holds the
+// first ones and `total` counts them all (older logs have no total: then items is the whole queue).
 struct QueueUpdated {
     std::vector<QueueEntry> items;
+    u64 total = 0;
 };
 // Acknowledges a supervisor command once it has been applied.
 struct Control {

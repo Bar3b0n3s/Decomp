@@ -11,12 +11,12 @@ subset ([CLI parity](#cli-parity)). This document specifies the chrome, every vi
 notifications, accessibility, persistence, CLI parity, the event-driven architecture, testing and
 phasing.
 
-Status: the backbone is implemented in the [first slice](roadmap.md#first-working-slice): the typed
-events, `EventBus`, the `RunState` reducer, the JSONL event log and its replay into `RunState`, the CLI
-progress view, and single-session control through `LoopControl` (pause, resume, stop, abort,
-guidance). `decomp-gui`, the `RunController` and every view below are Phase 1 or later and do not
-exist yet. Data sources name the slice's event types (`turn_finished`, `status_changed`, ...;
-[Events](#events) lists them); event types marked *planned* will be added with the GUI.
+Status: the backbone (typed events, the serialized `EventBus`, the `RunState` reducer and its
+snapshots, the JSONL event log and its replay, the CLI progress view) and the `RunController` are
+implemented ([Architecture](#architecture)). `decomp-gui` has the chrome, projects, live and past
+runs, and the Run monitor, Changes and approvals, Toolchains and compiles, Logs and errors and Settings
+views; the other Phase 1 views are being built. Data sources name event types ([Events](#events) lists
+them).
 
 ## Principles
 
@@ -627,24 +627,25 @@ and opening past runs are GUI features (Phase 1).
 
 ## Architecture
 
-In the slice, `decomp agent` publishes events from its own threads, and every subscriber runs
-synchronously on the publishing thread. The parts marked Phase 1 are the GUI design:
+Sessions publish events from their worker threads; the bus delivers them one at a time, in sequence
+order, to every subscriber. The GUI never reads worker state: it renders immutable snapshots and sends
+commands to the run controller.
 
 ```
- decomp agent: run_loop, tools, compiles (CLI main thread)
-        | publish(Event)
-        v
-    EventBus --+--> JsonlEventLog --> .decomp/runs/<run-id>/events.jsonl   (stream deltas skipped)
-               +--> ProgressRenderer (its own RunState) --> stderr
-               +--> RunState reducer --> snapshot: shared_ptr<const RunState>     (Phase 1)
-                                               | atomic load, once per frame
-                                               v
-                                        decomp-gui views                          (Phase 1)
-                                               | commands
-                                               v
-                                        RunController --> session workers         (Phase 1)
+ RunController: N workers, one session each (run_loop, tools, compiles)    decomp agent: one session
+        | publish(Event)                                                           | publish(Event)
+        v                                                                          v
+    EventBus (serialized) --+--> JsonlEventLog --> .decomp/runs/<run-id>/events.jsonl   (no stream deltas)
+                            +--> ProgressRenderer --> stderr                            (CLI)
+                            +--> RunStateStore (reducer) --> snapshot(): shared_ptr<const RunStateData>
+                                                                 | once per frame
+                                                                 v
+                                                          decomp-gui views
+                                                                 | RunCommands
+                                                                 v
+                                                          RunController --> LoopControl per session
 
- Ctrl+C, --interactive --> LoopControl --> run_loop                               (slice)
+ decomp run --interactive, Ctrl+C --> RunController        decomp agent: Ctrl+C, --interactive --> LoopControl
 ```
 
 ### Events
@@ -655,92 +656,105 @@ with a sequence number (`seq`), a UTC time (`time`, milliseconds since the Unix 
 In `events.jsonl` an event is one line with its `type` and its payload under `data`:
 
 ```json
-{"data":{"function":"?add@@YAHHH@Z","status":"matched","va":4198496},"run":"2026-10-04T02-08-33-f11d","seq":47,"time":1791079713812,"type":"status_changed","worker":0}
+{"data":{"best":100.0,"function":"?add@@YAHHH@Z","old_status":"unstarted","status":"matched","va":4198496},"run":"2026-10-04T02-08-33-f11d","seq":47,"time":1791079713812,"type":"status_changed","worker":0}
 ```
 
 | Type | Payload |
 |---|---|
-| `run_started` | `project`, `model`, `effort`, `workers`, `functions` (the selection) |
-| `run_finished` | `status`: `completed`, `stopped`, `aborted` or `error` |
-| `session_started` | `session`, `function`, `display`, `va` |
+| `run_started` | `project`, `model`, `effort`, `workers`, `functions` (the selection's names), `vas`, `config` (budgets, limits, policies) |
+| `run_finished` | `status`: `completed`, `stopped`, `aborted`, `budget_exhausted` or `error` |
+| `run_resumed` | `interrupted`: the functions whose sessions were cut off and start again |
+| `session_started` | `session`, `function`, `display`, `va`, `transcript` (relative to the run directory) |
 | `session_finished` | `session`, `outcome`, `detail`, `best_match`, `turns`, `cost_usd` |
 | `turn_started` | `session`, `turn` |
-| `turn_finished` | `session`, `turn`, `stop_reason`, `usage` (`input`, `output`, `cache_write`, `cache_read`), `cost_usd`, `latency_ms` |
+| `turn_finished` | `session`, `turn`, `stop_reason`, `usage` (`input`, `output`, `cache_write`, `cache_read`), `cost_usd`, `latency_ms`, serving `model`, `ttft_ms`, `had_fallback` |
 | `stream_delta` | `session`, `kind` (`text` or `thinking`), `text` |
-| `tool_call_started` | `session`, `id`, `tool`, `turn`, `input` |
+| `tool_call_started` | `session`, `id`, `tool`, `turn`, `input` (a preview: long strings are shortened) |
 | `tool_call_finished` | `session`, `id`, `tool`, `is_error`, `summary` (the first line of the result), `duration_ms` |
-| `compile_finished` | `session`, `ok`, `cached`, `duration_ms`, `errors` |
-| `diff_computed` | `session`, `match_percent`, `byte_exact`, `summary` |
-| `retry` | `session`, `attempt`, `error`, `delay_ms` |
+| `compile_started` | `session`, `toolchain`, `command` |
+| `compile_finished` | `session`, `ok`, `cached`, `duration_ms`, `errors`, `exit_code`, `command`, `output` (at most 4 KB), `toolchain` |
+| `diff_computed` | `session`, `match_percent`, `byte_exact`, `summary`, `attempt`, `rows` (`equal`, `encoding`, `operand`, `opcode`, `insert`, `delete`) |
+| `retry` | `session`, `attempt`, `error`, `delay_ms`, HTTP `status`, `retry_after_ms` |
 | `refusal` | `session`, `category`, `explanation` |
-| `guidance` | `session`, `text` |
-| `status_changed` | `function`, `va`, `status` |
-| `file_written` | `path`, `reason` |
-| `log` | `level`, `message` (warnings and errors logged during an agent run) |
+| `guidance` | `session`, `text`, `id` |
+| `status_changed` | `function`, `va`, `status`, `old_status`, `best` |
+| `file_written` | `path`, `reason`, `size`, `sha1`, `session`, `approval` |
+| `log` | `level`, `message`, `session` (warnings and errors logged during a run) |
+| `worker_phase_changed` | `phase` (for example `thinking`, `compiling`, `waiting for rate limit`, `waiting for approval`, `paused`, `idle`, `retired`), `session`, `function` |
+| `rate_limit_updated` | `requests_limit`, `requests_remaining`, `input_tokens_limit`, `input_tokens_remaining`, `output_tokens_limit`, `output_tokens_remaining`, `reset`, `backoff_ms` |
+| `budget_changed` | `scope` (`run` or `function`), `usd`, `tokens`, `turns`, `minutes` |
+| `symbol_changed` | `va`, `old_name`, `new_name`, `kind`, `size`, `source`, `session` |
+| `approval_requested` | `id`, `action`, `session`, `function`, `va`, `path`, `summary` |
+| `approval_decided` | `id`, `verdict` (`approved`, `denied`, `cancelled`), `by` (`policy` or `user`), `reason` |
+| `queue_updated` | `items` (the first pending functions in dispatch order, at most 500: `va`, `function`, `pinned`, `difficulty`, `sessions`), `total` (all pending functions) |
+| `control` | `command`, `target`, `detail`: a supervisor command, once applied |
 
-Planned with the GUI: `worker_phase_changed` (worker, phase, function), `compile_started`
-(toolchain and command line), `budget_updated` (budget used against limit), `rate_limit_updated`
-(header snapshot), `symbol_changed` (address, old and new name, kind, size, source),
-`approval_requested` and `approval_decided`, and more fields on existing events: the serving model
-and time to first token on `turn_finished`, the attempt number, row counts and hints on
-`diff_computed`, the old status and best score on `status_changed`, and size, SHA-1 and approval
-state on `file_written`.
+Fields added after the first slice have defaults, so a slice-era `events.jsonl` still replays.
 
 ### RunState
 
 `RunState` (`src/events/run_state.hpp`) is a pure fold over events: `RunState::apply(const Event&)`
-contains no I/O and takes times only from the events. It tracks:
+contains no I/O and takes times only from the events. `RunStateData` holds:
 
 ```
-RunState
-  run         id, project, model, effort, status (running, then completed | stopped | aborted | error),
-              worker count, planned functions, started, ended
-  sessions{}  function, display, va, worker, phase, turn, tool calls, compiles, compile errors,
-              best and last match, matched, scores[] (one per diff), usage, cost, retries,
-              last tool and its summary, stream tail (last 600 characters), refusal category,
-              outcome, detail, started, ended
-  workers{}   id, session, phase
-  totals      tokens by type, dollars, matched, finished, retries, refusals, tool calls, compiles,
-              cache-hit rate
-  activity    the last 200 plain-language lines, such as
-              "[02:08:33] int __cdecl add(int, int): turn 2 compile_and_diff -> compile: ok"
-  errors      the last 50 error lines
-  files_written, last_seq
+run         id, project, model, effort, status, worker count, planned functions (names and addresses),
+            config, interrupted functions, started, ended
+sessions{}  function, display, va, worker, phase, turn, tool calls, compiles and errors, best and last
+            match, matched, scores[] (one per diff), usage, cost, retries, last tool and its summary,
+            stream tail, the current turn's streamed text and thinking (16 KB each, cleared every
+            turn), serving model, time to first token, fallback turns, refusal category, transcript,
+            outcome, detail, started, ended
+workers{}   session, phase, function, phase start, phase spans (the worker timeline, 1,000 per worker)
+queue       the head of the pending queue (at most 500) and the number pending
+approvals   by id, with the number pending
+rate_limit  the latest snapshot of the rate gate, and a history (240)
+budget      run and per-function limits
+totals      tokens by type, dollars, matched, finished, retries, refusals, tool calls, compiles,
+            fallback turns, cache-hit rate
+activity    the last 200 plain-language lines, such as
+            "[02:08:33] int __cdecl add(int, int): turn 2 compile_and_diff -> compile: ok"
+errors      the last 50 error lines, and 300 structured records by kind (api, tool, session,
+            compiler, log)
+files       files written, recent compiles (200, with command and output), the log tail (500),
+            supervisor commands, symbol changes
+minutes     per-minute activity for throughput charts (turns, tokens, cost, compiles, retries, time
+            to first token; 1,440 minutes)
 ```
 
-Planned for Phase 1: per-turn detail (`turns[]` with blocks, tool calls, stop reason, serving model,
-usage, cost, time to first token and latency), a per-function overlay on the project's stored state,
-rate-limit state, the queue, approvals, notifications and a log tail. The activity feed is built by
-the reducer; throughput figures and chart series will be derived from `RunState` by view-model
-functions, which are pure and testable without ImGui.
+Everything is capped, so a long run uses bounded memory. View models (`src/viewmodel/`) derive
+tables, chart series and ETAs from `RunStateData`; they are pure and tested without ImGui.
 
-### Snapshots (Phase 1)
+### Snapshots
 
-The reducer will run on a dispatcher thread. After a batch of events it publishes a new immutable
-snapshot with an atomic swap, at most once per frame interval. Completed turns, attempts and log
-chunks are immutable and shared between snapshots, so publishing one does not copy the history. The
-exact structure-sharing scheme is open. The GUI loads the latest snapshot at the start of each frame
-and never touches worker state. Streaming deltas arriving faster than the frame rate are coalesced.
-In the slice there are no snapshots: the progress view applies each event to its own `RunState` under
-a lock, and redraws at most every 100 ms for stream deltas.
+`RunStateStore` keeps the reducer behind a lock and hands out immutable snapshots
+(`std::shared_ptr<const RunStateData>`). A snapshot is cached until the next event, so a UI that
+redraws without new events gets the same one for free. Taking a snapshot copies the run's small
+fields and shares the rest: sessions are `shared_ptr`s, and the reducer clones a session only when an
+event changes one that a snapshot still holds (copy-on-write by generation); the planned functions,
+the queue and the recent compiles and log lines are shared, immutable vectors or records. The GUI takes
+one snapshot per frame; workers wake the UI loop, at most once per frame, when events arrive. With
+1,000 sessions a snapshot takes well under a millisecond in a Release build (the performance test in
+`tests/unit/perf_tests.cpp` measures it).
 
-### RunController (Phase 1)
+### RunController
 
-`RunController` will be the only way to change anything: start(selection, config), pause, resume,
-stop, abort, skip, inject_message(session, text), approve(action, decision), set_concurrency and live
-budget changes. Commands are queued and acknowledged through events, so the UI shows a command as
-pending until the workers act on it. The slice has the single-session `LoopControl`: pause, resume,
-stop, abort and inject guidance. Guidance is acknowledged by a `guidance` event when it is sent, and
-pauses and resumptions are recorded in the transcript.
+`RunController` (`src/run/controller.hpp`) is the only way to change a run: start (a selection and
+its settings), resume, pause and resume (all workers or one), stop, abort, skip, requeue, enqueue,
+remove, move, pin, concurrency, the run budget, per-function limits, guidance (with retract), approval
+decisions and policies. Every command is applied under the controller's lock, forwarded to the
+affected sessions' `LoopControl`, and acknowledged by a `control` event; the views show the result
+from the snapshot. The GUI reaches it through `RunCommands` (`src/gui/services.hpp`); `decomp run
+--interactive` maps its stdin commands onto it. A single `decomp agent` session is steered through
+its `LoopControl` directly.
 
 ### Replay of past runs
 
 Opening a past run reads its `events.jsonl` through the same reducer and shows the result in the same
 views, read-only, with the run controls disabled. Transcripts are loaded on demand when an Agent
-session is opened. "Run again" starts a new run with the same selection and configuration. Because
-past and live runs share one code path, anything visible live is visible afterwards; the one gap is
-the streamed text, which `events.jsonl` omits and the transcript holds in full. The library side
-exists in the slice (`read_event_log()` and `RunState::replay()`); the views are Phase 1.
+session is opened. "Run again" starts a new run with the same selection and configuration, and
+"Resume" continues a run that stopped, ran out of budget or was interrupted. Because past and live runs
+share one code path, anything visible live is visible afterwards; the one gap is the streamed text,
+which `events.jsonl` omits and the transcript holds in full.
 
 ## Testing strategy
 

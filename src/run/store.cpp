@@ -187,7 +187,7 @@ Json run_summary(const events::RunStateData& state) {
               {"effort", state.effort},
               {"workers", state.worker_count},
               {"started", iso(state.started)},
-              {"functions_planned", state.planned_vas.empty() ? state.planned.size() : state.planned_vas.size()},
+              {"functions_planned", state.planned_count()},
               {"functions_worked", functions.size()},
               {"functions_matched", matched},
               {"sessions", state.sessions.size()},
