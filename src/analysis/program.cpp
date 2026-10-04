@@ -73,6 +73,29 @@ std::optional<u64> Program::resolve(std::string_view text) const {
     return std::nullopt;
 }
 
+std::vector<u64> Program::read_table_entries(const JumpTable& table, u64 fn_start, u64 fn_limit) const {
+    std::vector<u64> targets;
+    for (unsigned i = 0; i < 4096; ++i) {
+        u64 slot = table.table_va + u64(i) * table.entry_size;
+        std::optional<u64> target;
+        switch (table.encoding) {
+        case TableEncoding::absolute:
+            target = table.entry_size == 4 ? image_->read<u32>(slot).transform([](u32 v) { return u64(v); }) : image_->read<u64>(slot);
+            break;
+        case TableEncoding::relative:
+            target = image_->read<i32>(slot).transform([&](i32 v) { return table.table_va + static_cast<u64>(static_cast<i64>(v)); });
+            break;
+        case TableEncoding::rva:
+            target = image_->read<u32>(slot).transform([&](u32 v) { return image_->image_base() + v; });
+            break;
+        }
+        if (!target || *target < fn_start || *target >= fn_limit || !image_->is_code(*target)) break;
+        if (i > 0 && symbols_.at(slot) && symbols_.at(slot)->kind != SymbolKind::label) break;  // next object
+        targets.push_back(*target);
+    }
+    return targets;
+}
+
 std::optional<JumpTable> Program::read_jump_table(const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const {
     // x86 switch dispatch: jmp dword ptr [reg*4 + table]
     if (jmp.flow != x86::Flow::indirect_jump || jmp.operands.empty()) return std::nullopt;
@@ -84,13 +107,54 @@ std::optional<JumpTable> Program::read_jump_table(const x86::Instruction& jmp, u
     table.jump_va = jmp.address;
     table.table_va = *jmp.memory_target;
     table.entry_size = entry;
-    for (unsigned i = 0; i < 4096; ++i) {
-        u64 slot = table.table_va + u64(i) * entry;
-        auto value = entry == 4 ? image_->read<u32>(slot).transform([](u32 v) { return u64(v); }) : image_->read<u64>(slot);
-        if (!value || *value < fn_start || *value >= fn_limit || !image_->is_code(*value)) break;
-        if (i > 0 && symbols_.at(slot) && symbols_.at(slot)->kind != SymbolKind::label) break;  // next object
-        table.targets.push_back(*value);
+    table.encoding = TableEncoding::absolute;
+    table.targets = read_table_entries(table, fn_start, fn_limit);
+    if (table.targets.empty()) return std::nullopt;
+    return table;
+}
+
+std::optional<JumpTable> Program::read_x64_jump_table(const std::vector<x86::Instruction>& before, const x86::Instruction& jmp,
+                                                      u64 fn_start, u64 fn_limit) const {
+    // clang:  lea B, [rip+T]; movsxd R, dword ptr [B+I*4]; add R, B; jmp R          (entries: T + int32)
+    // MSVC:   lea B, [rip+__ImageBase]; mov R, dword ptr [B+I*4+T_rva]; add R, B; jmp R   (entries: RVAs)
+    if (arch() != Arch::x64 || jmp.flow != x86::Flow::indirect_jump || jmp.operands.empty() ||
+        jmp.operands[0].kind != x86::OperandKind::reg)
+        return std::nullopt;
+    const usize window = std::min<usize>(before.size(), 12);
+    const x86::Instruction* load = nullptr;
+    for (usize k = 0; k < window && !load; ++k) {
+        const auto& ins = before[before.size() - 1 - k];
+        for (const auto& op : ins.operands)
+            if (op.kind == x86::OperandKind::mem && op.mem.scale == 4 && !op.mem.base.empty() && !op.mem.index.empty() &&
+                (ins.mnemonic == "movsxd" || ins.mnemonic == "mov"))
+                load = &ins;
     }
+    if (!load) return std::nullopt;
+    const x86::Operand* mem = nullptr;
+    for (const auto& op : load->operands)
+        if (op.kind == x86::OperandKind::mem) mem = &op;
+    std::optional<u64> base_value;
+    for (const auto& ins : before) {
+        if (ins.address >= load->address) break;
+        if (ins.mnemonic == "lea" && ins.operands.size() == 2 && ins.operands[0].kind == x86::OperandKind::reg &&
+            ins.operands[0].reg == mem->mem.base && ins.memory_target)
+            base_value = ins.memory_target;
+    }
+    if (!base_value) return std::nullopt;
+    JumpTable table;
+    table.jump_va = jmp.address;
+    table.load_va = load->address;
+    table.entry_size = 4;
+    if (*base_value == image_->image_base() && mem->mem.has_disp) {
+        table.encoding = TableEncoding::rva;
+        table.table_va = image_->image_base() + static_cast<u64>(mem->mem.disp);
+    } else if (!mem->mem.has_disp || mem->mem.disp == 0) {
+        table.encoding = TableEncoding::relative;
+        table.table_va = *base_value;
+    } else {
+        return std::nullopt;
+    }
+    table.targets = read_table_entries(table, fn_start, fn_limit);
     if (table.targets.empty()) return std::nullopt;
     return table;
 }
@@ -107,8 +171,14 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
         ext.end = std::min<u64>(start + sym->size, section_end);
         ext.from_symbol = true;
         auto list = decoder_->decode_all(*image_->view(start, ext.end - start), start);
-        for (const auto& ins : list) {
-            if (auto table = read_jump_table(ins, start, ext.end)) {
+        for (usize i = 0; i < list.size(); ++i) {
+            const auto& ins = list[i];
+            std::optional<JumpTable> table = read_jump_table(ins, start, ext.end);
+            if (!table) {
+                std::vector<x86::Instruction> before(list.begin(), list.begin() + static_cast<std::ptrdiff_t>(i));
+                table = read_x64_jump_table(before, ins, start, ext.end);
+            }
+            if (table) {
                 if (table->table_va >= start && table->table_va < ext.end) {
                     table->inside_code = true;
                     ext.data_ranges.emplace_back(table->table_va, table->table_va + table->targets.size() * table->entry_size);
@@ -123,6 +193,7 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
         std::set<u64> visited;
         std::vector<u64> work{start};
         u64 max_end = start;
+        std::vector<x86::Instruction> recent;
         while (!work.empty()) {
             u64 addr = work.back();
             work.pop_back();
@@ -133,6 +204,7 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
                 if (!ins) break;
                 visited.insert(addr);
                 max_end = std::max(max_end, ins->end());
+                recent.push_back(*ins);
                 bool stop = false;
                 switch (ins->flow) {
                 case x86::Flow::cond_jump:
@@ -144,7 +216,8 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
                     stop = true;
                     break;
                 case x86::Flow::indirect_jump:
-                    if (auto table = read_jump_table(*ins, start, limit)) {
+                    if (auto table = read_jump_table(*ins, start, limit) ? read_jump_table(*ins, start, limit)
+                                                                          : read_x64_jump_table(recent, *ins, start, limit)) {
                         for (u64 t : table->targets) work.push_back(t);
                         ext.jump_tables.push_back(std::move(*table));
                     }

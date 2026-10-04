@@ -1,0 +1,145 @@
+#include "analysis/program.hpp"
+#include "formats/coff.hpp"
+#include "matching/diff.hpp"
+#include "test_util.hpp"
+
+#include <doctest/doctest.h>
+
+#include <algorithm>
+
+using namespace decomp;
+using namespace decomp::matching;
+
+namespace {
+
+struct Fixture {
+    Program program;
+    coff::Object exact, other, mutated;
+};
+
+Fixture load(const char* arch) {
+    std::string a(arch);
+    return {Program::open(test::fixture(a + "/basic.exe")).value(), coff::Object::load(test::fixture(a + "/basic.obj")).value(),
+            coff::Object::load(test::fixture(a + "/other.obj")).value(),
+            coff::Object::load(test::fixture(a + "/mutated.obj")).value()};
+}
+
+FunctionDiff diff(const Fixture& f, const char* name, const coff::Object& obj) {
+    auto va = f.program.resolve(name);
+    REQUIRE(va);
+    return diff_function(f.program, *va, obj).value();
+}
+
+bool has_hint(const FunctionDiff& d, std::string_view needle) {
+    return std::ranges::any_of(d.hints, [&](const std::string& h) { return h.find(needle) != std::string::npos; });
+}
+
+} // namespace
+
+TEST_CASE("every fixture function is byte-exact against its own object") {
+    for (const char* arch : {"x86", "x64"}) {
+        CAPTURE(arch);
+        auto f = load(arch);
+        usize checked = 0;
+        for (const auto* sym : f.program.symbols().functions()) {
+            const coff::Object* obj = find_candidate_symbol(f.exact, *sym) ? &f.exact : find_candidate_symbol(f.other, *sym) ? &f.other : nullptr;
+            if (!obj) continue;  // linker thunks
+            CAPTURE(sym->display);
+            auto d = diff_function(f.program, sym->va, *obj).value();
+            CHECK(d.byte_exact);
+            CHECK(d.exact);
+            CHECK(d.match_percent == 100.0);
+            CHECK(d.hints.empty());
+            ++checked;
+        }
+        CHECK(checked == 13);
+    }
+}
+
+TEST_CASE("jump tables, strings, floats, statics and imports compare by meaning") {
+    auto f = load("x86");
+    auto d = diff(f, "dispatch", f.exact);
+    CHECK(d.byte_exact);
+    auto table_row = std::ranges::find_if(d.target.instructions, [](const SideInstruction& i) { return i.ins.flow == x86::Flow::indirect_jump; });
+    REQUIRE(table_row != d.target.instructions.end());
+    REQUIRE(table_row->refs.size() == 1);
+    CHECK(table_row->refs[0]->kind == RefKind::table);
+    CHECK(diff(f, "message", f.exact).target.instructions[0].refs[0]->kind == RefKind::string);
+    CHECK(diff(f, "scale", f.exact).byte_exact);
+    CHECK(diff(f, "helper", f.exact).byte_exact);  // static: PDB name vs mangled candidate name
+    CHECK(diff(f, "entry", f.exact).byte_exact);   // import call through the IAT
+    CHECK(diff(f, "other_value", f.other).byte_exact);
+
+    auto x64 = load("x64");
+    auto dx = diff(x64, "dispatch", x64.exact);
+    CHECK(dx.byte_exact);  // relative (clang x64) jump table
+}
+
+TEST_CASE("mutations are classified") {
+    for (const char* arch : {"x86", "x64"}) {
+        CAPTURE(arch);
+        auto f = load(arch);
+
+        auto counter = diff(f, "read_counter", f.mutated);
+        CHECK_FALSE(counter.byte_exact);
+        CHECK(counter.operand == 1);
+        CHECK(counter.opcode == 0);
+        CHECK(has_hint(counter, "g_counter2"));
+
+        auto message = diff(f, "message", f.mutated);
+        CHECK(message.operand == 1);
+        CHECK(has_hint(message, "\"hello there\""));
+
+        auto scale = diff(f, "scale", f.mutated);
+        CHECK(scale.operand == 1);
+        CHECK(has_hint(scale, "2.5f"));
+
+        auto add = diff(f, "add", f.mutated);
+        CHECK_FALSE(add.exact);
+        CHECK(add.opcode + add.operand >= 1);
+
+        auto hit = diff(f, "Player::Hit", f.mutated);
+        CHECK_FALSE(hit.byte_exact);
+        CHECK(hit.match_percent < 100.0);
+
+        auto sum = diff(f, "sum_array", f.mutated);
+        CHECK(sum.inserted + sum.deleted > 0);
+        CHECK(has_hint(sum, "more instruction"));
+
+        CHECK(diff(f, "Player::Score", f.mutated).byte_exact);  // unchanged in mutated.cpp
+        CHECK(diff(f, "mix", f.mutated).byte_exact);
+    }
+}
+
+TEST_CASE("unnamed target addresses produce binding hints") {
+    auto f = load("x86");
+    // Forget the name of g_counter: the candidate's symbol becomes a suggested binding.
+    REQUIRE(f.program.symbols().remove(0x403000));
+    auto d = diff(f, "read_counter", f.exact);
+    CHECK_FALSE(d.exact);
+    REQUIRE(d.bindings.size() == 1);
+    CHECK(d.bindings[0].target_va == 0x403000);
+    CHECK(d.bindings[0].candidate_symbol == "?g_counter@@3HA");
+    CHECK(has_hint(d, "has no symbol"));
+}
+
+TEST_CASE("reports: text and JSON") {
+    auto f = load("x86");
+    auto d = diff(f, "add", f.mutated);
+    auto text = to_text(d, {.compact = true});
+    CHECK(text.starts_with("match "));
+    CHECK(text.find("not matching") != std::string::npos);
+    auto j = to_json(d);
+    CHECK(j["byte_exact"] == false);
+    CHECK(j["counts"]["opcode"].get<int>() == static_cast<int>(d.opcode));
+    CHECK(j["rows"].size() == d.rows.size());
+    CHECK(summary_line(diff(f, "add", f.exact)).find("MATCHING (byte-exact)") != std::string::npos);
+}
+
+TEST_CASE("missing candidate symbol lists what the object defines") {
+    auto f = load("x86");
+    auto r = diff_function(f.program, 0x401060, f.other);
+    REQUIRE_FALSE(r);
+    CHECK(r.error().code == ErrorCode::not_found);
+    CHECK(r.error().message.find("other_value") != std::string::npos);
+}

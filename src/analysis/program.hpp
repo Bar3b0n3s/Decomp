@@ -15,10 +15,18 @@
 
 namespace decomp {
 
+enum class TableEncoding : u8 {
+    absolute,  // entries are absolute addresses (x86: jmp [reg*4+table])
+    relative,  // entries are int32 offsets from the table start (clang x64)
+    rva,       // entries are 32-bit RVAs from the image base (MSVC x64)
+};
+
 struct JumpTable {
     u64 jump_va = 0;   // the indirect jump instruction
     u64 table_va = 0;  // first entry
     unsigned entry_size = 4;
+    TableEncoding encoding = TableEncoding::absolute;
+    u64 load_va = 0;   // x64: the instruction that loads the entry (its displacement is the table RVA for MSVC)
     std::vector<u64> targets;  // one per entry
     bool inside_code = false;  // table sits within the function's byte range (MSVC x86)
 };
@@ -78,6 +86,10 @@ public:
 private:
     void build_xrefs() const;
     std::optional<JumpTable> read_jump_table(const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const;
+    // x64 tables are reached through registers; `before` holds the instructions preceding the jump.
+    std::optional<JumpTable> read_x64_jump_table(const std::vector<x86::Instruction>& before, const x86::Instruction& jmp,
+                                                 u64 fn_start, u64 fn_limit) const;
+    std::vector<u64> read_table_entries(const JumpTable& table, u64 fn_start, u64 fn_limit) const;
 
     std::filesystem::path path_;
     std::optional<std::filesystem::path> pdb_path_;

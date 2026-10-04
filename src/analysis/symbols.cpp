@@ -256,6 +256,14 @@ SymbolDb SymbolDb::from_pe(const pe::Image& image, const pdb::Reader* pdb) {
         }
         if (limit > s.va) s.size = static_cast<u32>(std::min<u64>(limit - s.va, 0xFFFFFFFFu));
     }
+    if (!db.at(base)) {
+        Symbol s;
+        s.va = base;
+        s.name = "__ImageBase";
+        s.kind = SymbolKind::data;
+        s.source = SymbolSource::analysis;
+        db.add(std::move(s));
+    }
     if (u64 entry = image.entry_point(); entry && !db.at(entry)) {
         Symbol s;
         s.va = entry;
