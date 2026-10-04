@@ -16,6 +16,7 @@
 #include "gui/notifications.hpp"
 #include "gui/palette.hpp"
 #include "gui/run_summary.hpp"
+#include "gui/search_index.hpp"
 #include "gui/services.hpp"
 #include "gui/settings.hpp"
 #include "gui/view.hpp"
@@ -180,6 +181,7 @@ private:
     } progress_;
     // Run notifications (docs/ui.md#notifications): what the rules find in each new snapshot goes to the
     // notification center. A resumed or reopened run's history is primed first, so it is not news.
+    SearchIndex search_;  // functions, symbols and strings for the palette
     vm::NotificationRules notification_rules_;
     u64 notified_serial_ = ~u64{0};
     std::string notified_run_;
