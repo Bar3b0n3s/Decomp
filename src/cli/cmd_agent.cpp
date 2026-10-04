@@ -128,6 +128,9 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     if (!a.pdb.empty()) pdb_path = fs::from_utf8(a.pdb);
     TRY_ASSIGN(auto program, project ? project->open_program() : Program::open(fs::from_utf8(a.binary), pdb_path));
     TRY_ASSIGN(u64 va, resolve_function(program, a.function));
+    // Fail before spending anything on an address that is not a function.
+    if (auto extent = program.function_extent(va); !extent)
+        return make_error(ErrorCode::invalid_argument, "{:#x} is not a function: {}", va, extent.error().message);
     TRY_ASSIGN(auto setup, make_match_setup(g, a.toolchain, a.flags));
 
     project::AgentSettings settings = project ? project->config().agent : project::AgentSettings{};
