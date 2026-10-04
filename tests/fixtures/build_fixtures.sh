@@ -23,7 +23,8 @@ build_arch() {
     lld-link "${LDFLAGS[@]}" "/out:$arch/basic.exe" "/pdb:$arch/basic.pdb" "$arch/basic.obj" "$arch/other.obj" "$arch/kernel32.lib"
     # Same program without base relocations (/FIXED), as many old EXEs ship.
     lld-link "${LDFLAGS[@]}" /fixed "/out:$arch/basic_fixed.exe" "/pdb:$arch/basic_fixed.pdb" "$arch/basic.obj" "$arch/other.obj" "$arch/kernel32.lib"
-    rm -f "$arch/kernel32.lib" "$arch/basic_fixed.pdb" "$arch/basic.lib" "$arch/basic_fixed.lib"
+    # kernel32.lib stays: the integration test relinks the program with whatever lld-link is installed.
+    rm -f "$arch/basic_fixed.pdb" "$arch/basic.lib" "$arch/basic_fixed.lib"
 }
 
 build_arch x86 i686-pc-windows-msvc

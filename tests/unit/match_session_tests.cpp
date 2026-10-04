@@ -2,6 +2,7 @@
 #include "core/fs.hpp"
 #include "events/run_state.hpp"
 #include "matching/toolchain.hpp"
+#include "llvm_fixture.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
@@ -83,12 +84,15 @@ TEST_CASE("read-only tools and the brief") {
 }
 
 TEST_CASE("compile_and_diff and submit_result with a real compiler") {
-    if (!matching::find_clang_cl()) {
-        MESSAGE("clang-cl not found; skipping");
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
         return;
     }
-    auto program = Program::open(test::fixture("x86/basic.exe")).value();
     auto tmp = fs::TempDir::create("decomp-session2").value();
+    auto exe = test::build_fixture_program(Arch::x86, *tools, tmp.path() / "target");
+    REQUIRE(exe);
+    auto program = Program::open(*exe).value();
     events::EventBus bus("run-t");
     events::RunState state;
     bus.subscribe([&](const events::Event& e) { state.apply(e); });
@@ -126,13 +130,13 @@ TEST_CASE("compile_and_diff and submit_result with a real compiler") {
 }
 
 TEST_CASE("session state persists into the project") {
-    if (!matching::find_clang_cl()) {
-        MESSAGE("clang-cl not found; skipping");
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
         return;
     }
     auto dir = fs::TempDir::create("decomp-session-project").value();
-    std::filesystem::copy_file(test::fixture("x86/basic.exe"), dir.path() / "basic.exe");
-    std::filesystem::copy_file(test::fixture("x86/basic.pdb"), dir.path() / "basic.pdb");
+    REQUIRE(test::build_fixture_program(Arch::x86, *tools, dir.path()));
     auto proj = project::Project::init(dir.path() / "p", dir.path() / "basic.exe", std::nullopt, "clang-cl-x86").value();
     auto program = proj.open_program().value();
     u64 va = *program.resolve("add");

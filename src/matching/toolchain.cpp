@@ -124,6 +124,27 @@ std::optional<std::string> find_clang_cl() {
     return std::nullopt;
 }
 
+std::optional<std::string> find_llvm_tool(std::string_view name) {
+#ifdef _WIN32
+    std::string file = std::string(name) + ".exe";
+#else
+    std::string file(name);
+#endif
+    std::error_code ec;
+    if (auto clang_cl = find_clang_cl()) {
+        auto candidate = fs::from_utf8(*clang_cl).parent_path() / fs::from_utf8(file);
+        if (std::filesystem::exists(candidate, ec)) return fs::to_utf8(candidate);
+    }
+    if (auto path = get_env("PATH")) {
+        for (auto dir : split(*path, path_list_separator())) {
+            if (dir.empty()) continue;
+            auto candidate = fs::from_utf8(dir) / fs::from_utf8(file);
+            if (std::filesystem::is_regular_file(candidate, ec)) return fs::to_utf8(candidate);
+        }
+    }
+    return std::nullopt;
+}
+
 std::filesystem::path ToolchainRegistry::default_path() {
     if (auto overridden = get_env("DECOMP_TOOLCHAINS")) return fs::from_utf8(*overridden);
 #ifdef _WIN32

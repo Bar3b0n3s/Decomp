@@ -58,6 +58,8 @@ private:
 
 // Locates clang-cl (PATH, then common LLVM install locations).
 std::optional<std::string> find_clang_cl();
+// Locates another LLVM tool (e.g. "lld-link"): next to clang-cl first, then PATH.
+std::optional<std::string> find_llvm_tool(std::string_view name);
 
 struct Diagnostic {
     std::string file;
