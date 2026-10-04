@@ -15,15 +15,21 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
         auto dir = std::make_shared<std::string>(".");
         auto pdb = std::make_shared<std::string>();
         auto toolchain = std::make_shared<std::string>();
+        auto flags = std::make_shared<std::vector<std::string>>();
         cmd->add_option("binary", *binary, "Target PE image")->required();
         cmd->add_option("--dir", *dir, "Project directory (default: current directory)");
         cmd->add_option("--pdb", *pdb, "PDB for the target, if not next to it");
         cmd->add_option("--toolchain", *toolchain, "Toolchain name from the registry (see `decomp toolchain list`)");
-        cmd->callback([&g, binary, dir, pdb, toolchain] {
+        cmd->add_option("--flag", *flags, "Compiler flag the target was built with, e.g. /O2 (repeatable)")->allow_extra_args(false);
+        cmd->callback([&g, binary, dir, pdb, toolchain, flags] {
             throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
                 std::optional<std::filesystem::path> pdb_path;
                 if (!pdb->empty()) pdb_path = fs::from_utf8(*pdb);
                 TRY_ASSIGN(auto p, project::Project::init(fs::from_utf8(*dir), fs::from_utf8(*binary), pdb_path, *toolchain));
+                if (!flags->empty()) {
+                    p.config().flags = *flags;
+                    TRY(p.save_config());
+                }
                 TRY_ASSIGN(auto program, p.open_program());
                 if (g.json) {
                     print_json({{"root", fs::to_utf8(p.root())}, {"symbols", program.symbols().size()},
@@ -33,6 +39,8 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
                                  p.config().target, program.symbols().size(), program.symbols().functions().size());
                     if (p.config().toolchain.empty())
                         std::println("next: set \"toolchain\" in decomp.json to a name from `decomp toolchain list`");
+                    if (p.config().flags.empty())
+                        std::println("next: set \"flags\" in decomp.json to the flags the target was built with (e.g. /O2 /Gy)");
                 }
                 return 0;
             }));

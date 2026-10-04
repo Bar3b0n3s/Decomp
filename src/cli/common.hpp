@@ -3,12 +3,15 @@
 #include "analysis/program.hpp"
 #include "core/json.hpp"
 #include "core/result.hpp"
+#include "matching/match.hpp"
 
 #include <CLI/CLI.hpp>
 
+#include <cstdio>
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace decomp::cli {
 
@@ -28,7 +31,11 @@ Result<Program> open_program(const GlobalOptions& g, const std::string& binary, 
 // Resolves a function argument (name or address) to an address, with a helpful error.
 Result<u64> resolve_function(const Program& program, const std::string& text);
 
+// Toolchain + flags + include dirs from the project (when there is one) and the command line.
+Result<matching::MatchSetup> make_match_setup(const GlobalOptions& g, const std::string& toolchain, const std::vector<std::string>& extra_flags);
+
 void print_json(const Json& value);
+bool is_tty(std::FILE* stream);
 
 using Registrar = void (*)(CLI::App& app, GlobalOptions& g);
 void register_analysis_commands(CLI::App& app, GlobalOptions& g);

@@ -8,16 +8,6 @@
 
 #include <print>
 
-#ifdef _WIN32
-#include <io.h>
-#define DECOMP_ISATTY _isatty
-#define DECOMP_FILENO _fileno
-#else
-#include <unistd.h>
-#define DECOMP_ISATTY isatty
-#define DECOMP_FILENO fileno
-#endif
-
 namespace decomp::cli {
 
 void register_toolchain_commands(CLI::App& app, GlobalOptions& g);
@@ -36,33 +26,10 @@ int print_diff(const GlobalOptions& g, const matching::FunctionDiff& d, const Di
     ro.compact = a.compact;
     ro.context = a.context;
     ro.bytes = a.bytes;
-    ro.color = !g.json && DECOMP_ISATTY(DECOMP_FILENO(stdout));
+    ro.color = !g.json && is_tty(stdout);
     if (g.json) print_json(matching::to_json(d, ro));
     else std::print("{}", matching::to_text(d, ro));
     return d.byte_exact ? 0 : 2;
-}
-
-// Toolchain + flags + include dirs from the project (when there is one) and the command line.
-Result<matching::MatchSetup> make_setup(const GlobalOptions& g, const std::string& toolchain_name, const std::vector<std::string>& extra_flags) {
-    matching::MatchSetup setup;
-    std::string name = toolchain_name;
-    auto project = project::Project::find(g.project);
-    if (project) {
-        if (name.empty()) name = project->config().toolchain;
-        setup.flags = project->config().flags;
-        setup.include_dirs = project->include_paths();
-        setup.work_dir = project->build_dir();
-        setup.cache_dir = project->cache_dir() / "objects";
-    } else {
-        setup.work_dir = std::filesystem::temp_directory_path() / "decomp-build";
-    }
-    if (name.empty()) return make_error(ErrorCode::invalid_argument, "no toolchain: pass --toolchain or set \"toolchain\" in decomp.json");
-    TRY_ASSIGN(auto registry, matching::ToolchainRegistry::load());
-    const matching::Toolchain* t = registry.find(name);
-    if (!t) return make_error(ErrorCode::not_found, "unknown toolchain '{}' (see `decomp toolchain list`)", name);
-    setup.toolchain = *t;
-    setup.flags.insert(setup.flags.end(), extra_flags.begin(), extra_flags.end());
-    return setup;
 }
 
 } // namespace
@@ -179,7 +146,7 @@ void register_matching_commands(CLI::App& app, GlobalOptions& g) {
             if (!a->source.empty()) {
                 if (a->function.empty()) return make_error(ErrorCode::invalid_argument, "--source needs a function name");
                 TRY_ASSIGN(u64 va, resolve_function(program, a->function));
-                TRY_ASSIGN(auto setup, make_setup(g, a->toolchain, a->flags));
+                TRY_ASSIGN(auto setup, make_match_setup(g, a->toolchain, a->flags));
                 TRY_ASSIGN(auto source_text, fs::read_text(fs::from_utf8(a->source)));
                 TRY_ASSIGN(auto r, matching::compile_and_diff(program, setup, va, source_text, a->symbol));
                 if (!r.compile.ok) {
