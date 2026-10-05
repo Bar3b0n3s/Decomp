@@ -227,9 +227,9 @@ best source go into the next session's first message ([agent.md](agent.md#prompt
 
 A run is one invocation of `decomp agent` (one function) or one batch run of `decomp run` or
 `decomp-gui` (many functions; [agent.md](agent.md#batch-runs)). The run ID is the UTC start time plus
-four random hex digits, such as `2026-10-04T15-30-12-3f9a`. With `decomp agent --log-dir <dir>` the
-run goes to `<dir>/<run-id>/` instead; without a project and without `--log-dir`, no run files are
-written.
+four random hex digits, such as `2026-10-04T15-30-12-3f9a`. Both commands write the same files. With
+`decomp agent --log-dir <dir>` the run goes to `<dir>/<run-id>/` instead; without a project and
+without `--log-dir`, its files go to a temporary directory that is removed when it ends.
 
 | File | Contents |
 |---|---|

@@ -773,9 +773,9 @@ order, to every subscriber. The GUI never reads worker state: it renders immutab
 commands to the run controller.
 
 ```
- RunController: N workers, one session each (run_loop, tools, compiles)    decomp agent: one session
-        | publish(Event)                                                           | publish(Event)
-        v                                                                          v
+ RunController: N workers (decomp agent: one), one session each (run_loop, tools, compiles)
+        | publish(Event)
+        v
     EventBus (serialized) --+--> JsonlEventLog --> .decomp/runs/<run-id>/events.jsonl   (no stream deltas)
                             +--> ProgressRenderer --> stderr                            (CLI)
                             +--> RunStateStore (reducer) --> snapshot(): shared_ptr<const RunStateData>
@@ -786,7 +786,7 @@ commands to the run controller.
                                                                  v
                                                           RunController --> LoopControl per session
 
- decomp run --interactive, Ctrl+C --> RunController        decomp agent: Ctrl+C, --interactive --> LoopControl
+ decomp run and decomp agent: --interactive, Ctrl+C --> RunController
 ```
 
 ### Events
@@ -885,8 +885,7 @@ remove, move, pin, concurrency, the run budget, per-function limits, guidance (w
 decisions and policies. Every command is applied under the controller's lock, forwarded to the
 affected sessions' `LoopControl`, and acknowledged by a `control` event; the views show the result
 from the snapshot. The GUI reaches it through `RunCommands` (`src/gui/services.hpp`); `decomp run
---interactive` maps its stdin commands onto it. A single `decomp agent` session is steered through
-its `LoopControl` directly.
+--interactive` maps its stdin commands onto it, and so does `decomp agent`, a one-function run.
 
 ### Replay of past runs
 

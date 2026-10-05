@@ -1,6 +1,7 @@
 #include "agent/replay_transport.hpp"
 #include "agent/runner.hpp"
 #include "cli/common.hpp"
+#include "cli/live_run.hpp"
 #include "core/fs.hpp"
 #include "core/log.hpp"
 #include "core/strings.hpp"
@@ -30,16 +31,6 @@ struct RunArgs {
     int workers = 0, max_turns = 0, max_minutes = -1, stagger_seconds = -1;
     double run_budget_usd = -1, budget_usd = -1;
     long long max_tokens = -1;
-};
-
-// The bus, event log and controller of a running `decomp run`. Shared with the --interactive reader,
-// which blocks on stdin and may outlive the command; it sends nothing once `active` is false.
-struct LiveRun {
-    explicit LiveRun(std::string run_id) : bus(std::move(run_id)) {}
-    events::EventBus bus;
-    std::unique_ptr<events::JsonlEventLog> log;
-    std::unique_ptr<run::RunController> controller;
-    std::atomic<bool> active{true};
 };
 
 std::optional<u64> session_function(const Program& program, const std::string& text) {
@@ -242,15 +233,7 @@ Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
     auto live = std::make_shared<LiveRun>(store->id());
     TRY_ASSIGN(live->log, events::JsonlEventLog::open(store->events_path()));
     live->bus.subscribe([log = live->log.get()](const events::Event& e) { log->write(e); });
-    // Warnings and errors logged during the run become events, so the run log and the views keep them.
-    const int log_sink = log::add_sink([live](const log::Entry& e) {
-        if (e.level >= log::Level::warn && live->active)
-            live->bus.publish(events::LogLine{std::string(log::to_string(e.level)), e.message, e.session}, e.worker);
-    });
-    struct SinkGuard {
-        int id;
-        ~SinkGuard() { log::remove_sink(id); }
-    } sink_guard{log_sink};
+    const RunLogForwarder forwarder(live);
     const bool show_progress = a.progress || (!a.no_progress && !g.quiet && !g.json);
     events::ProgressRenderer renderer(is_tty(stderr));
     if (show_progress) renderer.attach(live->bus);

@@ -83,6 +83,9 @@ jobs:
           ./bin/Release/decomp -C "$p" status
           test -f "$p/src/functions/add_401060.cpp"
           test -f "$(ls -d "$p"/.decomp/runs/*/ | head -1)summary.json"
+          # A one-function run like any other: listed, with its run.json.
+          test -f "$(ls -d "$p"/.decomp/runs/*/ | head -1)run.json"
+          ./bin/Release/decomp -C "$p" runs list | grep completed
 
       - name: Batch run smoke test
         run: |

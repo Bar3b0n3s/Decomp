@@ -11,8 +11,8 @@ loop, the tool schemas, the prompts, transcripts, cost accounting, safety and co
 run the agent live or from offline replays.
 
 Status: implemented in step 11 of the [first slice](roadmap.md#first-working-slice) and extended for
-Phase 1, and tested offline with replays. `decomp agent` runs one session for one function; `decomp
-run` and `decomp-gui` run many sessions on several workers ([Batch runs](#batch-runs)). API details
+Phase 1, and tested offline with replays. `decomp agent` runs one function (a run with one worker);
+`decomp run` and `decomp-gui` run many sessions on several workers ([Batch runs](#batch-runs)). API details
 reflect the Claude API as of October 2026; check them against the current API documentation before
 changing defaults.
 
@@ -774,9 +774,11 @@ The status line does not mention spend; the budgets are enforced by the loop.
 ## Batch runs
 
 `decomp run` and `decomp-gui` run the agent on many functions under a `RunController`
-(`run/controller.hpp`). Each function gets the same session as `decomp agent` (`run_function`, one
-conversation, the same tools, budgets and outcomes); the controller adds the queue, the workers and
-the run-wide controls.
+(`run/controller.hpp`), and `decomp agent` on one (one worker, no stagger, no run budget). Each
+function gets one session (`run_function`: one conversation, with its tools, budgets and outcomes);
+the controller adds the queue, the workers and the run-wide controls. So a `decomp agent` run has the
+same run directory as a batch run: `decomp runs list` and the GUI list it, and a stopped one resumes
+with `decomp run --resume`.
 
 **Queue and workers.** The functions are queued in the order given, or for a selection by an estimate
 of difficulty (from the function's size), easiest first. N workers (`--workers`, `agent.workers`,

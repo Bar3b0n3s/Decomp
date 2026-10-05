@@ -1,12 +1,16 @@
 #include "agent/replay_transport.hpp"
 #include "agent/runner.hpp"
 #include "cli/common.hpp"
+#include "cli/live_run.hpp"
 #include "core/fs.hpp"
 #include "core/log.hpp"
 #include "core/strings.hpp"
 #include "events/bus.hpp"
 #include "events/progress.hpp"
 #include "project/project.hpp"
+#include "run/controller.hpp"
+#include "run/queue.hpp"
+#include "run/store.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -14,6 +18,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <print>
 #include <thread>
 
@@ -31,45 +37,55 @@ struct AgentArgs {
     bool no_fallbacks = false, progress = false, no_progress = false, interactive = false;
 };
 
-// --interactive: lines typed on stdin steer the session. The reader blocks on stdin, so it is detached
-// and owns a reference to the control block.
-void start_stdin_supervisor(std::shared_ptr<agent::LoopControl> control) {
-    std::thread([control = std::move(control)] {
+// --interactive: lines typed on stdin steer the session (guidance, or :pause, :resume, :stop, :abort). The
+// reader blocks on stdin, so it is detached and shares the run.
+void start_stdin_supervisor(std::shared_ptr<LiveRun> live) {
+    std::thread([live = std::move(live)] {
         std::string line;
         while (std::getline(std::cin, line)) {
+            if (!live->active) return;
+            auto& c = *live->controller;
             const std::string cmd(trim(line));
             if (cmd.empty()) continue;
             if (cmd == ":pause") {
-                control->request_pause();
+                c.pause();
                 log::info("pausing after the current turn (:resume to continue)");
             } else if (cmd == ":resume") {
-                control->resume();
+                c.unpause();
                 log::info("resumed");
             } else if (cmd == ":stop") {
-                control->request_stop();
+                c.stop();
                 log::info("stopping after the current turn");
             } else if (cmd == ":abort") {
-                control->request_abort();
+                c.abort();
                 log::info("aborting");
             } else if (cmd == ":help") {
                 log::info("type guidance for the agent, or :pause, :resume, :stop, :abort");
             } else {
-                control->inject(cmd);
-                log::info("guidance queued for the next turn");
+                const auto sessions = c.running_sessions();
+                const std::optional<u64> id = sessions.empty() ? std::nullopt : c.inject(sessions.front(), cmd);
+                if (id) log::info("guidance queued for the next turn");
+                else log::warn("no session is running: the guidance was not sent");
             }
         }
     }).detach();
 }
 
-int exit_code(const agent::FunctionRunResult& r) {
-    if (r.matched) return 0;
-    if (r.outcome == "refused") return 3;
-    if (r.outcome == "error" || r.outcome == "aborted") return 1;
+int exit_code(bool matched, std::string_view outcome) {
+    if (matched) return 0;
+    if (outcome == "refused") return 3;
+    if (outcome == "error" || outcome == "aborted") return 1;
     return 2;
 }
 
-Json usage_json(const agent::Usage& u) { return u.to_json(); }
+// The session's result as the agent returned it (its sources), for the summary.
+struct SessionOutcome {
+    std::mutex mutex;
+    std::optional<agent::FunctionRunResult> result;
+};
 
+// A one-function run on the RunController: the same run directory, events, approvals, live limits and
+// resumability as `decomp run`, with one worker and no stagger.
 Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     std::optional<project::Project> project;
     if (a.binary.empty()) {
@@ -85,10 +101,11 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     }
     std::optional<std::filesystem::path> pdb_path;
     if (!a.pdb.empty()) pdb_path = fs::from_utf8(a.pdb);
-    TRY_ASSIGN(auto program, project ? project->open_program() : Program::open(fs::from_utf8(a.binary), pdb_path));
-    TRY_ASSIGN(u64 va, resolve_function(program, a.function));
+    TRY_ASSIGN(auto opened_program, project ? project->open_program() : Program::open(fs::from_utf8(a.binary), pdb_path));
+    const auto program = std::make_shared<const Program>(std::move(opened_program));
+    TRY_ASSIGN(u64 va, resolve_function(*program, a.function));
     // Fail before spending anything on an address that is not a function.
-    if (auto extent = program.function_extent(va); !extent)
+    if (auto extent = program->function_extent(va); !extent)
         return make_error(ErrorCode::invalid_argument, "{:#x} is not a function: {}", va, extent.error().message);
     TRY_ASSIGN(auto setup, make_match_setup(g, a.toolchain, a.flags));
 
@@ -107,112 +124,139 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
                           "or claude-sonnet-5-5",
                           settings.model);
     agent::AgentRunConfig config = agent::run_config_from(settings);
+    config.guidance = a.guidance;
     TRY_ASSIGN(auto approval_policies, agent::resolve_approval_policies(settings.approvals, a.policies, false));
 
+    run::TransportFactory transport;
     if (!a.replay.empty()) {
-        TRY_ASSIGN(auto replay, agent::ReplayTransport::load(fs::from_utf8(a.replay)));
-        config.transport = std::move(replay);
+        const auto script = fs::from_utf8(a.replay);
+        // A missing or malformed script fails before the run starts.
+        if (auto checked = agent::ReplayTransport::load(script); !checked) return std::unexpected(std::move(checked.error()));
+        transport = [script](const Symbol&) -> Result<std::shared_ptr<agent::HttpTransport>> {
+            TRY_ASSIGN(auto replay, agent::ReplayTransport::load(script));
+            return std::shared_ptr<agent::HttpTransport>(std::move(replay));
+        };
         config.client.api_key = "replay";  // a scripted run never sends the real key anywhere
     } else if (trim(config.client.api_key).empty()) {
         return make_error(ErrorCode::invalid_argument, "ANTHROPIC_API_KEY is not set (export it, or pass --replay <file> for a scripted run)");
+    } else {
+        config.transport = std::shared_ptr<agent::HttpTransport>(agent::make_default_transport());
     }
 
-    const std::string run_id = events::new_run_id();
-    std::filesystem::path run_dir;
-    if (!a.log_dir.empty()) run_dir = fs::from_utf8(a.log_dir) / run_id;
-    else if (project) run_dir = project->runs_dir() / run_id;
-
-    events::EventBus bus(run_id);
-    config.approvals = std::make_shared<agent::ApprovalGate>(&bus);
-    for (const auto& [action, policy] : approval_policies) config.approvals->set_policy(action, policy);
-    std::unique_ptr<events::JsonlEventLog> event_log;
-    if (!run_dir.empty()) {
-        TRY_ASSIGN(auto opened, events::JsonlEventLog::open(run_dir / "events.jsonl"));
-        event_log = std::move(opened);
-        bus.subscribe([log = event_log.get()](const events::Event& e) { log->write(e); });
+    // The run's directory: --log-dir, the project's runs, or for a binary without a project a temporary
+    // one that is removed afterwards (nothing is persisted).
+    std::filesystem::path runs_dir;
+    bool temporary = false;
+    if (!a.log_dir.empty()) {
+        runs_dir = fs::from_utf8(a.log_dir);
+    } else if (project) {
+        runs_dir = project->runs_dir();
+    } else {
+        std::error_code ec;
+        runs_dir = std::filesystem::temp_directory_path(ec) / "decomp-agent";
+        if (ec) return make_error(ErrorCode::io, "no temporary directory for the run: {}", ec.message());
+        temporary = true;
     }
-    // Warnings and errors logged during the run become events, so the run log and the views keep them.
-    const int log_sink = log::add_sink([&bus](const log::Entry& e) {
-        if (e.level >= log::Level::warn) bus.publish(events::LogLine{std::string(log::to_string(e.level)), e.message}, e.worker);
-    });
-    struct SinkGuard {
-        int id;
-        ~SinkGuard() { log::remove_sink(id); }
-    } sink_guard{log_sink};
+    TRY_ASSIGN(auto store, run::RunStore::create(runs_dir, events::new_run_id()));
+    const std::filesystem::path run_dir = store.dir();
+    const std::string run_id = store.id();
+
+    auto live = std::make_shared<LiveRun>(run_id);
+    if (!temporary) {
+        TRY_ASSIGN(live->log, events::JsonlEventLog::open(store.events_path()));
+        live->bus.subscribe([log = live->log.get()](const events::Event& e) { log->write(e); });
+    }
+    const RunLogForwarder forwarder(live);
     const bool show_progress = a.progress || (!a.no_progress && !g.quiet && !g.json);
     events::ProgressRenderer renderer(is_tty(stderr));
-    if (show_progress) renderer.attach(bus);
+    if (show_progress) renderer.attach(live->bus);
 
-    const Symbol* sym = program.symbols().at(va);
-    const std::string name = sym ? sym->name : std::format("{:#x}", va);
-    const std::string display = sym && !sym->display.empty() ? sym->display : name;
-    const std::string target_name = project ? fs::to_utf8(project->root().filename()) : fs::to_utf8(fs::from_utf8(a.binary).filename());
-    bus.publish(events::RunStarted{target_name, settings.model, settings.effort, 1, {display}}, -1);
-    const auto started = std::chrono::system_clock::now();
+    auto session = std::make_shared<SessionOutcome>();
+    run::RunDeps deps;
+    deps.program = [program] { return program; };
+    deps.project = project ? &*project : nullptr;
+    deps.setup = setup;
+    deps.transport = transport;
+    deps.run_session = [session](const run::SessionRequest& r, events::EventBus& bus) {
+        auto result = agent::run_function(*r.program, r.project, r.setup, r.va, r.config, bus, r.transcript, r.control, r.worker);
+        std::lock_guard lock(session->mutex);
+        session->result = result;
+        return result;
+    };
+    live->controller = std::make_unique<run::RunController>(std::move(deps), live->bus);
 
-    config.guidance = a.guidance;
-    auto control = std::make_shared<agent::LoopControl>();
-    agent::FunctionRunResult result;
+    const Symbol* sym = program->symbols().at(va);
+    run::QueueItem item;
+    item.va = va;
+    item.name = sym ? sym->name : std::format("sub_{:x}", va);
+    item.display = sym && !sym->display.empty() ? sym->display : item.name;
+    item.difficulty = sym ? run::estimate_difficulty(*sym) : 0;
+    run::RunOptions options;
+    options.workers = 1;
+    options.agent = config;
+    options.policies = approval_policies;
+    options.stagger_timeout = std::chrono::milliseconds(0);
+    options.project_name = project ? fs::to_utf8(project->root().filename()) : fs::to_utf8(fs::from_utf8(a.binary).filename());
+    options.replay = !a.replay.empty();
+    options.selection = Json{{"functions", Json::array({a.function})}, {"from", "agent"}};
+    TRY(live->controller->start(std::move(store), {std::move(item)}, std::move(options)));
     {
         // Ctrl+C: the first stops after the current turn, the second aborts the request in flight.
-        InterruptWatcher watcher([&control](int presses) {
+        InterruptWatcher watcher([live](int presses) {
             if (presses == 1) {
                 log::warn("stopping after the current turn (Ctrl+C again to abort now)");
-                control->request_stop();
+                live->controller->stop();
             } else {
                 log::warn("aborting");
-                control->request_abort();
+                live->controller->abort();
             }
         });
-        if (a.interactive) start_stdin_supervisor(control);
-        const std::string file = sym ? project::safe_function_name(*sym) : std::format("sub_{:x}", va);
-        const std::filesystem::path transcript = run_dir.empty() ? std::filesystem::path{} : run_dir / "sessions" / fs::from_utf8(file + ".jsonl");
-        result = agent::run_function(program, project ? &*project : nullptr, setup, va, config, bus, transcript, control.get(), 0);
+        if (a.interactive) start_stdin_supervisor(live);
+        live->controller->wait();
     }
-    const std::string run_status = result.outcome == "aborted" ? "aborted" : result.outcome == "stopped" ? "stopped" : result.outcome == "error" ? "error" : "completed";
-    bus.publish(events::RunFinished{run_status}, -1);
+    live->active = false;
     if (show_progress) {
         renderer.finish();
-        renderer.detach(bus);
+        renderer.detach(live->bus);
     }
 
-    Json summary = {{"run", run_id},
-                    {"started", std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(started))},
-                    {"finished", std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()))},
-                    {"status", run_status},
-                    {"model", settings.model},
-                    {"effort", settings.effort},
-                    {"replay", !a.replay.empty()},
-                    {"cost_usd", result.cost_usd},
-                    {"functions",
-                     Json::array({{{"function", name},
-                                   {"display", display},
-                                   {"va", va},
-                                   {"outcome", result.outcome},
-                                   {"detail", result.detail},
-                                   {"matched", result.matched},
-                                   {"best_match", result.best_match},
-                                   {"turns", result.turns},
-                                   {"cost_usd", result.cost_usd},
-                                   {"usage", usage_json(result.usage)}}})}};
-    if (!run_dir.empty()) {
-        if (auto w = fs::write_text(run_dir / "summary.json", dump_pretty(summary) + "\n"); !w) log::warn("cannot write summary.json: {}", w.error().message);
-        summary["run_dir"] = fs::to_utf8(run_dir);
+    const std::string status = live->controller->status();
+    Json summary = parse_json(fs::read_text(run_dir / "summary.json").value_or("{}")).value_or(Json::object());
+    summary["replay"] = !a.replay.empty();
+    Json function = Json::object();
+    if (auto it = summary.find("functions"); it != summary.end() && it->is_array() && !it->empty()) function = (*it)[0];
+    // A run stopped before its session started has no function entry: its status is the outcome.
+    const std::string outcome = json_string_or(function, "outcome", status == "completed" ? "error" : status);
+    const bool matched = json_bool_or(function, "matched", false);
+    std::optional<agent::FunctionRunResult> result;
+    {
+        std::lock_guard lock(session->mutex);
+        result = session->result;
     }
-    if (!result.matched_source.empty()) summary["matched_source"] = fs::to_utf8(result.matched_source);
+    if (result && !result->matched_source.empty()) summary["matched_source"] = fs::to_utf8(result->matched_source);
+    if (!temporary) summary["run_dir"] = fs::to_utf8(run_dir);
 
     if (g.json) {
         print_json(summary);
     } else {
-        std::string line = std::format("{} {} ({:#x}) after {} turn{}, best {:.1f}%, ${:.4f}", result.outcome, display, va, result.turns,
-                                       result.turns == 1 ? "" : "s", result.best_match, result.cost_usd);
-        if (!result.detail.empty() && !result.matched) line += ": " + result.detail;
+        const int turns = static_cast<int>(json_int_or(function, "turns", 0));
+        const std::string detail = json_string_or(function, "detail", "");
+        std::string line = std::format("{} {} ({:#x}) after {} turn{}, best {:.1f}%, ${:.4f}", outcome,
+                                       json_string_or(function, "display", sym && !sym->display.empty() ? sym->display : a.function), va, turns,
+                                       turns == 1 ? "" : "s", json_number_or(function, "best_match", 0), json_number_or(function, "cost_usd", 0));
+        if (!detail.empty() && !matched) line += ": " + detail;
         std::println("{}", line);
-        if (!result.matched_source.empty()) std::println("source: {}", fs::to_utf8(result.matched_source));
-        else if (result.best_source && !project) std::println("best source so far:\n{}", *result.best_source);
-        if (!run_dir.empty()) std::println("run log: {}", fs::to_utf8(run_dir));
+        if (result && !result->matched_source.empty()) std::println("source: {}", fs::to_utf8(result->matched_source));
+        else if (result && result->best_source && !project)
+            std::println("{}:\n{}", matched ? "matched source (not saved: there is no project)" : "best source so far", *result->best_source);
+        if (!temporary) std::println("run log: {}", fs::to_utf8(run_dir));
+        if (project && !temporary && status != "completed") std::println("the run can continue: decomp run --resume {}", run_id);
     }
-    return exit_code(result);
+    if (temporary) {
+        std::error_code ec;
+        std::filesystem::remove_all(run_dir, ec);
+    }
+    return exit_code(matched, outcome);
 }
 
 } // namespace

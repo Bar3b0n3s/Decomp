@@ -397,9 +397,10 @@ contains no matching or agent logic of its own:
    the target's SHA-1 differs); `symbols.txt` is applied and the function is resolved.
 2. The toolchain is resolved by name from the registry, and the agent settings are merged with the
    command-line overrides. A missing `ANTHROPIC_API_KEY` stops here, unless `--replay` is given.
-3. The CLI creates a run ID and the run directory under `.decomp/runs/`, an `EventBus` with the JSONL
-   log and the progress view, and publishes `run_started`. Ctrl+C (and `--interactive` input) are
-   turned into `LoopControl` commands.
+3. The CLI creates the run directory under `.decomp/runs/` (`RunStore::create()`, which takes its
+   `run.lock`), an `EventBus` with the JSONL log and the progress view, and starts a one-function run
+   on a `RunController` with one worker, which publishes `run_started`. Ctrl+C (and `--interactive`
+   input) are turned into controller commands.
 4. `run_function()` announces the function as `in_progress` (an event; it is not written to
    `symbols.txt`), builds the tools, the
    conversation (system prompt and tool definitions) and the brief (annotated listing, referenced
@@ -414,8 +415,9 @@ contains no matching or agent logic of its own:
    The loop repeats until `submit_result`, a budget, a refusal, a stop or an error ends it.
 8. On a verified match, `MatchSession` writes the source to `src/functions/`. When the session ends,
    `symbols.txt` gets the function's new status, best score, attempts and spend.
-9. The CLI publishes `run_finished` and writes `summary.json`. Throughout, the event log and the
-   transcript are appended, and the progress view renders the `RunState`.
+9. The controller publishes `run_finished` and writes `run.json` and `summary.json` (so
+   `decomp runs list` and the GUI list the run, and a stopped one can be resumed). Throughout, the
+   event log and the transcript are appended, and the progress view renders the `RunState`.
 
 ## Key flow: a batch run
 
@@ -444,9 +446,9 @@ contains no matching or agent logic of its own:
 
 | Thread | Runs | Notes |
 |---|---|---|
-| Main (CLI) | The command. `decomp agent` runs its one session here; `decomp run` starts the controller and waits for it. | |
+| Main (CLI) | The command. `decomp agent` and `decomp run` start the controller and wait for it. | |
 | UI (`decomp-gui`) | The GLFW event loop: one ImGui frame per wake-up, rendering one `RunStateStore` snapshot | GLFW requires the main thread. The loop sleeps until input or a worker's wake-up (at most once per frame). |
-| Workers | `decomp run` and the GUI: N `std::jthread`s owned by the `RunController`, each running one session at a time (request building, HTTP streaming, tools, compiles) | Concurrency can change during a run; workers above the new limit retire after their session. |
+| Workers | `decomp run` and the GUI: N `std::jthread`s owned by the `RunController`, each running one session at a time (request building, HTTP streaming, tools, compiles); `decomp agent`: one | Concurrency can change during a run; workers above the new limit retire after their session. |
 | Tool tasks | Consecutive read-only tool calls of one turn (`disassemble`, `read_memory`, `lookup_symbol`), started with `std::async` | Results are still reported in call order. |
 | GUI background work | Loading a project and its program, replaying a past run (one thread each), and `JobQueue`'s pool for the views' expensive derivations | Results are taken on the UI thread; cancelled jobs' results are dropped. |
 | Interrupt watcher | Turns Ctrl+C into a stop (first), then an abort (second) | Polls a counter set by the signal handler, which itself exits the process on a third Ctrl+C. |
