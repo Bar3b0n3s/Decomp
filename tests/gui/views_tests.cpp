@@ -1,4 +1,4 @@
-// The Dashboard, Function browser, Inspector, Binary explorer and Symbols views against a real project
+// The Dashboard, Function browser, Inspector, Binary explorer, Symbols, Units and Types views against a real project
 // (the x86 fixture): with no run, a live run, a past run; their background jobs run to the end. Plus the
 // Function browser's table with 100,000 rows (frame time) and the Dashboard's treemap of 100,000
 // functions.
@@ -143,6 +143,8 @@ void render_my_views(HeadlessContext& gui, App& app, ProjectFixture& fx, const c
 
 TEST_CASE("the project views render with a project and no run, a live run and a past run") {
     ProjectFixture fx;
+    // A project header for the Types view: Player, with another type for speed than the PDB's.
+    REQUIRE(fs::write_text(fx.root / "include" / "game.h", "#pragma once\nstruct Player { int hp; double speed; };\n"));
     // History for the views to show: a symbol the agent renamed, notes and an attempt.
     auto* project = fx.workspace->project();
     REQUIRE(project->set_symbol(project::SymbolEdit{.va = fx.va("helper"), .name = std::string("helper_renamed")},
