@@ -67,6 +67,8 @@ run all of them instead of 20).
       file goes away and the function is back to `nonmatching`.
 - [ ] Take over a function (manual mode): edit the source, the diff recompiles in the background,
       Verify and save writes it and marks the function matched.
+- [ ] Rename a symbol in the Binary explorer (right-click a byte in the hex view): Symbols and
+      provenance lists it with source `user` and the edit in its history.
 
 ### Reopen the finished run from its log
 

@@ -139,6 +139,10 @@ repository at the time of writing; tick the others as they land.
 
 The manual part is the checklist in [acceptance.md](acceptance.md).
 
+**Status:** the scope is implemented, and the reducer, replay and headless GUI tests pass in CI on
+Linux and Windows, with an end-to-end scripted run of `decomp-gui` under Xvfb on Linux. The manual
+checklist needs an API key and a person on each platform.
+
 ### Phase 2: Analysis depth
 
 **Goal:** accurate function bounds, names and context for targets without a PDB.

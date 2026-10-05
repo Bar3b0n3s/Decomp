@@ -12,9 +12,10 @@ goes into that same edit-compile-compare loop, which Decomp automates while a pe
 > command loads PE targets and their PDBs, annotates disassembly, compiles candidates with the original
 > toolchain, diffs them with relocation awareness, and runs the built-in agent on one function
 > (`decomp agent`) or on many with several workers (`decomp run`), with transcripts, event logs, a live
-> progress view, budgets, approvals and resumable runs. `decomp-gui` opens projects and starts,
-> watches, steers and reopens runs. CI is green on Linux and Windows, including a round trip with the
-> real MSVC `cl.exe` for x86 and x64. See [docs/roadmap.md](docs/roadmap.md).
+> progress view, budgets, approvals and resumable runs. `decomp-gui` opens projects; starts, watches,
+> steers and reopens runs; and has every Phase 1 view, from the Dashboard and the Function browser to
+> the Diff viewer with manual editing. CI is green on Linux and Windows, including a round trip with
+> the real MSVC `cl.exe` for x86 and x64. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Key ideas
 

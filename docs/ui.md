@@ -13,10 +13,9 @@ phasing.
 
 Status: the backbone (typed events, the serialized `EventBus`, the `RunState` reducer and its
 snapshots, the JSONL event log and its replay, the CLI progress view) and the `RunController` are
-implemented ([Architecture](#architecture)). `decomp-gui` has the chrome, projects, live and past
-runs, and the Run monitor, Changes and approvals, Toolchains and compiles, Logs and errors and Settings
-views; the other Phase 1 views are being built. Data sources name event types ([Events](#events) lists
-them).
+implemented ([Architecture](#architecture)). `decomp-gui` has the chrome, projects, live and past runs,
+and every Phase 1 view below. Parts that later phases add are marked as such. Data sources name event
+types ([Events](#events) lists them).
 
 ## Principles
 
@@ -105,36 +104,55 @@ Each view lists what it **shows**, what the user can **do**, and its **data sour
 - Target identity:
   - path and size;
   - SHA-1, verified against `decomp.json`. A mismatch is shown in red and blocks runs, so nobody
-    matches against the wrong binary;
-  - format and architecture, image base and entry point;
-  - the Rich header's compiler and linker builds;
-  - PDB status: matching GUID and age, mismatch, absent, or unsupported format.
-- Progress by code bytes and by number of functions, with `library` and `skipped` shown as separate
-  segments.
-- Status buckets with counts and bytes: unstarted, in progress, non-matching (with a distribution of
-  best match percentages), matched, refused, gave up, skipped, library.
-- Progress over time: matched bytes and functions per day and per run.
-- A treemap of `.text`: one cell per function, sized by bytes and colored by status or best match
-  percentage. It is grouped by section, and by unit from Phase 3. Hovering shows name, size, status
-  and best percentage.
-- Spend summary for this run and all time: dollars, tokens by type (input, output, cache write,
-  cache read), cache-hit percentage, and dollars per match.
-- Recent activity: the latest matches, give-ups, refusals and errors.
+    matches against the wrong binary; a project that records no SHA-1 shows it as unverified;
+  - format (PE32 or PE32+), architecture, EXE or DLL, and the linker version; image base and entry
+    point (a link to its function);
+  - the Rich header's compiler and linker builds (the other entries folded);
+  - PDB status: matching GUID and age, mismatch, absent, or unsupported format, with the PDB loaded
+    and the debug record (path, GUID, age) the image carries.
+- Progress by code bytes and by number of functions, with the same figures and wording as
+  `decomp status`: two bars with a segment per status (`library` and `skipped` included), a legend
+  that names every segment, and the number of functions a live run is working on.
+- Status buckets with functions, bytes and their shares: unstarted, in progress, non-matching,
+  matched, refused, gave up, skipped, library; and the non-matching functions by best match in 10%
+  bins, as a chart and as counts.
+- A code map: a treemap with one cell per function of known size, grouped by section, sized by bytes
+  and colored by status or by best match (a colorblind-safe ramp). The hovered or selected cell's
+  function (name, address, size, status, best) is also written under the map, so nothing is shown
+  only on hover.
+- Progress over time: functions or bytes matched so far, per run or per local day, as a chart and a
+  table (matched, new, cumulative, spend).
+- Spend for the shown run and for all runs: dollars, tokens by type (input, output, cache write,
+  cache read), the cache-hit rate, functions matched and dollars per match.
+- Recent activity: the latest matches, give-ups, refusals and errors (the shown run's sessions and
+  errors, then the outcomes the other runs' summaries record), newest first.
 
 **Actions**
 
-- Click a bucket, treemap cell or feed item to open the filtered Function browser or that function's
-  Inspector.
-- Export a progress report as Markdown or JSON.
+- Click a bar segment, legend entry, bucket or best-match bin to open the Function browser filtered to
+  it; click a map cell, the entry point or an activity item to open that function's Inspector
+  (right-click a function link for the other views).
+- Export the progress report as Markdown or JSON.
+- Color the map by status or best match; show progress per run or per day, in functions or bytes
+  (remembered per project).
 
 **Data sources**
 
-- Project state: `decomp.json`, `symbols.txt` and `.decomp/functions/*/attempts.jsonl`.
-- Run summaries (`.decomp/runs/*/summary.json`).
-- Live: `status_changed`, `turn_finished` (usage and cost) and `session_finished`, folded into the
-  `RunState` totals. A per-function overlay in `RunState` is planned; today it tracks sessions and run
-  totals.
-- The numbers are the same ones `decomp status` prints.
+- Project state: `decomp.json`, `symbols.txt` (statuses, best match, spend) and the target status
+  (`Project::target_status()`); the loaded image for the identity and the map's sections.
+- Run summaries (`.decomp/runs/*/summary.json`) merged with the shown run.
+- Live: the live run's sessions overlay the stored states (a function being worked on counts as in
+  progress, with its session's best match and spend: `vm::build_function_rows`).
+- The figures are `vm::dashboard_progress`, `vm::build_text_treemap`, `vm::progress_history`,
+  `vm::cost_report` (the same totals as the Cost view), `vm::recent_activity` and
+  `vm::target_identity` (`src/viewmodel/`), computed as background jobs when the project, the program
+  or the live overlay change (a few times a second at most during a live run).
+
+**Notes**
+
+Without a project, the Dashboard shows the shown run's spend and activity. The map is laid out in the
+background (100,000 functions take about 60 ms in a Release build); the previous layout stays until
+the new one is ready.
 
 ### Run monitor
 
@@ -183,86 +201,104 @@ remembered per project.
 
 **Shows**
 
-- A header: function, status and outcome, model, a serving-model badge when a fallback served a turn,
-  effort, and budget use.
-- A per-turn timeline. Each turn contains:
+- A header: the function (a link to the Inspector), the session id and a list of the run's other
+  sessions; the status (running with its phase, or the outcome), model and effort, a "served by" badge
+  when a fallback model answered a turn, and budget use: turns, dollars, tokens and time against the
+  per-function limits, retries and the worker (amber from 80%).
+- The timeline, turn by turn, read from the transcript (incrementally while the session runs):
+  - each turn's time, stop reason, usage (input, output, cache write, cache read), dollars, time to
+    first token and total latency, retries, and the serving model when a fallback served it;
   - thinking summaries, collapsed by default;
-  - assistant text, which streams in live;
-  - each tool call's input, where a candidate source is syntax-highlighted and shown with a diff
+  - assistant text;
+  - each tool call's input; a candidate source is syntax-highlighted and can be shown as a diff
     against the previous attempt;
   - each tool call's result: a diff summary, or compiler errors;
-  - the stop reason;
-  - usage per turn (input, output, cache write, cache read, dollars), latency (time to first token
-    and total) and retries.
-- Status lines and supervisor guidance appear inline, exactly where they were appended. Fallback
-  switch points appear as markers.
-- A score-per-attempt chart.
-- The source version history, with a "best" badge.
-- The agent's notes.
-- The outcome and reason. For a refusal, the recorded category.
+  - status lines, reminders, supervisor guidance (with its id) and pauses, inline where they were
+    appended;
+  - the turn being streamed (text and thinking) at the bottom, followed while it grows.
+- Attempts: this session's score per attempt (chart), and the source history of every attempt for the
+  function, with a "best" badge; attempts made by hand are marked.
+- The agent's notes for the function.
+- The outcome and its reason. For a refusal, the recorded category.
+
+With no session chosen, the view follows the shared selection: the latest session of the selected
+function, or the run's newest session when no function is selected.
 
 **Actions**
 
-- Send a guidance message. It is appended after the next tool results, which is safe for the
-  append-only conversation. It shows as pending until then and can be retracted while pending.
-- Pause or end the session.
+- Send a guidance message (Ctrl+Enter). It is appended after the next tool results, which is safe for
+  the append-only conversation. It shows as pending until then and can be retracted while pending.
+- Pause or resume the session's worker; end the session (outcome `skipped`; its attempts and best
+  source stay).
 - Take over manually ([Manual mode](#manual-mode)).
-- Open any attempt in the Diff viewer.
-- Compare any two attempts: a source diff and an assembly diff side by side.
+- Open the session or any attempt in the Diff viewer.
+- Compare any two attempts: a source diff, and both attempts' assembly diffs side by side, paired by
+  target instruction (both are compiled again in the background).
 - Export the transcript as recorded JSONL or as readable Markdown.
 
 **Data sources**
 
-- Live: `stream_delta`, `turn_started`/`turn_finished`, `tool_call_started`/`tool_call_finished`,
-  `compile_finished`, `diff_computed`, `refusal`, `guidance` and `session_finished`. Today `RunState`
-  keeps a summary per session (turn, phase, scores, usage, cost, last tool call, the tail of the
-  streamed text); per-turn detail (`turns[]`) is planned.
-- Past: the transcript `.decomp/runs/<run-id>/sessions/<fn>.jsonl` (its `response` records carry the
-  serving model, the thinking summaries and the usage of every turn), loaded on demand, and the
-  function's `attempts.jsonl`.
+- The transcript `.decomp/runs/<run-id>/sessions/<fn>[.<n>].jsonl`, read by `vm::TranscriptReader`
+  (`src/viewmodel/transcript.hpp`): once for a past session, and only the appended bytes while a
+  session runs (a rewritten transcript is read again from the start). Its `response` records carry
+  the serving model, the thinking summaries and the usage of every turn.
+- Live: the session's summary in `RunState` (turn, phase, scores, usage, cost, the streamed text and
+  thinking of the current turn) from `stream_delta`, `turn_started`/`turn_finished`,
+  `tool_call_started`/`tool_call_finished`, `diff_computed`, `guidance` and `session_finished`.
+- The function's `attempts.jsonl` and `notes.md`.
 
 **Notes**
 
 Thinking content is the API's summary. The raw reasoning is never available, and an empty thinking
-block shows as a "thinking (no summary)" marker.
+block shows as a "thinking (no summary)" marker. Only the visible part of the timeline is laid out, so
+a transcript of several megabytes scrolls smoothly. Links can open a session on a given turn or tab.
 
 ### Diff viewer
 
 **Shows**
 
-- An objdiff-style aligned, side-by-side view of the target and candidate assembly.
-- Rows colored by kind: equal, encoding, operand, opcode, insert or delete
-  ([matching.md](matching.md#5-row-kinds)). The differing operand is highlighted within its row, with
-  its category (register, immediate, memory, stack or symbol).
+- An objdiff-style aligned, side-by-side view of the target and candidate assembly for the selected
+  function and attempt. Only the visible rows are drawn.
+- Rows colored by kind and marked with a glyph: equal `=`, encoding `e`, operand `~`, opcode `!`,
+  insert `+` and delete `-` ([matching.md](matching.md#5-row-kinds)), in the chosen diff palette. The
+  differing operand is boxed within its row, with its category (register, immediate, memory, stack or
+  symbol).
 - Branch arrows in both gutters, offsets, and optionally the raw bytes and relocation markers.
-- Symbol tooltips: address, demangled name, kind, size, and type when known.
-- A data-diff panel for strings, floats and jump tables.
-- A header with the score, the exact and byte-exact flags, and counts per row kind.
-- Hints and binding suggestions, each linked to its rows.
-- An attempt-history slider that scrubs through every attempt for the function.
+- Symbol tooltips: what each operand refers to (address, demangled name, kind, size). The Row details
+  panel shows the same for the current row, so nothing is shown only on hover.
+- A header with the score, the exact and byte-exact flags, the counts per row kind, and how the source
+  compiled (duration, cache hit).
+- Panels: hints and binding suggestions, each linked to its rows; the data diff (the strings, floats
+  and jump tables the function references, target against candidate); the current row in full; the
+  compiler output.
+- An attempt slider that scrubs through every attempt for the function (Best and Latest jump there),
+  with each attempt's session, number and time, and whether it was made by hand.
 
 **Actions**
 
-- Edit the source with ImGuiColorTextEdit. Recompiles are debounced and run in the background; the
-  latest edit wins, and the diff is marked stale while a compile runs. Diagnostics are clickable.
-- Toggles:
+- Toggles (remembered):
   - normalized or raw text;
   - show relocations;
+  - raw bytes (Ctrl+B);
   - fuzzy registers and stack (show register-only and stack-only differences as equal);
   - differing rows only.
-- Hand an edited version back to the agent. It is appended as guidance with the source attached.
-- Accept a binding suggestion. This writes the symbol with `source=user` and records it in
+- Step through the differing rows (F7, Shift+F7); select rows and copy them as text, as
+  `decomp diff` prints them.
+- Accept a binding suggestion. This names the target's symbol with `source=user` and records it in
   provenance.
-- Copy rows as text.
+- Export the diff as text or JSON.
+- Edit the source by hand, take over from the agent, verify and save, or hand back
+  ([Manual mode](#manual-mode)).
 
 **Data sources**
 
-- `diff_computed` (score, byte-exact flag, summary) and `attempts.jsonl` (with each attempt's source)
-  for agent attempts.
-- Manual compiles use the same compile and diff engine as the agent's tool. They run as background
-  jobs through `RunController`, emit the same events (tagged as manual), and are recorded as attempts
-  with `origin: user` (planned; today's attempts carry no `origin` and all come from the agent).
-- `SymbolDb` for tooltips.
+- `attempts.jsonl` (each attempt's source, score and `origin`, agent or user) and the best source.
+  The shown attempt is compiled again in the background with the project's toolchain, flags and
+  compile cache (the agent's compiles are usually cache hits) for its full diff.
+- Manual compiles use the same compile and diff engine as the agent's tool, as background jobs of the
+  GUI ([Manual mode](#manual-mode)).
+- `SymbolDb` and the image for tooltips and the data diff.
+- Without a project, the session's scores from `diff_computed`.
 - The view shows the same report that `decomp --json diff` prints
   ([matching.md](matching.md#8-output-formats)).
 
@@ -270,81 +306,117 @@ block shows as a "thinking (no summary)" marker.
 
 **Shows**
 
-- A sortable, filterable, virtualized table. Columns: address, demangled name, size, status, best
-  percentage, attempts, dollars spent, last attempt, symbol source, callers and callees, and
-  complexity (blocks, loops).
-- The Inspector for the selected function:
-  - annotated disassembly with block and loop hints;
-  - cross-references (callers, callees, data references);
-  - attempt history with a score chart;
-  - notes;
-  - status history.
+- The Function browser: every function in a sortable, filterable, virtualized table. Columns:
+  address, name, decorated name, size, status, best percentage, attempts, dollars spent, last attempt,
+  symbol source, callers, callees, unknown callees, and complexity (blocks, loops, difficulty).
+  Columns can be hidden and reordered (the decorated name and unknown callees start hidden). The live
+  run's sessions overlay the stored states. A line above the table counts the functions shown and
+  selected, and describes the filter.
+- The Inspector for the selected function: a header (name, decorated name, range and size, status,
+  best percentage, attempts and spend including a running session, which is linked) and tabs:
+  - Disassembly: the annotated listing with block separators, loop depth bars and loop headers,
+    labels, comments and optional bytes. Operands that reference something are links: a label scrolls
+    to it, a function opens in the Inspector, data in the Binary explorer;
+  - Cross-references: callers, callees and data references;
+  - Attempts: the score of every attempt and the best so far (a chart), and every attempt with its
+    time, match, session, author (agent or user) and summary;
+  - Notes;
+  - Status history: the status changes the runs recorded (time, from, to, best, run), and the
+    function's sessions in the shown run.
 
 **Actions**
 
-- Filter by status, size range, name regex, unknown callees, or refused.
-- Multi-select functions and queue the selection (start a run, or add to the running one).
-- Mark functions skip or library.
-- Reset a status to unstarted. History is kept.
-- Open a function in the Diff viewer or Agent session.
-- Edit notes.
+- Filter by status, size range, name (text or regex), unknown callees, or refused; sort on several
+  columns (Shift-click a header). Filters, sort keys and columns are remembered per project, and the
+  Dashboard opens the browser with a filter.
+- Multi-select (Ctrl and Shift clicks, Ctrl+A, box selection), then start a run over the selection (in
+  table order) or add it to the live run's queue. The Inspector runs or queues its function.
+- Mark functions skipped or library. Reset a status to unstarted; history is kept. A change to several
+  functions, or to matched ones, asks first; skipping a function during a live run also takes it out
+  of the run.
+- Open a function in the Inspector (double-click or Enter), the Diff viewer, the Agent session, the
+  Binary explorer or Symbols.
+- Edit notes: one function's in a dialog or in the Inspector (add a note, edit, save or revert), or
+  add a note to every selected function.
+- Export the list, filtered and sorted as shown, as CSV or JSON.
 
 **Data sources**
 
-- `SymbolDb` and analysis results.
-- Project status and history.
-- Live overlay: `status_changed` and `diff_computed`.
+- `SymbolDb`; `symbols.txt` for status, best percentage, attempts, spend and source; the function's
+  `attempts.jsonl` and `notes.md`.
+- The code analysis (`vm::analyze_functions`: callers, callees, unknown callees, blocks, loops and
+  difficulty), once per program generation, with its progress shown. The listing is
+  `vm::build_listing` over `annotate_function`; cross-references are `vm::function_xrefs`
+  (`Program::xrefs_to` and `xrefs_from`).
+- The status history: the `status_changed` events in every run's `events.jsonl`
+  (`vm::load_status_history`), read in the background.
+- Live overlay: the live run's sessions (`vm::build_function_rows`).
 
 **Notes**
 
-Tables with 100,000 or more rows stay responsive: they use `ImGuiListClipper`, and sorting and
-filtering run as background jobs over the snapshot.
+Tables with 100,000 or more rows stay responsive: they use `ImGuiListClipper`, and rows, sorting and
+filtering are built as background jobs (`vm::filter_and_sort`), the previous order staying shown
+until the new one is ready.
 
 ### Binary explorer
 
 **Shows**
 
-- Sections: name, address, size, characteristics.
-- Imports and exports.
-- Strings with cross-references.
-- A hex view with symbol overlays: functions, data, strings, floats, jump tables and relocations.
-- Rich header entries: product, build and count, mapped to compiler names in Phase 2.
-- PDB information: path, GUID, age and match state.
+- Sections: name, address, virtual and raw sizes, file offset, characteristics.
+- Imports (DLL, name or ordinal, slot) with the calls through a selected slot, and exports (ordinal,
+  name, address, forwarder).
+- Strings (ASCII and UTF-16, from the data sections) with their section, reference counts and a text
+  filter; the references to a selected string.
+- A hex view per section with symbol overlays: functions, data, strings, floats, jump tables,
+  relocations (underlined) and import slots, each color named in a legend; what starts on a row is
+  written beside it. A selected byte shows what it belongs to and who references it.
+- Rich header entries: product, build, count and the compiler or linker they name (VC6 to Visual
+  Studio 2005 today; a complete table in Phase 2).
+- PDB information: match state, the PDB loaded, the path the image records, GUID and age.
 
 **Actions**
 
-- Follow cross-references.
-- Create or rename symbols. They are recorded with `source=user` and appear in provenance.
-- Jump to the function or its diff.
+- Go to an address or symbol; follow cross-references, and go back.
+- Create, rename, edit or remove symbols (name, kind, size). They are recorded with `source=user`,
+  appear in provenance, and the program is rebuilt with them.
+- Jump to the function in the Inspector or the Diff viewer, or to the symbol in Symbols.
 
 **Data sources**
 
-- `pe::Image` and `pdb::Reader`, `SymbolDb` and analysis. The slice provides callers, callees, a
-  cross-reference scan over the functions with known sizes (`Program::xrefs_to`, and
-  `Program::xrefs_from` for one function), the string scan (`scan_strings`) and Rich-header
-  descriptions for VC6 to Visual Studio 2005; Phase 2 adds a full cross-reference index, a complete
-  compiler table and RTTI class names.
+- `pe::Image` and the PDB state, `SymbolDb` and analysis: the string scan (`scan_strings`) and its
+  references (`string_refs`), the overlays (`vm::build_hex_overlays`) and the references to an address
+  (`Program::xrefs_to`, a scan over the functions with known sizes), each a background job per program
+  generation. Phase 2 adds a full cross-reference index, a complete compiler table and RTTI class
+  names.
 
 ### Symbols and provenance
 
 **Shows**
 
-- Every symbol: address, kind, decorated and demangled names, size, source and status.
-- Who set each symbol (its source: analysis, import, export, PDB, agent or user), and, once symbol
-  changes are logged, when and in which session.
-- An audit trail of agent edits, each linked to the session turn that made it. Agent edits will be
-  bindings recorded on a match (planned) and `set_symbol` calls from Phase 3.
+- Every symbol in a virtualized table: address, kind, demangled and decorated names, size, source,
+  status (functions) and the number of recorded edits (marking agent edits). Columns can be sorted,
+  hidden and reordered.
+- For the selected symbol, who set it (its source: analysis, import, export, PDB, agent or user) and
+  its recorded edits: when, by whom (with the session), what changed and why.
+- Agent edits: every symbol change the agent made, grouped by session, each linked to its session.
+  Agent edits will be bindings recorded on a match (planned) and `set_symbol` calls from Phase 3, so
+  the tab stays empty until then.
 
 **Actions**
 
-- Rename or edit a symbol.
-- Revert agent edits, one at a time or per session.
+- Filter by name or address, kind, source, or edited symbols only (remembered per project).
+- Create, rename, edit or remove a symbol (name, kind, size); removing one drops it from `symbols.txt`
+  (what the binary itself says stays).
+- Revert agent edits, one at a time or all of a session's: each symbol gets back what it had before,
+  recorded as a user change. A revert is refused when a later change touched the symbol.
+- Open a symbol in the Inspector, the Binary explorer, or the other views of a function.
 
 **Data sources**
 
 - `symbols.txt` for the current state.
-- `symbol_changed` events in the run logs for the history (planned; the slice records no symbol
-  changes).
+- `.decomp/symbols.log.jsonl` for the history (every change made through `Project::set_symbol`: who,
+  when, before and after, the reason and the session), and the shown run's `symbol_changed` events.
+  Edits made to `symbols.txt` by hand are not logged.
 
 ### Changes and approvals
 
@@ -543,12 +615,28 @@ approved ([agent.md](agent.md#approvals)).
 
 ### Manual mode
 
-"Take over" stops the agent's session for that function (or pauses it if the user may hand back),
-then opens the Diff viewer on the best attempt. The user edits with live recompiles. "Verify and save"
-runs the same mechanical check as `submit_result` (compile, diff, require `byte_exact`), then writes
-the source and updates the status. "Hand back" resumes or starts a session with the user's source
-appended as guidance. Manual attempts are recorded in the history like the agent's, with
-`origin: user` (a field that `attempts.jsonl` does not have yet).
+"Take over" (Agent session, Diff viewer) pauses the agent's session for that function, so that the
+user can hand back, or ends it (outcome `skipped`), then opens the Diff viewer editing the best
+attempt; "Edit by hand" does the same for a function without a session. The editor
+(ImGuiColorTextEdit) sits beside the diff. A compile starts once the text has been quiet for half a
+second and runs in the background; the latest edit wins, and the diff is marked stale until it has
+caught up. Diagnostics are listed under the editor and jump to their line. Any attempt can be loaded
+into the editor.
+
+"Verify and save" (Ctrl+S) runs the same mechanical check as `submit_result` (compile, diff, require
+`byte_exact`). Every verification is recorded in `attempts.jsonl` as an attempt with `origin: user`,
+in a session of its own (`user-<time>`), and a better score updates the best source. A byte-exact one
+is written to `src/functions/` (recorded in `.decomp/changes.jsonl` as written by the user, "verified
+by hand") and the function becomes `matched`.
+
+"Hand back" sends the edited source to the agent as guidance: to the function's live session (a
+session paused for the take-over goes on); else the function is queued again in the live run and the
+source follows when its session starts; else a run on that function starts with the source as its
+first guidance.
+
+Manual compiles use the project's toolchain, flags and compile cache, and the same compile and diff
+engine as the agent's tool. They are background jobs of the GUI, not run events. Candidate code is
+only compiled, never executed.
 
 ### Navigation
 
@@ -562,16 +650,17 @@ appended as guidance. Manual attempts are recorded in the history like the agent
 
 One input (Ctrl+P) searches:
 
-- functions and symbols by readable or decorated name (case-insensitive, anywhere in the name; names
-  that start with the query and functions come first);
+- functions and symbols by readable or decorated name (fuzzy, ranked like the actions; functions come
+  first among equals);
 - addresses (typing `0x401000` jumps there);
 - strings in the image (prefix `"`);
 - actions (fuzzy; prefix `>` for actions only), such as "Start run", "Open project..." or "Reset
   layout".
 
 Every action in the UI is reachable from the palette. The names and strings are indexed in the
-background for each program generation (`src/gui/search_index.hpp`), and each query runs as a
-latest-wins job, so typing never waits for a search of 100,000 names.
+background for each program generation, and each query runs as a latest-wins job over the index
+(`src/gui/views/palette_search.hpp`, `src/viewmodel/search.hpp`), so typing never waits for a search
+of 100,000 names.
 
 ### Keyboard shortcuts
 
