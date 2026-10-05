@@ -4,6 +4,10 @@
 
 #include <doctest/doctest.h>
 
+#include <ostream>  // doctest prints std::string_view with operator<<, which MSVC declares without it
+#include <string>
+#include <string_view>
+
 using namespace decomp;
 using namespace decomp::matching;
 
