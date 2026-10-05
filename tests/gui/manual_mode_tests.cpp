@@ -60,6 +60,13 @@ TEST_CASE("manual mode: edits recompile in the background, and verify and save w
     App app(ws.services(), settings);
     DiffViewerControl* view = diff_control(app);
     REQUIRE(view);
+    // A project without a run: both views say what they need.
+    for (const char* id : {"agent_session", "diff_viewer"}) {
+        REQUIRE(app.focus_view(id));
+        gui.frames(3, [&] { app.frame(); });
+        CHECK(app.view_visible(id));
+    }
+    CHECK_FALSE(view->function());
     app.context().open("diff_viewer", {.va = va});
     REQUIRE(frames_until(gui, app, &ws, [&] { return view->function() == va && !view->busy(); }));
     CHECK(view->attempt_count() == 0);  // a function without attempts

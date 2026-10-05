@@ -287,10 +287,10 @@ private:
         } catch (const std::exception& e) {
             ctx.notify(Severity::error, std::format("Diff viewer: {}", e.what()));
         }
-        // Take over: edit the best attempt once the history is known.
+        // Take over: edit the best attempt once the history is known (edits under way are kept).
         if (wants_edit_ && attempts_loaded_) {
             wants_edit_ = false;
-            if (best_) {
+            if (!editing_ && best_) {
                 const std::string& source = attempts_[*best_].source;
                 begin_edit(source, attempt_result_ && attempt_result_->va == va_ && attempt_result_->source == source);
             } else if (!editing_) {

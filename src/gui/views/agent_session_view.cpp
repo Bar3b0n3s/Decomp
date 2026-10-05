@@ -194,7 +194,13 @@ private:
 
     // Follows the shared selection: its session, or the selected function's latest session in the run.
     void resolve_session(ViewContext& ctx) {
-        if (!ctx.snapshot) return;
+        if (!ctx.snapshot) {
+            // The run was closed: nothing to show until another opens.
+            if (!session_.empty() || va_) show_session(ctx, {});
+            resolved_run_.clear();
+            resolved_count_ = ~usize{0};
+            return;
+        }
         const auto& sel = ctx.selection;
         if (pinned_ && sel.function_va == pinned_selection_.function_va && sel.session == pinned_selection_.session) return;
         pinned_ = false;
@@ -235,6 +241,7 @@ private:
         final_read_ = false;
         items_.clear();
         items_version_ = ~u64{0};
+        records_seen_ = 0;
         heights_ = {};
         heights_width_ = 0;
         sources_.clear();
@@ -350,6 +357,16 @@ private:
         const bool live = live_buffer(s);
         const u64 version = reader_ ? reader_->version() : 0;
         if (version == items_version_ && live == items_live_) return;
+        // A rewritten transcript is read again from the start: caches by position no longer apply.
+        if (doc.records < records_seen_) {
+            code_.clear();
+            line_diffs_.clear();
+            results_.clear();
+            open_.clear();
+            show_diff_.clear();
+            items_.clear();
+        }
+        records_seen_ = doc.records;
         auto items = vm::build_timeline(doc, live);
         // Heights measured for the unchanged start of the timeline stay; the rest is estimated.
         usize same = 0;
@@ -361,7 +378,6 @@ private:
         items_version_ = version;
         items_live_ = live;
         sources_ = vm::transcript_sources(doc);
-        if (code_.size() > sources_.size()) code_.clear();
         heights_.resize(same, 0.0f);
         heights_.resize(items_.size(), 0.0f);
         for (usize i = same; i < items_.size(); ++i) heights_.set(i, estimate(ctx, items_[i], doc, s));
@@ -1232,6 +1248,7 @@ private:
     std::vector<vm::TimelineItem> items_;
     u64 items_version_ = ~u64{0};
     bool items_live_ = false;
+    usize records_seen_ = 0;  // transcript records behind items_
     vm::ItemHeights heights_;
     float heights_width_ = 0;
     std::vector<vm::SourceRef> sources_;
