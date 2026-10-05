@@ -5,10 +5,13 @@
 #include "analysis/units.hpp"
 #include "cli/common.hpp"
 #include "core/fs.hpp"
+#include "core/log.hpp"
 #include "core/strings.hpp"
 #include "formats/map.hpp"
 #include "matching/suggest.hpp"
 #include "project/project.hpp"
+#include "project/setup.hpp"
+#include "project/types.hpp"
 
 #include <format>
 #include <print>
@@ -342,7 +345,16 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
             throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
                 TRY_ASSIGN(auto p, open_program(g, *binary));
                 TRY_ASSIGN(u64 va, resolve_function(p, *function));
-                TRY_ASSIGN(auto fn, annotate_function(p, va));
+                // The project's header types name fields before the PDB's do.
+                std::optional<project::HeaderTypes> headers;
+                if (binary->empty())
+                    if (auto project = project::Project::find(g.project))
+                        if (auto setup = project::make_match_setup(&*project, "")) {
+                            auto compiled = project::compile_header_types(*project, *setup, p.arch());
+                            if (compiled) headers = std::move(*compiled);
+                            else if (compiled.error().code != ErrorCode::unsupported) log::warn("{}", compiled.error().message);
+                        }
+                TRY_ASSIGN(auto fn, annotate_function(p, va, true, headers ? &headers->catalog : nullptr));
                 if (g.json) print_json(to_json(fn));
                 else std::print("{}", to_text(fn, !*no_bytes));
                 return 0;

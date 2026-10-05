@@ -2,6 +2,7 @@
 
 #include "analysis/demangle.hpp"
 #include "analysis/eh.hpp"
+#include "analysis/typeflow.hpp"
 #include "core/strings.hpp"
 
 #include <algorithm>
@@ -93,10 +94,14 @@ bool is_address_field(const Program& program, const x86::Instruction& ins, const
     return image.contains(field.absolute) && field.absolute >= image.image_base() + 0x1000;
 }
 
-Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, bool include_callers) {
+Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, bool include_callers, const TypeCatalog* header_types) {
     TRY_ASSIGN(auto ext, program.function_extent(start));
     TRY_ASSIGN(auto ins, program.function_instructions(ext));
     auto cfg = build_cfg(ins, ext.jump_tables);
+    // Typed pointers name the fields and virtual methods the code reaches.
+    const TypeView types(header_types, &program.pdb_types().catalog);
+    const EntryTypes entry = entry_types(program, start, types);
+    const auto typed = typed_operand_notes(program, ins, cfg, entry, types);
 
     AnnotatedFunction fn;
     fn.start = ext.start;
@@ -110,6 +115,7 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
         fn.name = std::format("sub_{:x}", start);
         fn.display = fn.name;
     }
+    fn.types = entry.description;
     fn.instruction_count = ins.size();
     fn.block_count = cfg.blocks.size();
     fn.loop_count = static_cast<usize>(std::ranges::count_if(cfg.blocks, &BasicBlock::loop_header));
@@ -172,8 +178,8 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
     const auto rva_fields = image_relative_fields(program.image(), ins);
     const bool x64 = program.arch() == Arch::x64;
     const i64 slot = x64 ? 8 : 4;
-    i64 sp = 0;  // stack pointer relative to the value at entry (return address at [sp_entry])
-    std::optional<i64> frame;  // ebp/rbp value relative to entry sp, once set up
+    // The stack pointer relative to its value at entry (return address at [sp_entry]), and ebp/rbp once set up.
+    const StackPoints stack = stack_points(ins, x64);
 
     auto frame_name = [&](i64 offset_from_entry) -> std::string {
         if (offset_from_entry >= slot) return std::format("arg_{:x}", offset_from_entry - slot);
@@ -240,12 +246,15 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
         line.text = x86::render(x, renderer);
 
         // Frame slots for esp/ebp-relative operands.
+        const i64 sp = stack.sp[i];
+        const std::optional<i64> frame = stack.frame[i];
         for (const auto& op : x.operands) {
             if (op.kind != x86::OperandKind::mem || !op.mem.index.empty()) continue;
             const auto& base = op.mem.base;
             if ((base == "esp" || base == "rsp")) notes.push_back(frame_name(sp + op.mem.disp));
             else if ((base == "ebp" || base == "rbp") && frame) notes.push_back(frame_name(*frame + op.mem.disp));
         }
+        notes.insert(notes.end(), typed[i].begin(), typed[i].end());
         for (const auto& t : ext.jump_tables) {
             if (t.jump_va != x.address) continue;
             std::vector<std::string> targets;
@@ -257,22 +266,6 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
         if (block.first == i && block.loop_header) notes.push_back(std::format("loop header (depth {})", block.loop_depth));
         for (usize s : block.successors)
             if (block.last == i && s <= line.block && cfg.blocks[s].loop_header) notes.push_back("loop back-edge");
-
-        // Update the stack-pointer model (straight-line approximation; good enough for slot names).
-        const auto& m = x.mnemonic;
-        auto first_reg = [&](std::string_view r) { return !x.operands.empty() && x.operands[0].kind == x86::OperandKind::reg && x.operands[0].reg == r; };
-        auto second_imm = [&]() -> std::optional<i64> {
-            if (x.operands.size() == 2 && x.operands[1].kind == x86::OperandKind::imm) return x.operands[1].imm;
-            return std::nullopt;
-        };
-        std::string spr = x64 ? "rsp" : "esp", fpr = x64 ? "rbp" : "ebp";
-        if (m == "push") sp -= (x.operands.empty() ? slot : std::max<i64>(x.operands[0].size_bits / 8, 2));
-        else if (m == "pop") sp += slot;
-        else if (m == "sub" && first_reg(spr) && second_imm()) sp -= *second_imm();
-        else if (m == "add" && first_reg(spr) && second_imm()) sp += *second_imm();
-        else if (m == "mov" && first_reg(fpr) && x.operands.size() == 2 && x.operands[1].kind == x86::OperandKind::reg && x.operands[1].reg == spr) frame = sp;
-        else if (m == "mov" && first_reg(spr) && x.operands.size() == 2 && x.operands[1].kind == x86::OperandKind::reg && x.operands[1].reg == fpr && frame) sp = *frame;
-        else if (m == "leave" && frame) sp = *frame + slot;
 
         std::ranges::sort(notes);
         notes.erase(std::unique(notes.begin(), notes.end()), notes.end());
@@ -297,6 +290,7 @@ std::string to_text(const AnnotatedFunction& fn, bool with_bytes) {
     if (!fn.callers.empty()) out += std::format("; callers:  {}\n", join(fn.callers, ", "));
     for (const auto& v : fn.virtual_slots) out += std::format("; virtual:  {}\n", v);
     for (const auto& e : fn.exception_handling) out += std::format("; eh:       {}\n", e);
+    if (!fn.types.empty()) out += std::format("; types:    {}\n", join(fn.types, ", "));
     for (const auto& c : fn.callees)
         out += std::format("; calls:    {} = {}\n", c.display, c.detail.empty() ? c.name : c.detail);
     for (const auto& d : fn.data_refs)
@@ -331,6 +325,7 @@ Json to_json(const AnnotatedFunction& fn) {
     j["callers"] = fn.callers;
     j["virtual_slots"] = fn.virtual_slots;
     j["exception_handling"] = fn.exception_handling;
+    j["types"] = fn.types;
     auto refs = [](const std::vector<Reference>& list) {
         Json arr = Json::array();
         for (const auto& r : list)

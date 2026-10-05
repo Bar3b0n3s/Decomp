@@ -2,6 +2,7 @@
 
 #include "analysis/cfg.hpp"
 #include "analysis/program.hpp"
+#include "analysis/types.hpp"
 #include "core/json.hpp"
 
 #include <string>
@@ -14,7 +15,7 @@ struct AnnotatedLine {
     std::string label;    // "loc_401020" when the line starts a block that is branched to
     std::string bytes;    // hex bytes
     std::string text;     // instruction with symbolized operands
-    std::string comment;  // strings, floats, imports, frame slots, switch tables, loop markers
+    std::string comment;  // strings, floats, imports, frame slots, fields and virtual calls, switch tables, loop markers
     usize block = 0;
 };
 
@@ -48,6 +49,9 @@ struct AnnotatedFunction {
     // x86 exception handling the function registers: its try blocks' catch clauses, its __try blocks'
     // __except and __finally blocks, and where they are.
     std::vector<std::string> exception_handling;
+    // What `this` and the pointer parameters point to at entry ("this = Player* (ecx)"), when their types
+    // are known; the lines' comments then name the fields they reach (analysis/typeflow.hpp).
+    std::vector<std::string> types;
 };
 
 // What an address in the image refers to, for operands and comments.
@@ -57,7 +61,9 @@ Reference describe_reference(const Program& program, u64 va);
 // value when the image has no relocation info).
 bool is_address_field(const Program& program, const x86::Instruction& ins, const x86::Field& field);
 
-Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, bool include_callers = true);
+// `header_types`: the project's types (project/types.hpp), which name fields before the PDB's do.
+Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, bool include_callers = true,
+                                            const TypeCatalog* header_types = nullptr);
 
 // Plain-text listing for humans and the agent.
 std::string to_text(const AnnotatedFunction& fn, bool with_bytes = true);

@@ -261,13 +261,13 @@ const TypeLayout* TypeCatalog::find(std::string_view name) const {
     return it == by_name_.end() ? nullptr : &types_[it->second];
 }
 
-std::optional<TypeCatalog::FieldRef> TypeCatalog::field_ref(std::string_view type, u64 offset) const {
+std::optional<TypeCatalog::FieldRef> TypeCatalog::field_ref(std::string_view type, u64 offset, bool innermost) const {
     const TypeLayout* layout = find(type);
     if (!layout) return std::nullopt;
-    return resolve(*layout, offset, 0);
+    return resolve(*layout, offset, 0, innermost);
 }
 
-std::optional<TypeCatalog::FieldRef> TypeCatalog::resolve(const TypeLayout& layout, u64 offset, int depth) const {
+std::optional<TypeCatalog::FieldRef> TypeCatalog::resolve(const TypeLayout& layout, u64 offset, int depth, bool innermost) const {
     if (depth > 16 || offset >= layout.size) return std::nullopt;
     for (const FieldLayout& f : layout.fields) {
         if (f.size == 0 || offset < f.offset || offset - f.offset >= f.size) continue;
@@ -288,26 +288,27 @@ std::optional<TypeCatalog::FieldRef> TypeCatalog::resolve(const TypeLayout& layo
                 for (const u64 i : indices) path += std::format("[{}]", i);
             }
         }
+        if (!innermost && within == 0) return FieldRef{std::move(path), &f, true, 0};
         if (!f.udt.empty() && !f.is_bitfield())
             if (const TypeLayout* inner = find(f.udt))
-                if (auto ref = resolve(*inner, within, depth + 1)) {
+                if (auto ref = resolve(*inner, within, depth + 1, innermost)) {
                     ref->path = path + "." + ref->path;
                     return ref;
                 }
-        return FieldRef{std::move(path), &f, within == 0};
+        return FieldRef{std::move(path), &f, within == 0, within};
     }
     for (const BaseLayout& b : layout.bases) {
         if (b.is_virtual || offset < b.offset) continue;
         const TypeLayout* base = find(b.name);
         if (!base) continue;
-        auto ref = resolve(*base, offset - b.offset, depth + 1);
+        auto ref = resolve(*base, offset - b.offset, depth + 1, innermost);
         if (!ref) continue;
         // A table pointer of a base other than the first is that base's.
         if (ref->field == nullptr && b.offset != 0 && !ref->path.contains("::")) ref->path = b.name + "::" + ref->path;
         return ref;
     }
     for (const auto& [at, name] : {std::pair(layout.vfptr, "__vfptr"), std::pair(layout.vbptr, "__vbptr")})
-        if (at && offset >= *at && offset - *at < pointer_size_) return FieldRef{name, nullptr, offset == *at};
+        if (at && offset >= *at && offset - *at < pointer_size_) return FieldRef{name, nullptr, offset == *at, offset - *at};
     return std::nullopt;
 }
 

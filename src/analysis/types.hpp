@@ -121,17 +121,20 @@ public:
     // How C++ names byte `offset` of `type`: "hp", "pos.x", "items[2].count", "grid[1][2]" (through
     // nested structs and arrays), a base's field by its own name, "__vfptr" and "__vbptr" (a base's other
     // than the first: "Named::__vfptr"). `field` is the innermost field reached (null for the table
-    // pointers; valid until the catalog changes), `exact` whether `offset` is where it starts. nullopt
-    // when the type is unknown or nothing holds that byte.
+    // pointers; valid until the catalog changes), `exact` whether `offset` is where it starts. With
+    // `innermost` false, a struct field that starts at `offset` is named itself ("pos" rather than
+    // "pos.x"): what an address of the offset points to. nullopt when the type is unknown or nothing holds
+    // that byte.
     struct FieldRef {
         std::string path;
         const FieldLayout* field = nullptr;
         bool exact = true;
+        u64 rest = 0;  // bytes past the start of what `path` names
     };
-    std::optional<FieldRef> field_ref(std::string_view type, u64 offset) const;
+    std::optional<FieldRef> field_ref(std::string_view type, u64 offset, bool innermost = true) const;
 
 private:
-    std::optional<FieldRef> resolve(const TypeLayout& layout, u64 offset, int depth) const;
+    std::optional<FieldRef> resolve(const TypeLayout& layout, u64 offset, int depth, bool innermost) const;
 
     usize pointer_size_ = 4;
     std::vector<TypeLayout> types_;

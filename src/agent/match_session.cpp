@@ -294,7 +294,8 @@ ToolOutput MatchSession::disassemble(const Json& input) {
     auto target = json_string_or(input, "target", "");
     auto va = program_.resolve(target);
     if (!va) return ToolOutput::error(std::format("unknown function '{}'; try lookup_symbol", target));
-    auto fn = annotate_function(program_, *va);
+    const auto headers = header_types();
+    auto fn = annotate_function(program_, *va, true, headers ? &headers->catalog : nullptr);
     if (!fn) return ToolOutput::error(fn.error().message);
     return ToolOutput::ok(clip_lines(to_text(*fn, false), kMaxListingLines));
 }
@@ -742,7 +743,8 @@ std::string MatchSession::brief() const {
         out += std::format("project headers available: {}\n", headers.empty() ? "(none)" : join(headers, ", "));
     }
 
-    auto fn = annotate_function(program_, va_);
+    const auto headers = header_types();
+    auto fn = annotate_function(program_, va_, true, headers ? &headers->catalog : nullptr);
     if (!fn) return out + "\n(could not disassemble: " + fn.error().message + ")\n";
     out += "\n# Annotated disassembly\n```\n" + clip_lines(to_text(*fn, false), kMaxListingLines) + "```\n";
 

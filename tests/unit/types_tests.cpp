@@ -1,11 +1,14 @@
 // CodeView type records (formats/codeview.hpp) and type layouts (analysis/types.hpp): the fixture PDBs'
 // types, and a header compiled with clang-cl /Z7.
 
+#include "analysis/annotate.hpp"
 #include "analysis/declarations.hpp"
 #include "analysis/program.hpp"
+#include "analysis/typeflow.hpp"
 #include "analysis/types.hpp"
 #include "core/fs.hpp"
 #include "core/process.hpp"
+#include "core/strings.hpp"
 #include "formats/coff.hpp"
 #include "formats/pdb.hpp"
 #include "llvm_fixture.hpp"
@@ -14,6 +17,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <format>
 #include <optional>
 #include <ostream>  // doctest prints std::string_view with operator<<, which MSVC declares without it
 #include <string>
@@ -424,4 +428,95 @@ TEST_CASE("system headers") {
         CAPTURE(path);
         CHECK_FALSE(system_header(path));
     }
+}
+
+TEST_CASE("annotated listings name the fields and virtual methods typed pointers reach") {
+    // Player::Hit's `this` comes from its PDB type: ecx on x86, rcx on x64.
+    for (const char* arch : {"x86", "x64"}) {
+        CAPTURE(arch);
+        const auto program = Program::open(test::fixture(std::string(arch) + "/basic.exe")).value();
+        const auto fn = annotate_function(program, *program.resolve("Player::Hit")).value();
+        CHECK(fn.types == std::vector<std::string>{std::format("this = Player* ({})", std::string_view(arch) == "x86" ? "ecx" : "rcx")});
+        std::vector<std::string> comments;
+        for (const auto& line : fn.lines) comments.push_back(line.comment);
+        CHECK(std::ranges::count(comments, std::string("this->hp")) >= 1);
+        CHECK(std::ranges::any_of(comments, [](const std::string& c) { return c.find("this->speed") != std::string::npos; }));
+        CHECK(to_text(fn, false).find(std::format("; types:    this = Player* ({})\n", std::string_view(arch) == "x86" ? "ecx" : "rcx")) !=
+              std::string::npos);
+        // A pointer parameter on the stack (x86) or in a register (x64), and the virtual calls through it.
+        const auto rtti = Program::open(test::fixture(std::string(arch) + "/rtti.exe")).value();
+        const auto use = annotate_function(rtti, *rtti.resolve("use")).value();
+        const std::string text = to_text(use, false);
+        CHECK(text.find("arg_0->area() (virtual, slot 0)") != std::string::npos);
+        CHECK(text.find("arg_0->sides() (virtual, slot 1)") != std::string::npos);
+    }
+
+    // The project's headers name fields before the PDB does; without a PDB, a member function's decorated
+    // name says what `this` is.
+    const auto with_pdb = Program::open(test::fixture("x86/basic.exe")).value();
+    const u64 hit = *with_pdb.resolve("Player::Hit");
+    TypeLayout player;
+    player.name = "Player";
+    player.size = 8;
+    player.fields = {field("health", 0, 4, "int"), field("velocity", 4, 4, "float")};
+    TypeCatalog headers;
+    headers.add(player);
+    CHECK(to_text(annotate_function(with_pdb, hit, false, &headers).value(), false).find("this->health") != std::string::npos);
+    auto without_pdb = Program::open(test::fixture("x86/basic.exe"), OpenOptions{.use_pdb = false}).value();
+    CHECK(to_text(annotate_function(without_pdb, hit, false, &headers).value(), false).find("this->") == std::string::npos);
+    Symbol named;
+    named.va = hit;
+    named.name = "?Hit@Player@@QAEXH@Z";
+    named.kind = SymbolKind::function;
+    named.source = SymbolSource::user;
+    without_pdb.symbols().add(named);
+    const auto from_name = annotate_function(without_pdb, hit, false, &headers).value();
+    CHECK(from_name.types == std::vector<std::string>{"this = Player* (ecx)"});
+    CHECK(to_text(from_name, false).find("this->velocity") != std::string::npos);
+}
+
+TEST_CASE("typed pointers flow through loads, lea, spills and calls, and meet where paths join") {
+    const auto program = Program::open(test::fixture("x86/basic.exe")).value();
+    TypeLayout vec2;
+    vec2.name = "Vec2";
+    vec2.size = 8;
+    vec2.fields = {field("x", 0, 4, "float"), field("y", 4, 4, "float")};
+    TypeLayout node;
+    node.name = "Node";
+    node.size = 24;
+    node.fields = {field("value", 0, 4, "int"), field("kind", 4, 4, "int"), field("next", 8, 4, "Node*"), field("pad", 12, 4, "int"),
+                   field("pos", 16, 8, "Vec2")};
+    node.fields[2].pointee = "Node";
+    node.fields[4].udt = "Vec2";
+    TypeCatalog catalog;
+    catalog.add(vec2);
+    catalog.add(node);
+    const TypeView types(&catalog, nullptr);
+    EntryTypes entry;
+    entry.state.registers["rcx"] = TypedValue{"Node", "this"};
+
+    const auto notes_for = [&](std::vector<u8> code) {
+        std::vector<std::byte> bytes;
+        for (const u8 b : code) bytes.push_back(std::byte{b});
+        const auto ins = program.decoder().decode_all(bytes, 0x500000);
+        const auto cfg = build_cfg(ins);
+        std::vector<std::string> out;
+        for (const auto& n : typed_operand_notes(program, ins, cfg, entry, types)) out.push_back(join(n, "; "));
+        return out;
+    };
+    CHECK(notes_for({
+              0x8B, 0x41, 0x08,                    // mov eax, [ecx+8]       this->next
+              0x8B, 0x50, 0x04,                    // mov edx, [eax+4]       this->next->kind
+              0x8D, 0x51, 0x10,                    // lea edx, [ecx+16]      &this->pos
+              0xD9, 0x42, 0x04,                    // fld dword ptr [edx+4]  this->pos.y
+              0x89, 0x4C, 0x24, 0x04,              // mov [esp+4], ecx       spilled
+              0xE8, 0x00, 0x01, 0x00, 0x00,        // call (elsewhere)       clobbers eax, ecx, edx
+              0x8B, 0x41, 0x08,                    // mov eax, [ecx+8]       unknown now
+              0x8B, 0x4C, 0x24, 0x04,              // mov ecx, [esp+4]       reloaded
+              0x8B, 0x01,                          // mov eax, [ecx]         this->value
+              0xC3,                                // ret
+          }) == std::vector<std::string>{"this->next", "this->next->kind", "&this->pos", "this->pos.y", "", "", "", "", "this->value", ""});
+    // One path changes ecx: where they join, it is unknown. A loop that keeps it keeps it.
+    CHECK(notes_for({0x85, 0xC0, 0x74, 0x02, 0x31, 0xC9, 0x8B, 0x01, 0xC3}) == std::vector<std::string>{"", "", "", "", ""});
+    CHECK(notes_for({0x8B, 0x01, 0x48, 0x75, 0xFB, 0xC3}) == std::vector<std::string>{"this->value", "", "", ""});
 }

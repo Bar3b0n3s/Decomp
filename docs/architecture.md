@@ -253,6 +253,8 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   from them. `analyze_functions()` computes them for many functions (about a microsecond per
   instruction); runs queue their functions easiest first by the score (`run::make_queue_items()`), the
   GUI's workspace keeps an analysis per program generation, and the Function browser shows it.
+- Typed pointers (`analysis/typeflow.hpp`, see [Types](#types)): which registers and stack slots point
+  to known types as a function runs, for the field names in annotated listings.
 - Type layouts (`analysis/types.hpp`, see [Types](#types)): what the compiler made of a struct, class,
   union or enum, read from CodeView type records: size, bases, table pointers, virtual methods and
   their slots, fields (offsets, sizes, bits, array dimensions, the types they are or point to) and
@@ -412,6 +414,19 @@ and parameter types, `const`, `static`, calling convention, virtual slot), stati
 types; fields stay in declaration order. `analysis/declarations.hpp` turns layouts back into C++
 declarations for `decomp types import` ([project-format.md](project-format.md#include)), and the
 compiled declarations are compared with the PDB before they are written.
+
+Annotated listings name what typed pointers reach (`analysis/typeflow.hpp`): `[ecx+0Ch]` becomes
+`this->health`. At entry, `this` and the pointer parameters come from the function's PDB type (ecx for
+`__thiscall`, the stack for `__stdcall` and `__cdecl` methods, ecx and edx for `__fastcall`; rcx, rdx,
+r8 and r9 by position on x64), or without one, `this` from a member function's decorated name. A
+dataflow over the control-flow graph carries them through register moves, loads of pointer fields
+(`mov eax, [ecx+8]` makes eax `this->next`), `lea` of embedded structs and base subobjects, spills to
+the stack and reloads, and drops what calls and other writes change; where paths join, a register keeps
+its type only if every path agrees. A load of a vfptr gives the object's vtable, so a call through it is
+named after the virtual method in that slot (`arg_0->area() (virtual, slot 0)`), looked up in the class
+and the bases at its start. Layouts come from the project's headers first, then the PDB; the listing's
+header says what is known at entry (`; types:    this = Player* (ecx)`). Session briefs and the
+`disassemble` tool use the headers the session compiled; `decomp disasm` compiles them in a project.
 
 `TypeCatalog::field_ref()` names the field at an offset as C++ would: through nested structs and
 arrays (`pos.y`, `grid[1][2]`, `pair.b`), a base's fields by their own names, the table pointers as
