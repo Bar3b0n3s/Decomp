@@ -946,18 +946,7 @@ u64 padding_length(const BinaryImage& image, const x86::Decoder& decoder, u64 va
         auto bytes = image.view(at, static_cast<usize>(std::min<u64>(15, limit - at)));
         if (!bytes) break;
         auto ins = decoder.decode(*bytes, at);
-        if (!ins || at + ins->length > limit) break;
-        bool filler = ins->mnemonic == "nop";
-        if (ins->mnemonic == "lea" && ins->operands.size() == 2 && ins->operands[0].kind == x86::OperandKind::reg &&
-            ins->operands[1].kind == x86::OperandKind::mem) {
-            const auto& m = ins->operands[1].mem;
-            filler = m.disp == 0 && m.index.empty() && x86::gpr_family(m.base) == x86::gpr_family(ins->operands[0].reg) &&
-                     ins->operands[0].reg == m.base;
-        }
-        if (ins->mnemonic == "xchg" && ins->operands.size() == 2 && ins->operands[0].kind == x86::OperandKind::reg &&
-            ins->operands[1].kind == x86::OperandKind::reg && ins->operands[0].reg == ins->operands[1].reg)
-            filler = true;
-        if (!filler) break;
+        if (!ins || at + ins->length > limit || !x86::is_filler(*ins)) break;
         at += ins->length;
     }
     return at - va;

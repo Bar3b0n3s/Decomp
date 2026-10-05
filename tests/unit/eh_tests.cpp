@@ -206,3 +206,27 @@ TEST_CASE("the diff pairs a function's exception-handling stub with the candidat
     }
     CHECK(stub_row);
 }
+
+TEST_CASE("x64 funclets diff with their function when the target's extent takes them in") {
+    const auto obj = coff::Object::load(test::fixture("x64/eh.obj")).value();
+    // clang puts a function's catch and cleanup funclets after it in its section, each with unwind data
+    // and a symbol of its own, and its PDB counts them in the function. Their code loads the function's
+    // continuation address, which the assembler resolved.
+    const Program p = Program::open(test::fixture("x64/eh.exe")).value();
+    for (const char* name : {"?eh_guarded@@YAHH@Z", "?eh_catch@@YAHH@Z", "?eh_nested@@YAHH@Z"}) {
+        CAPTURE(name);
+        const auto d = matching::diff_function(p, p.symbols().find(name)->va, obj).value();
+        CHECK_MESSAGE(d.byte_exact, matching::to_text(d));
+        CHECK(d.candidate.size == d.target.size);
+    }
+    // Without the PDB each funclet is a function of its own, and the function pairs alone.
+    OpenOptions options;
+    options.use_pdb = false;
+    const Program bare = Program::open(test::fixture("x64/eh.exe"), options).value();
+    const auto d = matching::diff_function(bare, p.symbols().find("?eh_guarded@@YAHH@Z")->va, obj, "?eh_guarded@@YAHH@Z").value();
+    const coff::Symbol* dtor = obj.find_defined("?dtor$2@?0??eh_guarded@@YAHH@Z@4HA");
+    REQUIRE(dtor);
+    CHECK(d.candidate.address + d.candidate.size == dtor->value);
+    // The alignment before the funclet is not the function's: the target's ends at its last instruction.
+    CHECK_MESSAGE(d.deleted + d.inserted == 0, matching::to_text(d));
+}

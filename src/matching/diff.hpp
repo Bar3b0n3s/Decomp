@@ -54,8 +54,11 @@ Result<Side> build_target_side(const Program& program, u64 va);
 // Finds the candidate symbol for a target function: exact decorated name, else an equivalent name.
 const coff::Symbol* find_candidate_symbol(const coff::Object& obj, const Symbol& target);
 
-// Builds the comparable view of a function defined in a COFF object.
-Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& function);
+// Builds the comparable view of a function defined in a COFF object. Its range runs to the next function
+// symbol of its section. `reach`, the size of the target's function, takes in the funclets that follow
+// the function and start inside it: x64 catch and cleanup blocks and SEH filters have unwind data, and so
+// symbols, of their own, but clang's PDB counts them in their function.
+Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& function, usize reach = 0);
 
 enum class RowKind : u8 { equal, encoding, operand, opcode, insert, del };
 std::string_view to_string(RowKind kind);

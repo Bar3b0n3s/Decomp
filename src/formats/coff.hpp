@@ -78,7 +78,7 @@ struct Symbol {
 // and catch blocks (__catch$?f@@YAXXZ$0, which it marks static functions), clang's catch continuations
 // ($ehgcr_3_10) and, on x86, its catch and cleanup funclets (?catch$3@?0??f@@YAXXZ@4HA, ?dtor$2@...),
 // which are part of their function there. (x64 funclets have unwind data of their own and are
-// functions.) Link maps list them too.
+// functions; the diff takes them in when the target's function does.) Link maps list them too.
 bool is_code_label_name(std::string_view name, Arch arch);
 
 class Object {

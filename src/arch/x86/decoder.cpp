@@ -214,6 +214,16 @@ std::string gpr_family(std::string_view r) {
     return std::string(r);
 }
 
+bool is_filler(const Instruction& ins) {
+    if (ins.mnemonic == "int3" || ins.mnemonic == "nop") return true;
+    if (ins.operands.size() != 2 || ins.operands[0].kind != OperandKind::reg) return false;
+    const Operand& dst = ins.operands[0];
+    const Operand& src = ins.operands[1];
+    if (ins.mnemonic == "lea" && src.kind == OperandKind::mem)
+        return src.mem.disp == 0 && src.mem.index.empty() && src.mem.base == dst.reg;
+    return ins.mnemonic == "xchg" && src.kind == OperandKind::reg && src.reg == dst.reg;
+}
+
 namespace {
 
 std::string size_keyword(u16 bits) {

@@ -240,11 +240,12 @@ Ref index_table_ref(std::string key, u64 target_va) {
 
 namespace {
 
-// Trailing int3 bytes are padding as far as the linked image goes: the trap compilers put after a final
-// call that cannot return (Visual Studio 2015 and later; one byte or several) and the linker's fill
-// look the same, so the comparison leaves them out on both sides.
-void drop_trailing_int3(std::vector<x86::Instruction>& list) {
-    while (list.size() > 1 && list.back().length == 1 && list.back().bytes[0] == 0xCC) list.pop_back();
+// Trailing padding is left out on both sides. The trap compilers put after a final call that cannot
+// return (Visual Studio 2015 and later; one int3 or several) and the linker's fill look the same in the
+// linked image, and the alignment between a function and the funclets that follow it in its section is
+// not the function's when the target's ends before them.
+void drop_trailing_padding(std::vector<x86::Instruction>& list) {
+    while (list.size() > 1 && x86::is_filler(list.back())) list.pop_back();
 }
 
 // x86 exception-handling companions of the function being compared: the handler stub it registers and
@@ -277,7 +278,7 @@ Ref own_companions(Ref r, const std::string& function) {
 Result<Side> build_target_side(const Program& program, u64 va) {
     TRY_ASSIGN(auto ext, program.function_extent(va));
     TRY_ASSIGN(auto list, program.function_instructions(ext));
-    drop_trailing_int3(list);
+    drop_trailing_padding(list);
     Side side;
     const Symbol* sym = program.symbols().at(va);
     side.name = sym ? sym->name : std::format("sub_{:x}", va);
@@ -529,13 +530,47 @@ Ref candidate_reloc_ref(const CandidateContext& ctx, const coff::Relocation& rel
     return r;
 }
 
+// The offset from its symbol that a relocated field refers to. A PC-relative field counts from the end of
+// the instruction, the relocation from the end of the field: compilers make up for an immediate after
+// the field in the stored addend (clang: REL32 holding -1) or in the type (MSVC: REL32_1).
+i64 field_addend(const coff::Object& obj, const coff::Relocation& rel, const x86::Instruction& ins, const x86::Field& field) {
+    i64 addend = field.raw;
+    if (!obj.relocation_is_pc_relative(rel.type)) return addend;
+    addend += static_cast<i64>(ins.length) - (field.offset + field.size);
+    if (obj.arch() == Arch::x64 && rel.type > coff::reloc_amd64::rel32) addend -= rel.type - coff::reloc_amd64::rel32;
+    return addend;
+}
+
+// A funclet a compiler outlines from `function` and names after it: a catch or cleanup block
+// (?catch$3@?0??f@@YAHH@Z@4HA, ?dtor$2@?0??f@@YAHH@Z@4HA), an SEH filter or __finally block
+// (?filt$0@0@f@@, ?fin$0@0@f@@).
+bool is_funclet_of(std::string_view funclet, std::string_view function) {
+    static constexpr std::string_view kinds[] = {"?catch$", "?dtor$", "?cleanup$", "?filt$", "?fin$"};
+    if (std::ranges::none_of(kinds, [&](std::string_view k) { return funclet.starts_with(k); })) return false;
+    auto names = [&](std::string_view name) {
+        if (name.empty()) return false;
+        for (usize at = funclet.find(name, 1); at != std::string_view::npos; at = funclet.find(name, at + 1)) {
+            const usize after = at + name.size();
+            if ((funclet[at - 1] == '@' || funclet[at - 1] == '?') && after < funclet.size() && funclet[after] == '@') return true;
+        }
+        return false;
+    };
+    return names(function) || names(undecorate(function));  // x86 decorates C names: _f, _f@8
+}
+
 } // namespace
 
-Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& function) {
+Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& function, usize reach) {
     const coff::Section* sec = obj.section(function.section_number);
     if (!sec || !sec->is_code()) return make_error(ErrorCode::invalid_argument, "'{}' is not defined in a code section", function.name);
     u32 start = function.value;
     u32 end = start + obj.symbol_size(function);
+    // The function's funclets that follow it and start inside the target's function.
+    for (const coff::Symbol* s : obj.section_symbols(function.section_number)) {
+        if (s->value < end || s->storage_class == coff::storage::label || coff::is_code_label_name(s->name, obj.arch())) continue;
+        if (s->value != end || s->value - start >= reach || !is_funclet_of(s->name, function.name)) break;
+        end = s->value + obj.symbol_size(*s);
+    }
     if (end > sec->data.size()) return make_error(ErrorCode::parse, "'{}' extends past its section", function.name);
 
     x86::Decoder decoder(obj.arch());
@@ -566,7 +601,7 @@ Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& f
     std::ranges::sort(tables);
     tables.erase(std::unique(tables.begin(), tables.end()), tables.end());
     std::erase_if(list, [&](const x86::Instruction& i) { return i.address >= code_end; });
-    drop_trailing_int3(list);
+    drop_trailing_padding(list);
 
     CandidateContext ctx{obj, *sec, start, code_end, end, std::move(tables), {}, function.name};
     for (usize i = 0; i < list.size(); ++i) ctx.index_of[list[i].address] = i;
@@ -581,8 +616,10 @@ Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& f
         for (usize f = 0; f < ins.fields.size(); ++f) {
             const auto& field = ins.fields[f];
             if (const coff::Relocation* rel = reloc_at(*sec, static_cast<u32>(ins.address + field.offset))) {
-                si.refs[f] = own_companions(candidate_reloc_ref(ctx, *rel, field.raw), ctx.function);
-            } else if (field.kind == x86::FieldKind::rel) {
+                si.refs[f] = own_companions(candidate_reloc_ref(ctx, *rel, field_addend(obj, *rel, ins, field)), ctx.function);
+            } else if (field.kind == x86::FieldKind::rel || field.rip_relative) {
+                // Resolved by the assembler: a place in the same section (x64 funclets load their
+                // function's continuation address, `lea rax, [rip + $ehgcr_3_7]`).
                 si.refs[f] = label_ref(ctx.index_of, field.absolute, start);
             }
         }
@@ -1030,7 +1067,7 @@ Result<FunctionDiff> diff_function(const Program& program, u64 va, const coff::O
         return make_error(ErrorCode::not_found, "the candidate object does not define '{}' (it defines: {})",
                           candidate_symbol.empty() ? target.name : candidate_symbol, names.empty() ? "no functions" : join(names, ", "));
     }
-    TRY_ASSIGN(auto candidate, build_candidate_side(obj, *cs));
+    TRY_ASSIGN(auto candidate, build_candidate_side(obj, *cs, target.size));
     return diff_sides(std::move(target), std::move(candidate), program);
 }
 

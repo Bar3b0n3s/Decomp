@@ -98,9 +98,15 @@ functions the object defines.
   COMDAT section of its own, and the range is the rest of that section. Names compilers give to places
   inside a function count as labels: MSVC's catch blocks (`__catch$f$0`, which it marks as static
   functions), `$`-prefixed labels, and clang's x86 catch and cleanup funclets.
-- Trailing int3 bytes are left out, here and on the target side: the trap a compiler puts after a
-  final call that cannot return (Visual Studio 2015 and later, one byte or several) and the linker's
-  fill look the same in the linked image.
+- The range takes in the funclets that follow the function in its section, named after it
+  (`?catch$3@?0??f@@YAHH@Z@4HA`, `?dtor$2@...`, `?filt$0@0@f@@`, `?fin$0@0@f@@`), when they start
+  inside the target's function. clang puts its x64 catch and cleanup funclets there, each with unwind
+  data and a symbol of its own, and its PDB counts them in their function; without a PDB they are
+  functions of their own, and the function is compared alone.
+- Trailing padding is left out, here and on the target side: the trap a compiler puts after a final
+  call that cannot return (Visual Studio 2015 and later, one int3 or several) and the linker's fill
+  look the same in the linked image, and the alignment before a function's funclets is not part of a
+  target function that ends before them (int3, nops and the other filler instructions).
 - The tables at the end of the range are split off as data: the first table the code indexes in the
   function's own section, past the instruction, marks the end of the code (see
   [jump tables](#jump-tables-inside-text)).
@@ -113,8 +119,13 @@ functions the object defines.
 
 A relocation at the offset of an instruction's field makes that field an address operand. COFF
 relocations have no explicit addend: the field's existing contents are the addend. For example,
-`mov eax, [g_table+8]` is a `DIR32` relocation to `g_table` with 8 stored in the field. The relocation
-type does not matter for instruction fields; the relocation's symbol decides what the operand becomes:
+`mov eax, [g_table+8]` is a `DIR32` relocation to `g_table` with 8 stored in the field. A PC-relative
+field counts from the end of the instruction and its relocation from the end of the field, so an
+immediate after the field shows in the stored addend (clang: `REL32` holding -1 in
+`add dword ptr [rip+g], 2`) or in the type (MSVC: `REL32_1`); both read as `g` itself. A RIP-relative
+field the assembler resolved, with no relocation, points into the same section: an internal label
+(clang's x64 funclets load their function's continuation address that way). The relocation's symbol
+decides what the operand becomes:
 
 | Relocation symbol | Becomes |
 |---|---|
@@ -126,7 +137,7 @@ type does not matter for instruction fields; the relocation's symbol decides wha
 | Any other named symbol outside the function's section | That symbol plus the addend |
 | Anonymous data: a section symbol, or a label in the function's own section (MSVC's `$LN` table labels) | A jump table when the data holds relocations back into the function (read up to the function's next table); otherwise, past the code in the function's range, a two-level switch's index table (its bytes up to the next table or the end of the range); otherwise a string when it holds a NUL-terminated string of at least 2 bytes (such as an older compiler's `$SG` literal in `.data`); otherwise the named symbol at that offset; otherwise `<section>+<offset>` |
 
-Relocation types matter for jump-table entries only: their size, and whether they are PC-relative
+For jump-table entries the relocation type gives their size and whether they are PC-relative
 (clang's x64 `REL32` entries, which are adjusted back to the label they point to). Thread-local
 variables (`SECREL`) are not supported yet: the target's field is a plain offset into `.tls`, so such
 an operand shows as a difference (planned).

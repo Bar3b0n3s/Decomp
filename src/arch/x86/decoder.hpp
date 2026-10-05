@@ -108,4 +108,8 @@ std::string format_hex_signed(i64 value);
 // other registers unchanged. Names registers by what they hold on both architectures.
 std::string gpr_family(std::string_view reg);
 
+// An instruction compilers and linkers align code with: int3, a nop of any length, `lea r, [r+0]`
+// (8D 49 00, 8D A4 24 00000000, 8D 9B 00000000, ...) or `xchg r, r`.
+bool is_filler(const Instruction& ins);
+
 } // namespace decomp::x86

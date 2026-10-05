@@ -458,8 +458,9 @@ dispatch:
         const auto d = diff_function(program, *program.resolve(name), obj).value();
         CHECK_MESSAGE(d.byte_exact, to_text(d));
         // The candidate's code ends where the tables start.
-        const auto& last = d.candidate.instructions.back().ins;
-        CHECK(d.candidate.address + d.candidate.size == last.address + last.length);
+        const coff::Symbol* table = obj.find_defined("$LN12@dispatch");
+        REQUIRE(table);
+        CHECK(d.candidate.address + d.candidate.size == table->value);
 
         // The index table is compared by content: here switch value 4 takes the first entry instead.
         std::string changed = text;
