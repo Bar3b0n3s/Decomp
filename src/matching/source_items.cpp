@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <optional>
+#include <utility>
 
 namespace decomp::matching {
 
@@ -356,6 +358,107 @@ std::string normalized(std::string_view s) {
         ++i;
     }
     return out;
+}
+
+std::vector<std::string> declared_types(const SourceItem& item) {
+    if (item.kind != ItemKind::declaration) return {};
+    // Identifiers, `::`, and single characters, without comments and literals.
+    const std::string_view body = item_body(item);
+    std::vector<std::string> tokens;
+    for (usize i = 0; i < body.size();) {
+        if (space(body[i])) {
+            ++i;
+        } else if (const usize end = skip_literal_or_comment(body, i); end != i) {
+            tokens.emplace_back("\"\"");  // a literal
+            i = end;
+        } else if (word_char(body[i])) {
+            usize j = i;
+            while (j < body.size() && word_char(body[j])) ++j;
+            tokens.emplace_back(body.substr(i, j - i));
+            i = j;
+        } else if (body.substr(i, 2) == "::") {
+            tokens.emplace_back("::");
+            i += 2;
+        } else {
+            tokens.emplace_back(1, body[i++]);
+        }
+    }
+    auto ident = [](const std::string& t) { return !t.empty() && (std::isalpha(static_cast<unsigned char>(t[0])) != 0 || t[0] == '_'); };
+    // Skips a parenthesized or bracketed group starting at `i` (attributes such as __declspec(align(8))).
+    auto skip_group = [&](usize i) {
+        int depth = 0;
+        for (; i < tokens.size(); ++i) {
+            if (tokens[i] == "(" || tokens[i] == "[") ++depth;
+            else if ((tokens[i] == ")" || tokens[i] == "]") && --depth == 0) return i + 1;
+        }
+        return i;
+    };
+    if (tokens.empty() || tokens[0] == "template") return {};
+    if (tokens[0] == "using") {
+        if (tokens.size() > 2 && ident(tokens[1]) && tokens[2] == "=") return {tokens[1]};
+        return {};
+    }
+    // The tag of `struct|class|union|enum [attributes] Name` at `i`, and the index after it.
+    auto tag = [&](usize i) -> std::optional<std::pair<std::string, usize>> {
+        if (i >= tokens.size() || (tokens[i] != "struct" && tokens[i] != "class" && tokens[i] != "union" && tokens[i] != "enum")) return {};
+        ++i;
+        if (tokens[i - 1] == "enum" && i < tokens.size() && (tokens[i] == "class" || tokens[i] == "struct")) ++i;
+        while (i < tokens.size() && (tokens[i] == "__declspec" || tokens[i] == "alignas" || tokens[i] == "[")) i = skip_group(tokens[i] == "[" ? i : i + 1);
+        if (i < tokens.size() && ident(tokens[i]) && tokens[i] != "final") return std::pair{tokens[i], i + 1};
+        return std::pair{std::string(), i};  // anonymous
+    };
+    if (tokens[0] != "typedef") {
+        // A definition (`{`, a base clause, an enum's underlying type) or a forward declaration (`;`),
+        // not a variable of the type.
+        auto name = tag(0);
+        if (!name || name->first.empty() || name->second >= tokens.size()) return {};
+        const std::string& next = tokens[name->second];
+        if (next == "{" || next == ";" || next == ":" || next == "final") return {name->first};
+        return {};
+    }
+    // typedef: the declarators after the type, or after its braced body.
+    static constexpr std::array<std::string_view, 12> kQualifiers = {"const",      "volatile",   "__cdecl", "__stdcall", "__fastcall", "__thiscall",
+                                                                     "__vectorcall", "__ptr32", "__ptr64", "__unaligned", "__restrict", "WINAPI"};
+    usize start = 1;
+    for (usize i = 1, depth = 0; i < tokens.size(); ++i) {
+        if (tokens[i] == "{") {
+            if (depth++ == 0) continue;
+        } else if (tokens[i] == "}") {
+            if (--depth == 0) start = i + 1;
+        }
+    }
+    std::vector<std::string> names;
+    std::string last;  // the last identifier at the top level of the current declarator
+    int depth = 0;
+    for (usize i = start; i < tokens.size(); ++i) {
+        const std::string& t = tokens[i];
+        if (t == "(" || t == "[") {
+            // A function pointer's name: `(*Name)` or `(__stdcall *Name)`.
+            if (t == "(" && depth == 0) {
+                usize j = i + 1;
+                while (j < tokens.size() && (tokens[j] == "*" || tokens[j] == "&" ||
+                                             std::ranges::find(kQualifiers, tokens[j]) != kQualifiers.end()))
+                    ++j;
+                if (j > i + 1 && j < tokens.size() && ident(tokens[j]) && j + 1 < tokens.size() && tokens[j + 1] == ")") {
+                    last = tokens[j];
+                    i = j + 1;
+                    continue;
+                }
+            }
+            ++depth;
+        } else if (t == ")" || t == "]") {
+            --depth;
+        } else if (depth == 0 && (t == "," || t == ";")) {
+            if (!last.empty()) names.push_back(std::exchange(last, {}));
+        } else if (depth == 0 && ident(t) && std::ranges::find(kQualifiers, t) == kQualifiers.end()) {
+            last = t;
+        }
+    }
+    if (!last.empty()) names.push_back(last);
+    // `typedef struct Player { ... } Player;` also defines the tag.
+    if (auto name = tag(1); name && !name->first.empty() && std::ranges::find(names, name->first) == names.end())
+        names.insert(names.begin(), name->first);
+    return names;
 }
 
 std::string_view item_body(const SourceItem& item) {

@@ -7,6 +7,7 @@
 #include <ostream>  // doctest prints std::string_view with operator<<, which MSVC declares without it
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace decomp;
 using namespace decomp::matching;
@@ -126,4 +127,32 @@ TEST_CASE("normalized text: comments and the spaces words do not need are gone")
     CHECK(normalized("const char* s = \"a  b\";") == "const char*s=\"a  b\";");
     CHECK(normalized("unsigned\tlong\nx;") == "unsigned long x;");
     CHECK(normalized("struct S {\n    int a;\n};") == normalized("struct S { int a; };"));
+}
+
+TEST_CASE("the types a declaration declares") {
+    auto types = [](std::string_view source) {
+        const auto items = parse_source_items(source);
+        REQUIRE(items.size() == 1);
+        return declared_types(items.front());
+    };
+    using V = std::vector<std::string>;
+    CHECK(types("struct Player {\n    int hp;\n    float speed;\n};") == V{"Player"});
+    CHECK(types("// leads it\nclass Foo;") == V{"Foo"});
+    CHECK(types("union U { int a; float b; };") == V{"U"});
+    CHECK(types("enum Color { Red, Green };") == V{"Color"});
+    CHECK(types("enum class Mode : unsigned char { A, B };") == V{"Mode"});
+    CHECK(types("struct __declspec(align(16)) Vec4 { float v[4]; };") == V{"Vec4"});
+    CHECK(types("struct Derived : Base { int x; };") == V{"Derived"});
+    CHECK(types("typedef unsigned int u32;") == V{"u32"});
+    CHECK(types("typedef struct { int x, y; } Point, *PPoint;") == V{"Point", "PPoint"});
+    CHECK(types("typedef struct Node { struct Node* next; } Node;") == V{"Node"});
+    CHECK(types("typedef struct tagRECT { long left; } RECT, *LPRECT;") == V{"tagRECT", "RECT", "LPRECT"});
+    CHECK(types("typedef void (__stdcall *Callback)(int, const char*);") == V{"Callback"});
+    CHECK(types("typedef int Table[8];") == V{"Table"});
+    CHECK(types("using Score = long long;") == V{"Score"});
+    // Not type declarations: a variable of a struct type, data, a function declaration, a template.
+    CHECK(types("struct Player g_player;").empty());
+    CHECK(types("extern int g_counter;").empty());
+    CHECK(types("int add(int a, int b);").empty());
+    CHECK(types("template <class T> struct Box { T v; };").empty());
 }

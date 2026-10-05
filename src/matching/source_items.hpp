@@ -40,4 +40,10 @@ std::string normalized(std::string_view text);
 // The text of an item without its leading comments and blank lines.
 std::string_view item_body(const SourceItem& item);
 
+// The types a declaration item declares or defines: the tag of `struct`, `class`, `union` or `enum`
+// (`struct Player { ... };`, `enum class Color : int;`), the names a typedef introduces
+// (`typedef struct { ... } Point, *PPoint;`, `typedef void (*Callback)(int);`), the alias of
+// `using Name = ...;`. Empty for other items, and for templates.
+std::vector<std::string> declared_types(const SourceItem& item);
+
 } // namespace decomp::matching
