@@ -14,6 +14,7 @@ struct Selection {
     std::vector<std::string> functions;            // names or addresses; when given, exactly these
     std::vector<project::FunctionStatus> statuses;  // only functions with these statuses
     std::string filter;                            // ECMAScript regex over decorated and readable names
+    std::vector<std::string> units;                // only functions in these units (their obj=)
     bool include_finished = false;                 // also matched, refused, skipped and library functions
 };
 

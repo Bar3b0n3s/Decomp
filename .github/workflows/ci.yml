@@ -103,6 +103,9 @@ jobs:
           # The workers composed the 8 matches into the units' sources; every function there verifies.
           test "$(cat "$p"/src/*.cpp | grep -c '^// FUNCTION: ')" -eq 8
           ./bin/Release/decomp -C "$p" units verify
+          # Progress and spend per unit: 7 of basic.obj's functions and other.obj's one.
+          ./bin/Release/decomp -C "$p" status
+          ./bin/Release/decomp -C "$p" --json status | python3 -c "import json,sys; u={x['name']: x for x in json.load(sys.stdin)['units']}; assert u['basic.obj']['matched_functions'] == 7 and u['other.obj']['matched_functions'] == 1 and u['basic.obj']['cost_usd'] > 0, u"
 
       - name: Function bounds corpus (clang-cl)
         run: |

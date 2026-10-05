@@ -151,8 +151,9 @@ decomp agent sum_array
 decomp run --all --workers 4 --run-budget-usd 20
 decomp runs list                                  # the project's runs; `decomp run --resume <id>` continues one
 
-# Overall progress: functions and code bytes matched, status buckets, spend
+# Overall progress: functions and code bytes matched, status buckets, spend, and per translation unit
 decomp status
+decomp run --unit basic.obj                       # one unit's unfinished functions, easiest first
 
 # The supervision GUI: open the project, start a run, watch and steer it
 decomp-gui --project .

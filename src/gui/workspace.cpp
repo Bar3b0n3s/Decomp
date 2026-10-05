@@ -312,7 +312,7 @@ Result<std::string> Workspace::start_run(const RunRequest& request) {
     }
     if (vas.empty()) return make_error(ErrorCode::invalid_argument, "nothing to run: every function is matched or set aside");
     // Easy functions first, unless the functions were chosen in an order.
-    auto items = run::make_queue_items(*current, vas, analysis_.get(), !chosen);
+    auto items = run::make_queue_items(*current, vas, analysis_.get(), !chosen || request.easy_first);
     options.selection = chosen ? Json{{"functions", vas}, {"from", "gui"}} : Json{{"all", true}, {"from", "gui"}};
     close_run();
     TRY_ASSIGN(auto store, run::RunStore::create(project_->runs_dir(), events::new_run_id()));
@@ -441,6 +441,13 @@ void WorkspaceCommands::start() {
 void WorkspaceCommands::start_functions(std::vector<u64> functions) {
     RunRequest request;
     request.functions = std::move(functions);
+    if (auto r = workspace_.start_run(request); !r) workspace_.report_error(std::format("cannot start the run: {}", r.error().message));
+}
+
+void WorkspaceCommands::start_easiest_first(std::vector<u64> functions) {
+    RunRequest request;
+    request.functions = std::move(functions);
+    request.easy_first = true;
     if (auto r = workspace_.start_run(request); !r) workspace_.report_error(std::format("cannot start the run: {}", r.error().message));
 }
 

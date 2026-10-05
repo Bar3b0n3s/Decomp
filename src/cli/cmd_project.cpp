@@ -311,14 +311,21 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
         });
     }
     {
-        auto* cmd = app.add_subcommand("status", "Progress summary: functions and code bytes matched, status buckets, spend");
+        auto* cmd = app.add_subcommand("status", "Progress summary: functions and code bytes matched, status buckets, spend, per unit");
         cmd->callback([&g] {
             throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
                 TRY_ASSIGN(auto p, project::Project::find(g.project));
                 TRY_ASSIGN(auto program, p.open_program());
                 const auto progress = project::compute_progress(program.symbols(), p);
+                TRY_ASSIGN(const auto units, project::load_units(p));
+                const auto unit_progress = project::compute_unit_progress(units, program.symbols(), *p.function_infos());
                 if (g.json) {
-                    print_json(project::to_json(progress));
+                    Json j = project::to_json(progress);
+                    Json per_unit = Json::array();
+                    for (const auto& u : unit_progress)
+                        if (!u.unit.name.empty() || u.functions) per_unit.push_back(project::to_json(u));
+                    j["units"] = std::move(per_unit);
+                    print_json(j);
                     return 0;
                 }
                 std::println("{}  ({})", p.config().target, fs::to_utf8(p.root()));
@@ -328,6 +335,16 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
                 for (const auto& [st, b] : progress.buckets)
                     std::println("  {:<12}{:6} functions {:8} bytes", project::to_string(st), b.functions, b.bytes);
                 std::println("  spend       ${:.2f}", progress.spend_usd);
+                // Per unit, in link order: the units with functions (`decomp units` lists them all).
+                if (!units.empty()) {
+                    std::println("  {:<28} {:>11} {:>17} {:>8} {:>9}", "unit", "functions", "bytes", "matched", "spend");
+                    for (const auto& u : unit_progress) {
+                        if (u.functions == 0) continue;
+                        std::println("  {:<28} {:>11} {:>17} {:>7.1f}% {:>9}", u.unit.name.empty() ? "(no unit)" : u.unit.name,
+                                     std::format("{}/{}", u.matched, u.functions), std::format("{}/{}", u.matched_bytes, u.bytes),
+                                     u.percent_bytes(), std::format("${:.2f}", u.cost_usd));
+                    }
+                }
                 return 0;
             }));
         });

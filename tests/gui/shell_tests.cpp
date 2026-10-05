@@ -36,7 +36,7 @@ void check_view(const NamedSnapshot& snapshot, const std::string& view) {
 
 void check_every_view(const NamedSnapshot& snapshot) {
     const auto ids = all_view_ids();
-    REQUIRE(ids.size() == 13);
+    REQUIRE(ids.size() == 14);
     for (const auto& id : ids) check_view(snapshot, id);
 }
 

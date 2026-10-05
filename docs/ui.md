@@ -471,6 +471,36 @@ A gated action waits for its decision, and the worker shows the phase "waiting f
 does not end the wait, Abort does. A denial goes back to the agent as an error result with the
 reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
+### Units
+
+**Shows**
+
+- The program's translation units in link order (`units.txt`): name, kind (`code`, `library`,
+  `import`, `linker`), functions, functions matched, code bytes, the share of bytes matched, the
+  spend on the unit's functions (their `cost=`), and the unit's source. A header says where the units
+  came from (the PDB, the link map, `units.txt` or a guess of the analysis) and what was spent on them.
+  Functions in no unit form a row of their own.
+- For the selected unit: its kind, origin and source (and whether that is written yet), and its
+  functions with address, name, status, best match and spend, each a link to the other views.
+- The latest verification or emit of the unit: how many functions are byte-exact in its source, and
+  which are not (or which kept their own files), with why.
+
+**Actions**
+
+- Run the unit's functions that are not finished (`decomp run --unit`), easiest first, or add them to
+  the live run's queue.
+- Verify the unit's source: compile it and diff every function it holds (`decomp units verify`), in
+  the background.
+- Emit: move the unit's matched functions' own files into its source (`decomp units emit`), keeping
+  those that do not stay byte-exact there. Not during a run.
+- Refresh, after `units.txt` was edited outside the GUI.
+
+**Data sources**
+
+- `units.txt`, each symbol's `obj=` and the function states in `symbols.txt` (`compute_unit_progress`),
+  recomputed in the background when the project changes.
+- The unit sources under `src/` and `.decomp/changes.jsonl` (what verify and emit write).
+
 ### Cost and usage
 
 **Shows**
@@ -578,7 +608,6 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
 | View | Phase | Shows |
 |---|---|---|
-| Units | 3 | Translation units with function counts, bytes, matched percentage and cost; the per-unit queue |
 | Types and layouts | 4 | Types from the project headers with exact layouts read back from the PDB, where each field is used, and differences against the target's PDB types |
 | Data matching and relink | 5 | Per-section data comparison, split objects, the relink result, and SHA-1 comparison with the first differing bytes |
 | Permuter and flag search | 6 | Search runs, candidates tried, best score over time, and the winning flags or permutations |
@@ -777,7 +806,8 @@ past run.
 
 | GUI | CLI |
 |---|---|
-| Dashboard | `decomp status`: functions and code bytes matched, status buckets, spend (the sum of the functions' `cost=` in `symbols.txt`) |
+| Dashboard | `decomp status`: functions and code bytes matched, status buckets, spend (the sum of the functions' `cost=` in `symbols.txt`), and per unit: functions and bytes matched and spend (`units` in its JSON) |
+| Units | `decomp units` (every unit with its kind, progress, spend and source; `derive`, `verify`, `emit`), `decomp run --unit <name>` |
 | Run monitor | `decomp run` and `decomp agent <func>`: a live progress view on stderr, on by default (`--no-progress` hides it, `--progress` keeps it with `--json` or `-q`). On a terminal it is a block redrawn in place: a run header (run ID, status, model and effort, elapsed time, spend, cache-hit rate, functions matched), the queue length, one line per worker (function, turn, phase, best score, spend, elapsed time; at most twelve) and the last four activity lines. Otherwise it prints the activity lines as they happen. `decomp run --interactive` takes the run controls on stdin. |
 | Agent session | Steering with `--interactive` (guidance lines and `:pause`, `:resume`, `:stop`, `:abort` for `decomp agent`; `:guide <fn> <text>` and the run controls for `decomp run`) and `--guidance`; Ctrl+C to stop, twice to abort; the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl` |
 | Diff viewer | `decomp diff <func> --source <file>` or `--obj <file>` (with `--compact`, `--context`, `--bytes`) |

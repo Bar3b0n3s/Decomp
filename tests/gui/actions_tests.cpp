@@ -156,5 +156,6 @@ TEST_CASE("the shell's actions have unique ids and shortcuts") {
     CHECK(shortcut_of("font.reset") == (ImGuiMod_Ctrl | ImGuiKey_0));
     CHECK(shortcut_of("view.dashboard") == (ImGuiMod_Ctrl | ImGuiKey_1));
     CHECK(shortcut_of("view.changes") == (ImGuiMod_Ctrl | ImGuiKey_9));
-    CHECK(shortcut_of("view.cost") == 0);  // the tenth view has no Ctrl+digit
+    CHECK(shortcut_of("view.units") == 0);  // the tenth view has no Ctrl+digit
+    CHECK(shortcut_of("view.cost") == 0);
 }

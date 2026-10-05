@@ -8,6 +8,7 @@
 #include "events/bus.hpp"
 #include "events/progress.hpp"
 #include "project/project.hpp"
+#include "project/units.hpp"
 #include "run/controller.hpp"
 #include "run/selection.hpp"
 #include "run/store.hpp"
@@ -25,7 +26,7 @@ namespace decomp::cli {
 namespace {
 
 struct RunArgs {
-    std::vector<std::string> functions, statuses, policies, flags;
+    std::vector<std::string> functions, statuses, policies, flags, units;
     std::string filter, toolchain, model, effort, replay_dir, resume;
     bool all = false, include_finished = false, no_fallbacks = false, interactive = false, progress = false, no_progress = false;
     int workers = 0, max_turns = 0, max_minutes = -1, stagger_seconds = -1;
@@ -132,10 +133,16 @@ void print_summary(const Json& summary, const std::filesystem::path& run_dir) {
 
 Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
     TRY_ASSIGN(auto project, project::Project::find(g.project));
-    if (!a.resume.empty() && (!a.functions.empty() || a.all || !a.statuses.empty() || !a.filter.empty()))
+    if (!a.resume.empty() && (!a.functions.empty() || a.all || !a.statuses.empty() || !a.filter.empty() || !a.units.empty()))
         return make_error(ErrorCode::invalid_argument, "--resume continues the run's own functions; do not select functions with it");
-    if (a.resume.empty() && a.functions.empty() && !a.all && a.statuses.empty() && a.filter.empty())
-        return make_error(ErrorCode::invalid_argument, "name the functions to run, or select them with --all, --status or --filter");
+    if (a.resume.empty() && a.functions.empty() && !a.all && a.statuses.empty() && a.filter.empty() && a.units.empty())
+        return make_error(ErrorCode::invalid_argument, "name the functions to run, or select them with --all, --status, --filter or --unit");
+    if (!a.units.empty()) {
+        TRY_ASSIGN(const auto units, project::load_units(project));
+        for (const auto& name : a.units)
+            if (std::ranges::find(units, name, &Unit::name) == units.end())
+                return make_error(ErrorCode::not_found, "no unit named '{}' (`decomp units` lists them)", name);
+    }
 
     // One live run per project.
     TRY_ASSIGN(auto active_run, project.try_lock_active_run());
@@ -206,6 +213,7 @@ Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
         run::Selection selection;
         selection.functions = a.functions;
         selection.filter = a.filter;
+        selection.units = a.units;
         selection.include_finished = a.include_finished;
         for (const auto& list : a.statuses)
             for (const auto& name : split(list, ',')) {
@@ -250,6 +258,7 @@ Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
                                              : Json{{"functions", a.functions},
                                                     {"statuses", a.statuses},
                                                     {"filter", a.filter},
+                                                    {"units", a.units},
                                                     {"all", a.all},
                                                     {"include_finished", a.include_finished}};
     if (recorded.is_object()) {
@@ -353,6 +362,7 @@ void register_run_commands(CLI::App& app, GlobalOptions& g) {
     cmd->add_flag("--all", a->all, "Every function that is not finished (matched, refused, skipped or library)");
     cmd->add_option("--status", a->statuses, "Only functions with these statuses (comma-separated)")->allow_extra_args(false);
     cmd->add_option("--filter", a->filter, "Only functions whose names match this regular expression (case-insensitive)");
+    cmd->add_option("--unit", a->units, "Only functions of these translation units (repeatable; `decomp units` lists them)")->allow_extra_args(false);
     cmd->add_flag("--include-finished", a->include_finished, "Also select matched, refused, skipped and library functions");
     cmd->add_option("--workers", a->workers, "Parallel sessions (default: the project's agent.workers, 4)")
         ->check(CLI::Range(1, run::RunController::kMaxWorkers));

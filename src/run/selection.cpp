@@ -40,6 +40,7 @@ Result<std::vector<u64>> select_functions(const Program& program, const project:
             } else if (!selection.include_finished && !runnable_by_default(status)) {
                 continue;
             }
+            if (!selection.units.empty() && std::ranges::find(selection.units, f->object) == selection.units.end()) continue;
             if (re && !std::regex_search(f->name, *re) && !std::regex_search(f->display, *re) &&
                 !(f->pdb_name.size() && std::regex_search(f->pdb_name, *re)))
                 continue;

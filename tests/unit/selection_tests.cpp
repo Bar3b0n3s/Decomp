@@ -2,6 +2,7 @@
 #include "matching/health.hpp"
 #include "project/progress.hpp"
 #include "project/setup.hpp"
+#include "project/units.hpp"
 #include "run/selection.hpp"
 #include "llvm_fixture.hpp"
 #include "test_util.hpp"
@@ -38,6 +39,24 @@ TEST_CASE("progress counts functions and bytes per status, like decomp status") 
     CHECK(p.percent_functions() > 0);
     const Json j = project::to_json(p);
     CHECK(j["buckets"]["matched"]["functions"] == 1);
+
+    // Per unit, in link order, with the spend of each unit's functions (what decomp status lists).
+    const auto units = project::compute_unit_progress(project::load_units(fx.project).value(), fx.program.symbols(), *fx.project.function_infos());
+    REQUIRE(units.size() >= 2);
+    CHECK(units[0].unit.name == "basic.obj");
+    CHECK(units[0].matched == 1);
+    CHECK(units[0].cost_usd == doctest::Approx(1.75));
+    CHECK(units[0].statuses.at(project::FunctionStatus::nonmatching) == 1);
+    CHECK(units[1].unit.name == "other.obj");
+    CHECK(units[1].functions == 1);
+    CHECK(units[1].cost_usd == 0);
+    usize functions = 0;
+    for (const auto& u : units) functions += u.functions;
+    CHECK(functions == p.functions);  // every function is in exactly one entry
+    const Json uj = project::to_json(units[0]);
+    CHECK(uj["name"] == "basic.obj");
+    CHECK(uj["matched_functions"] == 1);
+    CHECK(uj["cost_usd"] == doctest::Approx(1.75));
 }
 
 TEST_CASE("selection: defaults skip finished functions; filters and explicit names") {
@@ -73,6 +92,18 @@ TEST_CASE("selection: defaults skip finished functions; filters and explicit nam
     run::Selection explicit_names;
     explicit_names.functions = {"add", "0x4010f0"};  // explicit names ignore the status filter
     CHECK(run::select_functions(fx.program, &fx.project, explicit_names).value() == std::vector<u64>{add, 0x4010f0});
+
+    // By unit (the fixture's PDB names them): other.obj holds other_value alone.
+    run::Selection other_unit;
+    other_unit.units = {"other.obj"};
+    CHECK(run::select_functions(fx.program, &fx.project, other_unit).value() == std::vector<u64>{fx.va("other_value")});
+    run::Selection basic_unit;
+    basic_unit.units = {"basic.obj"};
+    basic_unit.filter = "^(dispatch|sum_array)$";
+    CHECK(run::select_functions(fx.program, &fx.project, basic_unit).value().size() == 2);
+    run::Selection no_unit;
+    no_unit.units = {"nope.obj"};
+    CHECK(run::select_functions(fx.program, &fx.project, no_unit).value().empty());
 
     run::Selection bad;
     bad.functions = {"nope"};

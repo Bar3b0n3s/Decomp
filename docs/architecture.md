@@ -553,7 +553,9 @@ contains no matching or agent logic of its own:
 - `Workspace` (`gui/workspace.hpp`): what the GUI has open, without ImGui. A project and its program
   load on a background thread; the run the views show is either live (a `RunController` with its event
   log, `RunStateStore` and log sink) or past (its `events.jsonl` replayed through the same reducer,
-  read-only). Workers wake the UI loop at most once per frame.
+  read-only). Workers wake the UI loop at most once per frame. It also keeps the code analysis of the
+  current program generation (`analyze_functions()`), computed on a background thread, which runs
+  started in the GUI order their queue by and the Function browser and the Units view show.
 - `AppServices` and `RunCommands` (`gui/services.hpp`): the views' only way to the workspace and the
   controller, so the shell renders headless in tests with fakes.
 - `App` (`gui/app.hpp`): the docking shell, chrome (top bar, status bar, notifications, command

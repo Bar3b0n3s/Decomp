@@ -28,7 +28,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols"};
+const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols", "units"};
 
 // Sessions that finish at once (every other one matches) unless held.
 struct HeldSessions {
@@ -126,6 +126,11 @@ void render_my_views(HeadlessContext& gui, App& app, ProjectFixture& fx, const c
     settle(gui, app);
     app.context().open("symbols", {.anchor = "agent_edits"});
     settle(gui, app);
+    // Units, with a unit selected: its functions and actions.
+    for (const char* unit : {"basic.obj", "other.obj", "* Linker *"}) {
+        app.context().open("units", {.anchor = unit});
+        settle(gui, app);
+    }
     CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());
 }
 

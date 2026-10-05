@@ -1056,7 +1056,8 @@ Without a project, `decomp agent <func> --binary <exe> --toolchain <name>` works
 nothing is persisted unless `--log-dir <dir>` is given, and the best source is printed at the end.
 
 **Many functions.** `decomp run --all --workers 4 --run-budget-usd 20` runs every function the default
-selection takes (or name them, or choose with `--status unstarted,nonmatching` or `--filter <regex>`).
+selection takes (or name them, or choose with `--status unstarted,nonmatching`, `--filter <regex>` or
+`--unit <name>`, the functions of a translation unit).
 The progress view shows one line per worker. With `--interactive`, stdin takes `:pause [worker]`,
 `:resume [worker]`, `:stop`, `:abort`, `:skip <fn>`, `:requeue <fn>`, `:workers <n>`, `:budget <usd>`,
 `:guide <fn> <text>` and `:status`. Exit codes: 0 completed, 2 stopped or out of budget (resumable), 1

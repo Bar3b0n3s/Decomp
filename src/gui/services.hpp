@@ -35,6 +35,7 @@ public:
 
     virtual void start() {}  // a run over the default selection
     virtual void start_functions(std::vector<u64> /*functions*/) {}  // a run over these, in this order
+    virtual void start_easiest_first(std::vector<u64> /*functions*/) {}  // a run over these, easiest first
     virtual void pause() {}
     virtual void resume() {}
     virtual void stop() {}   // finish the current turns, then end the sessions

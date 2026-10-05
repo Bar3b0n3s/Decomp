@@ -154,6 +154,26 @@ TEST_CASE("workspace: the code analysis runs in the background and orders the ru
     fx.sessions.release();
     CHECK(fx.until([&] { return !fx.workspace->run_live(); }));
 
+    // Functions chosen as a set (a unit's, from the Units view) go easiest first too; chosen in an
+    // order, they keep it.
+    const u64 entry = *program->resolve("entry"), add = *program->resolve("add"), read_counter = *program->resolve("read_counter");
+    fx.workspace->close_run();
+    fx.workspace->services().commands->start_easiest_first({entry, add, read_counter});
+    REQUIRE(fx.workspace->controller());
+    auto chosen = fx.workspace->controller()->queue();
+    REQUIRE(chosen.size() == 3);
+    CHECK(chosen[0].va == read_counter);
+    CHECK(chosen[1].va == add);
+    CHECK(chosen[2].va == entry);
+    CHECK(fx.until([&] { return !fx.workspace->run_live(); }));
+    fx.workspace->close_run();
+    fx.workspace->services().commands->start_functions({entry, add, read_counter});
+    REQUIRE(fx.workspace->controller());
+    chosen = fx.workspace->controller()->queue();
+    REQUIRE(chosen.size() == 3);
+    CHECK(chosen[0].va == entry);
+    CHECK(fx.until([&] { return !fx.workspace->run_live(); }));
+
     // New symbols, a new program generation: analyzed again. Closing the project drops the analysis.
     fx.workspace->reload_symbols();
     fx.workspace->poll();

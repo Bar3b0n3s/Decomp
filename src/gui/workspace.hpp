@@ -45,7 +45,8 @@ struct ProjectState {
 
 // How to start a run from the GUI.
 struct RunRequest {
-    std::vector<u64> functions;  // in this order; empty: every function the default selection takes
+    std::vector<u64> functions;  // in this order (or easiest first); empty: every function the default selection takes
+    bool easy_first = false;     // order `functions` by difficulty, as a selection is
     int workers = 0;             // 0: the project's agent.workers
     std::optional<double> run_budget_usd;
     std::optional<agent::LoopLimits> limits;
@@ -198,6 +199,7 @@ public:
     bool live() const override { return workspace_.run_live(); }
     void start() override;
     void start_functions(std::vector<u64> functions) override;
+    void start_easiest_first(std::vector<u64> functions) override;
     void pause() override;
     void resume() override;
     void stop() override;
