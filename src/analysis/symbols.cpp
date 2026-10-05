@@ -30,6 +30,7 @@ std::string_view to_string(SymbolSource source) {
     case SymbolSource::analysis: return "analysis";
     case SymbolSource::import_table: return "import";
     case SymbolSource::export_table: return "export";
+    case SymbolSource::library: return "library";
     case SymbolSource::map: return "map";
     case SymbolSource::pdb_public: return "pdb_public";
     case SymbolSource::pdb: return "pdb";
@@ -48,7 +49,7 @@ std::optional<SymbolKind> symbol_kind_from_string(std::string_view s) {
 }
 
 std::optional<SymbolSource> symbol_source_from_string(std::string_view s) {
-    for (auto k : {SymbolSource::analysis, SymbolSource::import_table, SymbolSource::export_table, SymbolSource::map,
+    for (auto k : {SymbolSource::analysis, SymbolSource::library, SymbolSource::import_table, SymbolSource::export_table, SymbolSource::map,
                    SymbolSource::pdb_public, SymbolSource::pdb, SymbolSource::agent, SymbolSource::user})
         if (to_string(k) == s) return k;
     return std::nullopt;

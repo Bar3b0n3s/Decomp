@@ -133,6 +133,7 @@ decomp toolchain test vc6
 mkdir game && cd game
 decomp init ../path/to/GAME.EXE --toolchain vc6 --flag /O2 --flag /Gy
 # (with the build's link map, if there is one: --map ../path/to/GAME.MAP, or later `decomp map import`)
+decomp lib match 'C:\VS6\VC98\Lib\LIBC.LIB'      # name and set aside the C runtime functions it linked
 
 # Explore the target
 decomp funcs                                      # functions with address, size and symbol source

@@ -17,8 +17,9 @@ namespace map { struct MapFile; }
 class BinaryImage;
 
 enum class SymbolKind : u8 { function, data, string, float_const, import, label, unknown };
-// Ordered by trust: later sources override names from earlier ones. `map`: the build's link map.
-enum class SymbolSource : u8 { analysis, import_table, export_table, map, pdb_public, pdb, agent, user };
+// Ordered by trust: later sources override names from earlier ones. `library`: a static library's
+// function that the target's code matches (analysis/signatures.hpp); `map`: the build's link map.
+enum class SymbolSource : u8 { analysis, library, import_table, export_table, map, pdb_public, pdb, agent, user };
 
 std::string_view to_string(SymbolKind kind);
 std::string_view to_string(SymbolSource source);

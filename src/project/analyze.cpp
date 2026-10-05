@@ -54,7 +54,8 @@ Result<AnalyzeSummary> analyze(Project& project, const AnalyzeOptions& options) 
         }
         if (s.source == SymbolSource::analysis && !has_work(project, *infos, s)) continue;  // found again, or not
         Symbol seed = s;
-        if (s.source != SymbolSource::pdb && s.source != SymbolSource::pdb_public) seed.size = 0;  // measured again
+        // Measured again, unless a PDB or a library's own copy of the function gave the size.
+        if (s.source != SymbolSource::pdb && s.source != SymbolSource::pdb_public && s.source != SymbolSource::library) seed.size = 0;
         // A name the analysis made up gives way to the one the image or the map has now.
         if (s.source == SymbolSource::analysis && fresh.symbols().at(s.va)) seed.name.clear();
         fresh.symbols().add(std::move(seed));

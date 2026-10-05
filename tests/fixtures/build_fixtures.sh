@@ -47,6 +47,22 @@ build_rtti() {
     rm -f "$arch/rtti.obj" "$arch/rtti.lib"
 }
 
+# A static library (src/minilib) and a program linked with it (src/libuser.c), with its PDB as the
+# truth for the library-matching tests.
+build_minilib() {
+    local arch=$1 target=$2
+    local objs=()
+    for src in src/minilib/*.c; do
+        local obj="$arch/minilib_$(basename "$src" .c).obj"
+        "$CLANG_CL" --target="$target" "${CFLAGS[@]}" -c "$src" "/Fo$obj"
+        objs+=("$obj")
+    done
+    llvm-lib /nologo "/out:$arch/minilib.lib" "${objs[@]}"
+    "$CLANG_CL" --target="$target" "${CFLAGS[@]}" -c src/libuser.c "/Fo$arch/libuser.obj"
+    lld-link "${LDFLAGS[@]}" "/out:$arch/libuser.exe" "/pdb:$arch/libuser.pdb" "$arch/libuser.obj" "$arch/minilib.lib"
+    rm -f "${objs[@]}" "$arch/libuser.obj" "$arch/libuser.lib"
+}
+
 build_arch x86 i686-pc-windows-msvc
 build_arch x64 x86_64-pc-windows-msvc
 CLANG=${CLANG:-$(command -v clang || echo /usr/lib/llvm-18/bin/clang)}
@@ -54,4 +70,6 @@ build_idioms x86 i686-pc-windows-msvc /fixed /safeseh:no   # no relocations, as 
 build_idioms x64 x86_64-pc-windows-msvc
 build_rtti x86 i686-pc-windows-msvc _rtti_type_info_vftable
 build_rtti x64 x86_64-pc-windows-msvc rtti_type_info_vftable
+build_minilib x86 i686-pc-windows-msvc
+build_minilib x64 x86_64-pc-windows-msvc
 echo "fixtures rebuilt"

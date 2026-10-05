@@ -165,8 +165,8 @@ Addresses have at least eight hex digits, so x64 addresses are longer:
 | `size=` | Size in bytes, in hex; omitted when unknown |
 | `pdb=` | The undecorated name from the PDB's procedure or data record, when it differs from the name |
 | `static` | Internal linkage (`S_LPROC32` procedures and module-local data) |
-| `source=` | Where the name came from, in increasing order of trust: `analysis`, `import`, `export`, `map`, `pdb_public`, `pdb`, `agent`, `user`. A line without `source=` is read as `user`. |
-| `obj=` | The object file the symbol was linked from, as the link map names it (`main.obj`, `LIBC:printf.obj` for a library member) |
+| `source=` | Where the name came from, in increasing order of trust: `analysis`, `library` (a static library's function the code matches, see `decomp lib match`), `import`, `export`, `map`, `pdb_public`, `pdb`, `agent`, `user`. A line without `source=` is read as `user`. |
+| `obj=` | The object file the symbol was linked from, as the link map names it (`main.obj`, `LIBC:printf.obj` for a library member), or the library and member a library match found (`LIBC.LIB:printf.obj`) |
 | `status=` | For functions: a [function status](#function-status); omitted for `unstarted` |
 | `best=` | For functions: the best match percentage reached by agent sessions, one decimal |
 | `attempts=` | For functions: the number of compile attempts made by agent sessions |
@@ -421,7 +421,7 @@ when a process dies, so a crash never leaves a project locked. The lock files th
 | `refused` | The model declined the request, including after fallbacks when they are enabled | The runner |
 | `gave_up` | The agent called `submit_result` with `give_up` | The agent |
 | `skipped` | Excluded from work | Editing `symbols.txt`. The default batch selection leaves it out. |
-| `library` | Library or runtime code that is not meant to be decompiled | Editing `symbols.txt`; library signature matching from Phase 2 |
+| `library` | Library or runtime code that is not meant to be decompiled | Editing `symbols.txt`; `decomp lib match` (library signature matching) |
 
 ```
 unstarted --agent--> in_progress --+--> matched

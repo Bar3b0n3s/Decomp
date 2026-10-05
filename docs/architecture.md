@@ -158,6 +158,8 @@ Readers for binary formats, all built on `ByteReader` and returning `Result`:
   user symbols and analysis.
 - `map::MapFile`: link maps in the link.exe format (also written by lld-link): sections, public and
   static symbols with their object files and `f` (function) flags, the entry point and the timestamp.
+- `archive::Archive`: COFF archives (.lib): members, long names, the linker's symbol index and the
+  short import objects of import libraries.
 - `BinaryImage`: the interface the rest of the code uses (architecture, image base and size, entry
   point, sections, bytes at a VA, relocation lookup), so that ELF can be added in Phase 7 without
   touching analysis or matching.
@@ -233,6 +235,8 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   qualified forms used for name equivalence.
 - RTTI and vftables (`analysis/rtti.hpp`, see [RTTI and vftables](#rtti-and-vftables)): the classes a
   `/GR` build names, their bases and vftables (`Program::rtti()`, `decomp classes`).
+- Library functions (`analysis/signatures.hpp`, see [Library functions](#library-functions)): the
+  functions of static libraries as masked byte signatures, matched against the target.
 - `Program::function_extent()`: the symbol size when known; otherwise recursive descent from the
   entry, bounded by the section and the next known function, stopping at `ret`, `int3` and jumps that
   leave the function. Indirect jumps through tables (`jmp [r*4+table]` on x86; the clang and MSVC x64
@@ -243,6 +247,26 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   from `esp`/`ebp`/`rsp`/`rbp` offsets), switch tables, loop headers and back edges, tail calls, plus
   callers, callees and data references. The annotated listing is what the agent and the human read;
   there is no decompiler output.
+
+#### Library functions
+
+A target statically links code its developers did not write: the C runtime (VC6's `LIBC.LIB`), SDK
+and engine libraries. `archive::Archive` reads COFF archives (`!<arch>`: the linker's symbol indexes,
+long member names, objects and the short import objects of import libraries). `library_signatures()`
+turns every function of a library's objects into a signature: its bytes up to the next function in
+its section (MSVC's `$LN` labels are not functions), trailing padding trimmed, with the fields its
+relocations fill in masked out and the public symbols they refer to recorded. Functions with fewer
+than 12 compared bytes are left out, since they would fit too much code.
+
+`match_library_functions()` tries each of the target's functions against the signatures (indexed by
+their first four bytes). A candidate must match where its bytes are not masked, must agree with a name
+the image, a map or a PDB already gives the function, and its references must lead where the target's
+names say: a relocated call to `_strlen` has to land on `_strlen` (or on a function this run matched to
+it). Matches settle each other until nothing changes; a name that two target functions both fit (the
+linker copies a library function once) and a function several names fit stay ambiguous.
+`project::match_libraries()` (`decomp lib match`) names the matched functions (source `library`,
+unless a better source named them), gives them the library function's size, drops starts the analysis
+alone had found inside them, and sets their status to `library`, which runs skip.
 
 #### RTTI and vftables
 
