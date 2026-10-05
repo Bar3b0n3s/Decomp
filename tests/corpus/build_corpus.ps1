@@ -46,7 +46,7 @@ if (-not $info.build.checksum_ok) { throw "the corpus's Rich header checksum doe
 
 $failed = $false
 foreach ($truth in "corpus.pdb", "corpus.map") {
-    & $decomp bounds "$out\corpus.exe" --truth "$out\$truth" --errors 60 --min-exact $MinExact
+    & $decomp bounds "$out\corpus.exe" --truth "$out\$truth" --errors 60 --min-exact $MinExact --show-code
     if ($LASTEXITCODE -ne 0) { $failed = $true }
 }
 if ($failed) { throw "MSVC corpus ($Arch): fewer than $MinExact% of function bounds are exact" }

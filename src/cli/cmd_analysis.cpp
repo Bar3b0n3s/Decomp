@@ -1,6 +1,7 @@
 #include "analysis/annotate.hpp"
 #include "analysis/bounds.hpp"
 #include "analysis/demangle.hpp"
+#include "analysis/discovery.hpp"
 #include "cli/common.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
@@ -135,11 +136,13 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
         auto truth = std::make_shared<std::string>();
         auto errors = std::make_shared<usize>(20);
         auto min_exact = std::make_shared<double>(0.0);
+        auto show_code = std::make_shared<bool>(false);
         cmd->add_option("binary", *binary, "PE image, analyzed as if it had no PDB (default: the project's functions)");
         cmd->add_option("--truth", *truth, "The build's PDB (procedures with sizes) or link map (starts)")->required();
         cmd->add_option("--errors", *errors, "Mismatches to list (default 20)");
         cmd->add_option("--min-exact", *min_exact, "Exit with code 2 when fewer than this percentage of bounds are exact");
-        cmd->callback([&g, binary, truth, errors, min_exact] {
+        cmd->add_flag("--show-code", *show_code, "With each listed mismatch, the code where the bounds differ and how a start was found");
+        cmd->callback([&g, binary, truth, errors, min_exact, show_code] {
             throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
                 std::optional<Program> program;
                 if (!binary->empty()) {
@@ -168,6 +171,26 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
                     std::println("  start only {:6}", c.start_only);
                     std::println("  missed     {:6}", c.missed);
                     std::println("  extra      {:6}", c.extra);
+                    // How each function's start was found, for --show-code.
+                    std::map<u64, FunctionEvidence> evidence;
+                    if (*show_code && !binary->empty())
+                        for (const auto& f : discover_functions(program->image(), program->decoder(), SymbolDb::from_pe(program->image())).functions)
+                            evidence.emplace(f.start, f.evidence);
+                    auto show = [&](u64 from, u64 to) {
+                        if (from >= to) return;
+                        if (auto before = program->image().view(from - std::min<u64>(from, 16), static_cast<usize>(std::min<u64>(from, 16))))
+                            std::println("              before {:#x}: {}", from, hex_bytes(reinterpret_cast<const u8*>(before->data()), before->size()));
+                        for (u64 at = from; at < to && at < from + 96;) {
+                            auto bytes = program->image().view(at, static_cast<usize>(std::min<u64>(15, to - at)));
+                            auto ins = bytes ? program->decoder().decode(*bytes, at) : std::nullopt;
+                            if (!ins) {
+                                std::println("              {:#x}  (not an instruction)", at);
+                                break;
+                            }
+                            std::println("              {:#x}  {:<24} {}", at, hex_bytes(ins->bytes.data(), ins->length), x86::render(*ins));
+                            at += ins->length;
+                        }
+                    };
                     usize shown = 0;
                     for (const auto& m : c.mismatches) {
                         if (shown++ >= *errors) {
@@ -182,6 +205,13 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
                         else if (m.kind == BoundsMismatch::Kind::extra)
                             ends = std::format(" to {:#x}", m.found_end);
                         std::println("  {:<9} {:#010x}{} {}", to_string(m.kind), m.start, ends, m.name);
+                        if (!*show_code) continue;
+                        if (auto e = evidence.find(m.start); e != evidence.end()) std::println("              found as: {}", to_string(e->second));
+                        if (m.kind == BoundsMismatch::Kind::wrong_end) {
+                            if (m.truth_end > m.found_end) show(m.found_end, m.truth_end);  // the part not found
+                            else if (m.truth_end) show(m.truth_end, m.found_end);         // the part taken beyond the end
+                            else show(m.found_end, m.found_end + 32);
+                        }
                     }
                 }
                 return c.exact_rate() * 100.0 + 1e-9 < *min_exact ? 2 : 0;

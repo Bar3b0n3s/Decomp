@@ -76,6 +76,7 @@ struct Body {
     std::vector<u64> calls;         // direct call targets
     std::vector<u64> tail_targets;  // direct jumps out of the window
     std::vector<u64> jump_targets;  // direct jumps within the window
+    std::vector<u64> cond_targets;  // the conditional ones among them
     std::vector<u64> code_refs;     // code addresses held in operands
     std::vector<u64> instructions;  // starts
     std::vector<std::pair<u64, u64>> data;  // switch tables in the window
@@ -360,6 +361,7 @@ private:
                         if (in_window(i->target)) {
                             work.push_back(i->target);
                             body.jump_targets.push_back(i->target);
+                            body.cond_targets.push_back(i->target);
                         } else {
                             body.tail_targets.push_back(i->target);
                         }
@@ -573,11 +575,22 @@ private:
                 for (u64 b = prev + p->length; b < t && int3_only; ++b) int3_only = image_.read<u8>(b).value_or(0) == 0xCC;
                 if (!int3_only) continue;
                 if (!x86::ends_block(p->flow) && !(p->flow == x86::Flow::call && p->has_branch && noreturn_.contains(p->target))) continue;
+                // MSVC also puts int3 inside functions. Compilers do not branch conditionally to another
+                // function, and another function does not jump back into this one.
+                if (std::ranges::contains(fn.body.cond_targets, t)) continue;
+                if (jumps_back(t, start)) continue;
                 found.emplace_back(t, start);
             }
         }
         for (auto [t, from] : found) add(t, FunctionEvidence::tail_jump, 0, std::format("past padding in {:#x}", from));
         return !found.empty();
+    }
+
+    // The code at `t`, traced as a function of its own, jumps into the function at `start` before it.
+    bool jumps_back(u64 t, u64 start) {
+        const u64 limit = window_end(t);
+        const Body b = trace(t, std::max(limit, t + 1));
+        return std::ranges::any_of(b.tail_targets, [&](u64 target) { return target >= start && target < t && !is_start(target); });
     }
 
     // Traces a weakly evidenced start; nothing when its code does not look like a function.
