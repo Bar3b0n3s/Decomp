@@ -63,6 +63,22 @@ build_minilib() {
     rm -f "${objs[@]}" "$arch/libuser.obj" "$arch/libuser.lib"
 }
 
+# C++ exception handling and structured exception handling (the corpus's eh.cpp, seh.c and eh_rt.c):
+# the image and its PDB, the truth for the bounds of functions with code only exceptions reach.
+build_eh() {
+    local arch=$1 target=$2 prefix=$3
+    local objs=()
+    for src in ../corpus/eh.cpp ../corpus/seh.c ../corpus/eh_rt.c src/eh_main.c; do
+        local eh=/EHs-c-
+        [[ $src == *.cpp ]] && eh=/EHsc
+        local obj="$arch/eh_$(basename "${src%.*}").obj"
+        "$CLANG_CL" --target="$target" /nologo /O2 /Gy /GS- /GR- "$eh" /Zl /Z7 /Brepro -c "$src" "/Fo$obj"
+        objs+=("$obj")
+    done
+    lld-link "${LDFLAGS[@]}" "/alternatename:??_7type_info@@6B@=${prefix}corpus_type_info_vftable" "/out:$arch/eh.exe" "/pdb:$arch/eh.pdb" "${objs[@]}"
+    rm -f "${objs[@]}" "$arch/eh.lib"
+}
+
 build_arch x86 i686-pc-windows-msvc
 build_arch x64 x86_64-pc-windows-msvc
 CLANG=${CLANG:-$(command -v clang || echo /usr/lib/llvm-18/bin/clang)}
@@ -72,4 +88,6 @@ build_rtti x86 i686-pc-windows-msvc _rtti_type_info_vftable
 build_rtti x64 x86_64-pc-windows-msvc rtti_type_info_vftable
 build_minilib x86 i686-pc-windows-msvc
 build_minilib x64 x86_64-pc-windows-msvc
+build_eh x86 i686-pc-windows-msvc _
+build_eh x64 x86_64-pc-windows-msvc ""
 echo "fixtures rebuilt"

@@ -1,5 +1,6 @@
 #include "analysis/discovery.hpp"
 
+#include "analysis/eh.hpp"
 #include "analysis/jump_tables.hpp"
 #include "core/log.hpp"
 
@@ -7,6 +8,7 @@
 #include <format>
 #include <map>
 #include <set>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -58,6 +60,7 @@ bool suspicious(const x86::Instruction& ins) {
 struct Insn {
     u64 target = 0;    // branch target, or the memory operand's absolute address
     u64 code_ref = 0;  // a code address held in an operand (`push offset f`, `lea rcx, [rip+f]`)
+    u64 data_ref = 0;  // x86: a data address held in an immediate (`push offset table`)
     u8 length = 0;
     x86::Flow flow = x86::Flow::none;
     bool has_branch = false;
@@ -78,6 +81,7 @@ struct Body {
     std::vector<u64> jump_targets;  // direct jumps within the window
     std::vector<u64> cond_targets;  // the conditional ones among them
     std::vector<u64> code_refs;     // code addresses held in operands
+    std::vector<u64> data_refs;     // data addresses held in immediates (x86)
     std::vector<u64> instructions;  // starts
     std::vector<std::pair<u64, u64>> data;  // switch tables in the window
     bool unbounded_table = false;           // a table read without a bound (may shrink as more tables are known)
@@ -88,6 +92,7 @@ struct Fn {
     FunctionEvidence evidence = FunctionEvidence::call;
     u64 fixed_end = 0;  // a known size: the end does not come from tracing
     Body body;
+    std::vector<u64> eh_roots;  // code its exception-handling tables list, traced with it
     bool traced = false;
     bool noreturn = false;
 };
@@ -207,6 +212,7 @@ private:
                         out.target = *ins->memory_target;
                     }
                     if (const u64 ref = code_reference(*ins)) out.code_ref = through_ilt(ref);
+                    if (image_.arch() == Arch::x86) out.data_ref = data_reference(*ins);
                 }
         }
         auto [it, inserted] = cache_.emplace(va, out);
@@ -228,6 +234,17 @@ private:
                 continue;
             }
             if (range_of(value) && value != ins.address) return value;
+        }
+        return 0;
+    }
+
+    // A data address an x86 instruction holds in an immediate: `push offset table`, `mov [x], offset table`.
+    u64 data_reference(const x86::Instruction& ins) const {
+        for (const auto& f : ins.fields) {
+            if (f.kind != x86::FieldKind::imm || f.size < 4) continue;
+            if (image_.has_relocations() && !image_.is_relocated(ins.address + f.offset)) continue;
+            const u64 value = static_cast<u32>(f.raw);
+            if (const ImageSection* s = image_.section_at(value); s && !s->executable) return value;
         }
         return 0;
     }
@@ -257,6 +274,7 @@ private:
             fixed_end = 0;
         }
         if (!range_of(va)) return;
+        if (internal_.contains(va) && evidence > FunctionEvidence::unwind) return;
         auto [it, inserted] = fns_.try_emplace(va);
         if (inserted || evidence < it->second.evidence) it->second.evidence = evidence;
         if (fixed_end) it->second.fixed_end = fixed_end;
@@ -313,10 +331,14 @@ private:
         return decoder_.decode(*bytes, va);
     }
 
-    Body trace(u64 start, u64 limit) {
+    // The function at `start`, traced up to `limit`; `roots` are more places its code starts (the code
+    // its exception-handling tables list).
+    Body trace(u64 start, u64 limit, std::span<const u64> roots = {}) {
         Body body;
         body.end = start;
         std::vector<u64> work{start};
+        for (u64 r : roots)
+            if (r > start && r < limit) work.push_back(r);
         std::unordered_set<u64> seen;
         std::unordered_map<u64, u64> prev;  // instruction -> the one that fell through into it
         auto in_window = [&](u64 va) { return va >= start && va < limit; };
@@ -343,8 +365,16 @@ private:
                 seen.insert(a);
                 if (from) prev[a] = from;
                 if (i->suspicious) body.invalid = true;
-                body.end = std::max(body.end, a + i->length);
+                // An int3 that straight-line code other than a call runs into is the padding after the
+                // function (after a call that cannot return, the compiler's own trap is the function's).
+                const bool padding = i->flow == x86::Flow::trap && from && image_.read<u8>(a).value_or(0) == 0xCC &&
+                                     [&] {
+                                         const Insn* f = insn(from);
+                                         return f && f->flow != x86::Flow::call && f->flow != x86::Flow::indirect_call;
+                                     }();
+                if (!padding) body.end = std::max(body.end, a + i->length);
                 if (i->code_ref) body.code_refs.push_back(i->code_ref);
+                if (i->data_ref) body.data_refs.push_back(i->data_ref);
                 bool stop = false;
                 switch (i->flow) {
                 case x86::Flow::call:
@@ -449,9 +479,94 @@ private:
             if (it == fns_.end()) continue;
             Fn& fn = it->second;
             const u64 limit = fn.fixed_end ? std::min(fn.fixed_end, window_end(start)) : window_end(start);
-            fn.body = trace(start, std::max(limit, start + 1));
+            fn.body = trace(start, std::max(limit, start + 1), fn.eh_roots);
             fn.traced = true;
+            if (image_.arch() == Arch::x86 && !fn.fixed_end) attach_eh(start, fn);
         }
+    }
+
+    // x86 exception handling: the code a function's tables list is the function's, though its flow does
+    // not reach it. Catch blocks, unwind code and __except blocks are taken anywhere in the function's
+    // window (clang puts them after its code and padding); filters and __finally blocks only inside the
+    // function's code or right after it (clang makes functions of those), and so are the addresses
+    // the function holds of its own code (where a catch block resumes).
+    void attach_eh(u64 start, Fn& fn) {
+        std::set<u64> loose, tight;
+        for (u64 ref : fn.body.code_refs)
+            if (const CxxFuncInfo* info = funcinfo_of_stub(ref)) {
+                loose.insert(info->catch_blocks.begin(), info->catch_blocks.end());
+                loose.insert(info->unwind_actions.begin(), info->unwind_actions.end());
+            }
+        for (u64 ref : fn.body.data_refs)
+            if (const ScopeTable* table = scope_table_at(ref))
+                for (const auto& e : table->entries) {
+                    if (e.filter) {
+                        loose.insert(e.handler);
+                        tight.insert(e.filter);
+                    } else if (std::ranges::contains(fn.body.calls, e.handler)) {
+                        tight.insert(e.handler);  // a __finally block, which the function calls on its way out
+                    }
+                }
+        if (loose.empty() && tight.empty()) {
+            if (!fn.eh_roots.empty()) {
+                fn.eh_roots.clear();
+                dirty_.insert(start);
+            }
+            return;
+        }
+        // The window: up to the next start that is not one of these (nor a function the tables cannot move).
+        const CodeRange* r = range_of(start);
+        u64 limit = r ? r->end : start + 1;
+        for (auto it = fns_.upper_bound(start); it != fns_.end() && it->first < limit; ++it) {
+            const bool listed = loose.contains(it->first) || tight.contains(it->first) || internal_.contains(it->first);
+            if (!listed || it->second.evidence <= FunctionEvidence::unwind) {
+                limit = it->first;
+                break;
+            }
+        }
+        std::vector<u64> roots;
+        for (u64 e : loose)
+            if (e > start && e < limit) roots.push_back(e);
+        Body body = trace(start, limit, roots);
+        for (int round = 0; round < 8; ++round) {
+            bool more = false;
+            auto take = [&](u64 e) {
+                if (e > start && e <= body.end && e < limit && !std::ranges::contains(roots, e)) {
+                    roots.push_back(e);
+                    more = true;
+                }
+            };
+            for (u64 e : tight) take(e);
+            for (u64 ref : body.code_refs)
+                if (ref < body.end) take(ref);
+            if (!more) break;
+            body = trace(start, limit, roots);
+        }
+        if (roots.empty()) return;
+        std::ranges::sort(roots);
+        for (u64 e : roots) {
+            internal_.insert(e);
+            if (is_start(e)) remove(e, std::format("exception-handling code of {:#x}", start));
+        }
+        fn.eh_roots = std::move(roots);
+        fn.body = std::move(body);
+        dirty_.erase(start);  // removing the starts marked it; it is traced with them already
+    }
+
+    const CxxFuncInfo* funcinfo_of_stub(u64 stub) {
+        auto it = funcinfo_cache_.find(stub);
+        if (it == funcinfo_cache_.end()) {
+            std::optional<CxxFuncInfo> info;
+            if (const auto va = cxx_stub_funcinfo(image_, decoder_, stub)) info = read_cxx_funcinfo(image_, *va);
+            it = funcinfo_cache_.emplace(stub, std::move(info)).first;
+        }
+        return it->second ? &*it->second : nullptr;
+    }
+
+    const ScopeTable* scope_table_at(u64 va) {
+        auto it = scope_cache_.find(va);
+        if (it == scope_cache_.end()) it = scope_cache_.emplace(va, read_scope_table(image_, va)).first;
+        return it->second ? &*it->second : nullptr;
     }
 
     // Direct call targets are functions.
@@ -459,7 +574,7 @@ private:
         std::vector<std::pair<u64, u64>> found;
         for (const auto& [start, fn] : fns_)
             for (u64 t : fn.body.calls)
-                if (!is_start(t) && range_of(t) && !rejected_.contains(t)) found.emplace_back(t, start);
+                if (!is_start(t) && range_of(t) && !rejected_.contains(t) && !internal_.contains(t)) found.emplace_back(t, start);
         for (auto [t, from] : found) add(t, FunctionEvidence::call, 0, std::format("called from {:#x}", from));
         return !found.empty();
     }
@@ -469,7 +584,7 @@ private:
         std::vector<std::pair<u64, u64>> found;
         for (const auto& [start, fn] : fns_)
             for (u64 t : fn.body.tail_targets)
-                if (!is_start(t) && range_of(t) && !covered(t) && !rejected_.contains(t)) found.emplace_back(t, start);
+                if (!is_start(t) && range_of(t) && !covered(t) && !rejected_.contains(t) && !internal_.contains(t)) found.emplace_back(t, start);
         for (auto [t, from] : found) add(t, FunctionEvidence::tail_jump, 0, std::format("jumped to from {:#x}", from));
         return !found.empty();
     }
@@ -563,7 +678,7 @@ private:
             if (fn.fixed_end) continue;
             const auto& ins = fn.body.instructions;
             for (u64 t : fn.body.jump_targets) {
-                if (t <= start || is_start(t) || rejected_.contains(t)) continue;
+                if (t <= start || is_start(t) || rejected_.contains(t) || internal_.contains(t)) continue;
                 // The bytes before t are not instructions of the function: only padding reaches up to it.
                 auto it = std::ranges::lower_bound(ins, t);
                 if (it == ins.begin()) continue;
@@ -595,11 +710,13 @@ private:
 
     // Traces a weakly evidenced start; nothing when its code does not look like a function.
     std::optional<Body> plausible(u64 va) {
-        if (rejected_.contains(va) || is_start(va) || covered(va) || !range_of(va)) return std::nullopt;
+        if (rejected_.contains(va) || internal_.contains(va) || is_start(va) || covered(va) || !range_of(va)) return std::nullopt;
         Body b = trace(va, window_end(va));
+        const Insn* first = insn(va);
+        const bool endless = first && first->flow == x86::Flow::jump && first->has_branch && first->target == va;  // `jmp $`
         const bool ok = !b.invalid && !(b.falls_off && !b.last_is_call) && !b.instructions.empty() &&
                         (b.returns || !b.tail_targets.empty() || b.unknown_exit || !b.calls.empty() || b.instructions.size() >= 2 ||
-                         b.import_slot);
+                         b.import_slot || endless);
         if (!ok) {
             rejected_.insert(va);
             return std::nullopt;
@@ -725,6 +842,9 @@ private:
     bool candidates_built_ = false;
     std::set<u64> table_starts_;  // every switch table (and byte table) found so far
     bool new_table_starts_ = false;
+    std::set<u64> internal_;  // code a function's exception-handling tables list: never a function start
+    std::unordered_map<u64, std::optional<CxxFuncInfo>> funcinfo_cache_;  // by handler stub
+    std::unordered_map<u64, std::optional<ScopeTable>> scope_cache_;
     std::unordered_map<u64, u64> ilt_;              // incremental-linking thunk -> the function it jumps to
     std::vector<std::pair<u64, u64>> ilt_runs_;     // the tables of such thunks
 };
