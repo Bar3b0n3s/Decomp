@@ -125,8 +125,7 @@ public:
     std::string text() const override { return editor_.GetText(); }
     bool stale() const override { return editing_ && schedule_.stale(); }
     bool busy() const override {
-        return edit_compile_.busy() || attempt_compile_.busy() || (verify_.valid() && !verify_.finished()) ||
-               (attempts_job_.valid() && !attempts_job_.finished());
+        return edit_compile_.busy() || attempt_compile_.busy() || verify_.pending() || attempts_job_.pending();
     }
     void verify_and_save(ViewContext& ctx) override {
         Workspace* ws = ctx.services.workspace;

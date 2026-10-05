@@ -131,6 +131,31 @@ TEST_CASE("latest wins: only the newest request's result is delivered") {
     CHECK_FALSE(latest.busy());
 }
 
+TEST_CASE("a finished job stays pending until its result is taken") {
+    JobQueue jobs(1);
+    auto handle = jobs.submit([] { return 7; });
+    REQUIRE(eventually([&] { return handle.finished(); }));
+    CHECK(handle.pending());  // done, but the caller has not seen the result yet
+    CHECK(handle.take() == 7);
+    CHECK_FALSE(handle.pending());
+    // An exception is the result too: pending until it is rethrown.
+    auto failing = jobs.submit([]() -> int { throw std::runtime_error("no"); });
+    REQUIRE(eventually([&] { return failing.finished(); }));
+    CHECK(failing.pending());
+    CHECK_THROWS(failing.take());
+    CHECK_FALSE(failing.pending());
+    // LatestWins is busy until poll() has delivered the newest result.
+    LatestWins<int> latest;
+    latest.submit(jobs, [] { return 1; });
+    std::optional<int> got;
+    REQUIRE(eventually([&] {
+        if (!latest.busy()) return false;  // never idle before its result is polled
+        got = latest.poll();
+        return got.has_value();
+    }));
+    CHECK_FALSE(latest.busy());
+}
+
 TEST_CASE("latest wins with a delay debounces bursts") {
     JobQueue jobs(2);
     LatestWins<std::string> latest;

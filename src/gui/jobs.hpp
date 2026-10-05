@@ -105,6 +105,8 @@ public:
         if (state_) state_->token.cancel();
     }
     bool cancelled() const { return state_ && state_->token.cancelled(); }
+    // The job runs, or its result (or exception) waits to be taken: its effect is still to come.
+    bool pending() const { return valid() && !cancelled() && (!finished() || ready()); }
     const CancelToken* token() const { return state_ ? &state_->token : nullptr; }
     void reset() { state_.reset(); }
 
@@ -212,7 +214,9 @@ public:
         return value;
     }
 
-    bool busy() const { return current_.valid() && !current_.finished(); }
+    // A job runs or its result waits for poll() (so a caller that polls once per frame never sees a
+    // finished job as idle before its result has been applied).
+    bool busy() const { return current_.pending(); }
     void cancel() {
         current_.cancel();
         current_.reset();
