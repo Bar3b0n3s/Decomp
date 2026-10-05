@@ -138,7 +138,11 @@ TEST_CASE("matched functions move into their units' sources and verify byte-exac
         CAPTURE(arch);
         const std::string a(arch);
         auto dir = fs::TempDir::create("decomp-emit").value();
-        auto p = project::Project::init(dir.path() / "p", test::fixture(a + "/basic.exe"), std::nullopt, "clang-cl-" + a).value();
+        // Built with the installed clang-cl, which the sources are compiled with too: another version than
+        // the committed fixture's can compile a function differently.
+        const auto exe = test::build_fixture_program(a == "x86" ? Arch::x86 : Arch::x64, *tools, dir.path() / "target");
+        REQUIRE(exe);
+        auto p = project::Project::init(dir.path() / "p", *exe, std::nullopt, "clang-cl-" + a).value();
         p.config().flags = test::fixture_flags();
         REQUIRE(p.save_config());
         const Program program = p.open_program().value();
