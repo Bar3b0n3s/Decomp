@@ -1,5 +1,6 @@
 #pragma once
 
+#include "analysis/jump_tables.hpp"
 #include "analysis/symbols.hpp"
 #include "arch/x86/decoder.hpp"
 #include "core/result.hpp"
@@ -16,22 +17,6 @@
 #include <vector>
 
 namespace decomp {
-
-enum class TableEncoding : u8 {
-    absolute,  // entries are absolute addresses (x86: jmp [reg*4+table])
-    relative,  // entries are int32 offsets from the table start (clang x64)
-    rva,       // entries are 32-bit RVAs from the image base (MSVC x64)
-};
-
-struct JumpTable {
-    u64 jump_va = 0;   // the indirect jump instruction
-    u64 table_va = 0;  // first entry
-    unsigned entry_size = 4;
-    TableEncoding encoding = TableEncoding::absolute;
-    u64 load_va = 0;   // x64: the instruction that loads the entry (its displacement is the table RVA for MSVC)
-    std::vector<u64> targets;  // one per entry
-    bool inside_code = false;  // table sits within the function's byte range (MSVC x86)
-};
 
 struct FunctionExtent {
     u64 start = 0;
@@ -73,13 +58,24 @@ enum class PdbStatus : u8 {
 };
 std::string_view to_string(PdbStatus status);
 
+struct OpenOptions {
+    std::optional<std::filesystem::path> pdb;  // this PDB instead of the one found next to the image
+    bool use_pdb = true;  // false: open as if the image had no PDB (to measure the analysis against it)
+    // Find the functions by analysis (discover_functions) when no usable PDB describes them. A project
+    // opens without it: its symbols.txt lists the functions found when it was created.
+    bool discover = true;
+};
+
 // A loaded target binary: image, symbols and lazily computed analysis results. Copies made with
 // with_symbols() share the image and decoder, so a new symbol generation is cheap.
 class Program {
 public:
-    // Loads a PE image. The PDB is taken from `pdb_path`, or found next to the image via its CodeView
+    // Loads a PE image. The PDB is taken from `options.pdb`, or found next to the image via its CodeView
     // record or "<stem>.pdb"; a PDB whose GUID/age does not match is ignored with a warning.
-    static Result<Program> open(const std::filesystem::path& binary, const std::optional<std::filesystem::path>& pdb_path = {});
+    static Result<Program> open(const std::filesystem::path& binary, const OpenOptions& options);
+    static Result<Program> open(const std::filesystem::path& binary, const std::optional<std::filesystem::path>& pdb_path = {}) {
+        return open(binary, OpenOptions{.pdb = pdb_path});
+    }
 
     const pe::Image& image() const { return *image_; }
     const x86::Decoder& decoder() const { return *decoder_; }
@@ -124,13 +120,12 @@ public:
 
 private:
     void fold_linker_thunks();
+    // Functions found by discover_functions() become symbols (named sub_<va> unless already named).
+    void add_discovered_functions();
     std::optional<x86::Instruction> decode_at(u64 va) const;
     void build_xrefs() const;
-    std::optional<JumpTable> read_jump_table(const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const;
-    // x64 tables are reached through registers; `before` holds the instructions preceding the jump.
-    std::optional<JumpTable> read_x64_jump_table(std::span<const x86::Instruction> before, const x86::Instruction& jmp,
-                                                 u64 fn_start, u64 fn_limit) const;
-    std::vector<u64> read_table_entries(const JumpTable& table, u64 fn_start, u64 fn_limit) const;
+    // A switch table dispatched by `jmp`; `before` holds the instructions that run before it, in order.
+    std::optional<JumpTable> jump_table(std::span<const x86::Instruction> before, const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const;
 
     std::filesystem::path path_;
     std::optional<std::filesystem::path> pdb_path_;

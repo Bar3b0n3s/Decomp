@@ -1,7 +1,10 @@
 #include "analysis/annotate.hpp"
+#include "analysis/bounds.hpp"
 #include "analysis/demangle.hpp"
 #include "cli/common.hpp"
+#include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "project/project.hpp"
 
 #include <format>
 #include <print>
@@ -78,7 +81,7 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
         });
     }
     {
-        auto* cmd = app.add_subcommand("funcs", "List functions known from symbols, exports and unwind data");
+        auto* cmd = app.add_subcommand("funcs", "List the functions: from the PDB, or found by analysis without one");
         auto binary = std::make_shared<std::string>();
         auto filter = std::make_shared<std::string>();
         cmd->add_option("binary", *binary, "PE image (default: the project's target)");
@@ -106,6 +109,65 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
                 }
                 if (g.json) print_json(arr);
                 return 0;
+            }));
+        });
+    }
+    {
+        auto* cmd = app.add_subcommand("bounds", "Measure function bounds against the build's PDB or map file");
+        auto binary = std::make_shared<std::string>();
+        auto truth = std::make_shared<std::string>();
+        auto errors = std::make_shared<usize>(20);
+        auto min_exact = std::make_shared<double>(0.0);
+        cmd->add_option("binary", *binary, "PE image, analyzed as if it had no PDB (default: the project's functions)");
+        cmd->add_option("--truth", *truth, "The build's PDB (procedures with sizes) or link map (starts)")->required();
+        cmd->add_option("--errors", *errors, "Mismatches to list (default 20)");
+        cmd->add_option("--min-exact", *min_exact, "Exit with code 2 when fewer than this percentage of bounds are exact");
+        cmd->callback([&g, binary, truth, errors, min_exact] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                std::optional<Program> program;
+                if (!binary->empty()) {
+                    OpenOptions options;
+                    options.use_pdb = false;
+                    TRY_ASSIGN(auto p, Program::open(fs::from_utf8(*binary), options));
+                    program = std::move(p);
+                } else {
+                    TRY_ASSIGN(auto project, project::Project::find(g.project));
+                    TRY_ASSIGN(auto p, project.open_program());
+                    program = std::move(p);
+                }
+                const auto truth_path = fs::from_utf8(*truth);
+                std::string ext = to_lower(fs::to_utf8(truth_path.extension()));
+                Result<std::vector<FunctionBounds>> expected = make_error(ErrorCode::invalid_argument, "--truth must be a .pdb or a .map file");
+                if (ext == ".pdb") expected = pdb_function_bounds(truth_path, program->image().image_base(), program->image());
+                else if (ext == ".map") expected = map_function_bounds(truth_path, program->image());
+                if (!expected) return std::unexpected(expected.error());
+                const auto found = function_bounds(program->symbols(), program->image());
+                const auto c = compare_bounds(*expected, found, program->image(), program->decoder());
+                if (g.json) {
+                    print_json(to_json(c, *errors));
+                } else {
+                    std::println("{} functions in the truth ({}), {} found", c.truth, c.truth_has_ends ? "starts and ends" : "starts only", c.found);
+                    std::println("  exact      {:6} ({:.1f}%)", c.exact, c.exact_rate() * 100.0);
+                    std::println("  start only {:6}", c.start_only);
+                    std::println("  missed     {:6}", c.missed);
+                    std::println("  extra      {:6}", c.extra);
+                    usize shown = 0;
+                    for (const auto& m : c.mismatches) {
+                        if (shown++ >= *errors) {
+                            std::println("  ... {} more", c.mismatches.size() - *errors);
+                            break;
+                        }
+                        std::string ends;
+                        if (m.kind == BoundsMismatch::Kind::wrong_end)
+                            ends = m.truth_end ? std::format(" ends {:#x}, found {:#x}", m.truth_end, m.found_end) : std::format(" found end {:#x}", m.found_end);
+                        else if (m.kind == BoundsMismatch::Kind::missed && m.truth_end)
+                            ends = std::format(" ends {:#x}", m.truth_end);
+                        else if (m.kind == BoundsMismatch::Kind::extra)
+                            ends = std::format(" to {:#x}", m.found_end);
+                        std::println("  {:<9} {:#010x}{} {}", to_string(m.kind), m.start, ends, m.name);
+                    }
+                }
+                return c.exact_rate() * 100.0 + 1e-9 < *min_exact ? 2 : 0;
             }));
         });
     }

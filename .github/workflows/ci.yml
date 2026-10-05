@@ -100,6 +100,15 @@ jobs:
           python3 tests/integration/check_run_summary.py shown.json "$p/.decomp/runs/$run_id/summary.json" 8
           test "$(ls "$p"/src/functions/*.cpp | wc -l)" -eq 8
 
+      - name: Function bounds corpus (clang-cl)
+        run: |
+          # Zydis built without a C library; functions found without the PDB against the PDB and the map.
+          tests/corpus/build_corpus.sh build/corpus
+          for arch in x86 x64; do
+            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.pdb --min-exact 95
+            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.map --min-exact 95
+          done
+
   windows:
     name: Windows (MSVC)
     runs-on: windows-latest
@@ -156,6 +165,9 @@ jobs:
           arch: x86
       - shell: pwsh
         run: tests\integration\msvc_roundtrip.ps1 -Arch x86
+      - name: Function bounds corpus (MSVC x86)
+        shell: pwsh
+        run: tests\corpus\build_corpus.ps1 -Arch x86
 
       - name: MSVC round trip (x64)
         uses: ilammy/msvc-dev-cmd@v1
@@ -163,3 +175,6 @@ jobs:
           arch: x64
       - shell: pwsh
         run: tests\integration\msvc_roundtrip.ps1 -Arch x64
+      - name: Function bounds corpus (MSVC x64)
+        shell: pwsh
+        run: tests\corpus\build_corpus.ps1 -Arch x64

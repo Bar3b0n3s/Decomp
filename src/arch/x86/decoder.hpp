@@ -104,4 +104,8 @@ std::vector<std::string> render_operands(const Instruction& ins, const FieldRend
 
 std::string format_hex_signed(i64 value);
 
+// The 64-bit register a general-purpose register belongs to ("r8d" -> "r8", "al" -> "rax", "esp" -> "rsp");
+// other registers unchanged. Names registers by what they hold on both architectures.
+std::string gpr_family(std::string_view reg);
+
 } // namespace decomp::x86

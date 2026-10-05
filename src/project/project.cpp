@@ -335,7 +335,7 @@ std::vector<std::filesystem::path> Project::include_paths() const {
 Result<Program> Project::open_program(bool verify_target) const {
     std::optional<std::filesystem::path> pdb;
     if (!config_.pdb.empty()) pdb = root_ / fs::from_utf8(config_.pdb);
-    TRY_ASSIGN(auto program, Program::open(target_path(), pdb));
+    TRY_ASSIGN(auto program, Program::open(target_path(), OpenOptions{.pdb = pdb, .discover = false}));
     if (verify_target) {
         const TargetStatus status = target_status(program);
         if (!status.sha1_ok)

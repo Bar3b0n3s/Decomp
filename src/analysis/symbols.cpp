@@ -264,13 +264,17 @@ SymbolDb SymbolDb::from_pe(const pe::Image& image, const pdb::Reader* pdb) {
         s.source = SymbolSource::analysis;
         db.add(std::move(s));
     }
-    if (u64 entry = image.entry_point(); entry && !db.at(entry)) {
-        Symbol s;
-        s.va = entry;
-        s.name = "entry";
-        s.kind = SymbolKind::function;
-        s.source = SymbolSource::analysis;
-        db.add(std::move(s));
+    if (u64 entry = image.entry_point(); entry) {
+        if (const Symbol* s = db.at(entry); !s) {
+            Symbol e;
+            e.va = entry;
+            e.name = "entry";
+            e.kind = SymbolKind::function;
+            e.source = SymbolSource::analysis;
+            db.add(std::move(e));
+        } else if (s->source == SymbolSource::analysis && s->name.starts_with("sub_")) {
+            db.rename(entry, "entry", SymbolSource::analysis);  // unwind data named it before the entry point was known
+        }
     }
     return db;
 }

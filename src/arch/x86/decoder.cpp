@@ -5,6 +5,7 @@
 #include <Zydis/Zydis.h>
 
 #include <format>
+#include <map>
 
 namespace decomp::x86 {
 
@@ -196,6 +197,21 @@ std::vector<Instruction> Decoder::decode_all(ByteSpan bytes, u64 address) const 
 std::string format_hex_signed(i64 value) {
     if (value < 0) return std::format("-0x{:x}", static_cast<u64>(-(value + 1)) + 1);
     return std::format("0x{:x}", static_cast<u64>(value));
+}
+
+std::string gpr_family(std::string_view r) {
+    static const std::map<std::string_view, std::string_view> legacy = {
+        {"eax", "rax"}, {"ax", "rax"}, {"al", "rax"}, {"ah", "rax"}, {"ebx", "rbx"}, {"bx", "rbx"}, {"bl", "rbx"},
+        {"bh", "rbx"},  {"ecx", "rcx"}, {"cx", "rcx"}, {"cl", "rcx"}, {"ch", "rcx"}, {"edx", "rdx"}, {"dx", "rdx"},
+        {"dl", "rdx"},  {"dh", "rdx"},  {"esi", "rsi"}, {"si", "rsi"}, {"sil", "rsi"}, {"edi", "rdi"}, {"di", "rdi"},
+        {"dil", "rdi"}, {"ebp", "rbp"}, {"bp", "rbp"}, {"bpl", "rbp"}, {"esp", "rsp"}, {"sp", "rsp"}, {"spl", "rsp"}};
+    if (auto it = legacy.find(r); it != legacy.end()) return std::string(it->second);
+    if (r.size() >= 2 && r[0] == 'r' && r[1] >= '0' && r[1] <= '9') {
+        usize n = 1;
+        while (n < r.size() && r[n] >= '0' && r[n] <= '9') ++n;
+        return std::string(r.substr(0, n));
+    }
+    return std::string(r);
 }
 
 namespace {

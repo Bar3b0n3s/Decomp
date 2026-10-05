@@ -105,7 +105,7 @@ Result<void> Workspace::open_project(const std::filesystem::path& given) {
         // A changed target still opens, for display; runs are refused until it matches again.
         std::optional<std::filesystem::path> pdb;
         if (!project.config().pdb.empty()) pdb = project.root() / fs::from_utf8(project.config().pdb);
-        TRY_ASSIGN(auto base, Program::open(project.target_path(), pdb));
+        TRY_ASSIGN(auto base, Program::open(project.target_path(), OpenOptions{.pdb = pdb, .discover = false}));
         LoadedProject loaded;
         loaded.status = project.target_status(base);
         loaded.derived = base.symbols();

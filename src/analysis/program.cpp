@@ -4,6 +4,7 @@
 #include "core/log.hpp"
 #include "core/strings.hpp"
 #include "analysis/demangle.hpp"
+#include "analysis/discovery.hpp"
 #include "formats/pdb.hpp"
 
 #include <algorithm>
@@ -25,25 +26,6 @@ std::string_view to_string(XrefKind kind) {
     return "?";
 }
 
-namespace {
-
-// The 64-bit register a general-purpose register name belongs to ("r8d" -> "r8", "al" -> "rax").
-std::string gpr64(std::string_view r) {
-    static const std::map<std::string_view, std::string_view> legacy = {
-        {"eax", "rax"}, {"ax", "rax"}, {"al", "rax"}, {"ah", "rax"}, {"ebx", "rbx"}, {"bx", "rbx"}, {"bl", "rbx"},
-        {"bh", "rbx"},  {"ecx", "rcx"}, {"cx", "rcx"}, {"cl", "rcx"}, {"ch", "rcx"}, {"edx", "rdx"}, {"dx", "rdx"},
-        {"dl", "rdx"},  {"dh", "rdx"},  {"esi", "rsi"}, {"si", "rsi"}, {"sil", "rsi"}, {"edi", "rdi"}, {"di", "rdi"},
-        {"dil", "rdi"}, {"ebp", "rbp"}, {"bp", "rbp"}, {"bpl", "rbp"}, {"esp", "rsp"}, {"sp", "rsp"}, {"spl", "rsp"}};
-    if (auto it = legacy.find(r); it != legacy.end()) return std::string(it->second);
-    if (r.size() >= 2 && r[0] == 'r' && std::isdigit(static_cast<unsigned char>(r[1]))) {
-        usize n = 1;
-        while (n < r.size() && std::isdigit(static_cast<unsigned char>(r[n]))) ++n;
-        return std::string(r.substr(0, n));
-    }
-    return std::string(r);
-}
-
-} // namespace
 
 std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, std::span<const x86::Instruction> list) {
     std::set<std::pair<u64, usize>> out;
@@ -55,8 +37,8 @@ std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, 
             if (op.kind != x86::OperandKind::mem || !op.mem.has_disp || op.mem.field < 0) continue;
             const auto& field = ins.fields[static_cast<usize>(op.mem.field)];
             if (field.rip_relative || field.size != 4 || field.raw <= 0) continue;
-            const bool via_base = !op.mem.base.empty() && holders.contains(gpr64(op.mem.base));
-            const bool via_index = !op.mem.index.empty() && op.mem.scale == 1 && holders.contains(gpr64(op.mem.index));
+            const bool via_base = !op.mem.base.empty() && holders.contains(x86::gpr_family(op.mem.base));
+            const bool via_index = !op.mem.index.empty() && op.mem.scale == 1 && holders.contains(x86::gpr_family(op.mem.index));
             if ((via_base || via_index) && image.section_at(base + static_cast<u64>(field.raw)))
                 out.emplace(ins.address, static_cast<usize>(op.mem.field));
         }
@@ -64,7 +46,7 @@ std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, 
         if (ins.mnemonic == "lea" && ins.operands.size() == 2 && ins.operands[0].kind == x86::OperandKind::reg &&
             ins.operands[1].kind == x86::OperandKind::mem && ins.operands[1].mem.field >= 0) {
             const auto& f = ins.fields[static_cast<usize>(ins.operands[1].mem.field)];
-            const std::string reg = gpr64(ins.operands[0].reg);
+            const std::string reg = x86::gpr_family(ins.operands[0].reg);
             if (f.rip_relative && f.absolute == base && ins.operands[1].mem.index.empty()) holders.insert(reg);
             else holders.erase(reg);
             continue;
@@ -75,9 +57,9 @@ std::set<std::pair<u64, usize>> image_relative_fields(const BinaryImage& image, 
         }
         static const std::set<std::string_view> no_write = {"cmp", "test", "bt", "push"};
         if (!ins.operands.empty() && ins.operands[0].kind == x86::OperandKind::reg && !no_write.contains(ins.mnemonic))
-            holders.erase(gpr64(ins.operands[0].reg));
+            holders.erase(x86::gpr_family(ins.operands[0].reg));
         if (ins.mnemonic == "xchg" && ins.operands.size() == 2 && ins.operands[1].kind == x86::OperandKind::reg)
-            holders.erase(gpr64(ins.operands[1].reg));
+            holders.erase(x86::gpr_family(ins.operands[1].reg));
         static const std::set<std::string_view> rax_rdx = {"mul", "div", "idiv", "cdq", "cqo", "cwd"};
         if (rax_rdx.contains(ins.mnemonic) || (ins.mnemonic == "imul" && ins.operands.size() == 1)) {
             holders.erase("rax");
@@ -109,7 +91,8 @@ Program Program::with_symbols(SymbolDb symbols) const {
     return p;
 }
 
-Result<Program> Program::open(const std::filesystem::path& binary, const std::optional<std::filesystem::path>& pdb_path) {
+Result<Program> Program::open(const std::filesystem::path& binary, const OpenOptions& options) {
+    const std::optional<std::filesystem::path>& pdb_path = options.pdb;
     Program p;
     p.path_ = binary;
     TRY_ASSIGN(auto image, pe::Image::load(binary));
@@ -117,8 +100,11 @@ Result<Program> Program::open(const std::filesystem::path& binary, const std::op
     p.decoder_ = std::make_unique<x86::Decoder>(p.image_->arch());
 
     std::vector<std::filesystem::path> candidates;
-    if (pdb_path) candidates.push_back(*pdb_path);
-    else {
+    if (!options.use_pdb) {
+        // Opened as if there were no PDB.
+    } else if (pdb_path) {
+        candidates.push_back(*pdb_path);
+    } else {
         auto dir = binary.parent_path();
         if (const auto& cv = p.image_->codeview(); cv && !cv->pdb_path.empty()) {
             auto recorded = fs::from_utf8(replace_all(cv->pdb_path, "\\", "/"));
@@ -156,7 +142,27 @@ Result<Program> Program::open(const std::filesystem::path& binary, const std::op
     if (pdb_path && !reader) return make_error(ErrorCode::not_found, "PDB '{}' could not be used", fs::to_utf8(*pdb_path));
     p.symbols_ = SymbolDb::from_pe(*p.image_, reader.get());
     p.fold_linker_thunks();
+    if (options.discover && p.pdb_status_ != PdbStatus::matched) p.add_discovered_functions();
     return p;
+}
+
+void Program::add_discovered_functions() {
+    const DiscoveryResult found = discover_functions(*image_, *decoder_, symbols_);
+    for (const auto& f : found.functions) {
+        Symbol s;
+        s.va = f.start;
+        s.size = static_cast<u32>(f.end - f.start);
+        s.kind = SymbolKind::function;
+        s.source = SymbolSource::analysis;
+        if (!symbols_.at(f.start)) {
+            s.name = std::format("sub_{:x}", f.start);
+            // An import thunk is named after the import it jumps to.
+            if (const Symbol* slot = f.import_slot ? symbols_.at(f.import_slot) : nullptr; slot && slot->name.starts_with("__imp_"))
+                s.name = slot->name.substr(6);
+        }
+        symbols_.add(std::move(s));
+    }
+    log::debug("discovery: {} functions in {} passes ({} instructions)", found.functions.size(), found.passes, found.instructions);
 }
 
 std::optional<x86::Instruction> Program::decode_at(u64 va) const {
@@ -212,90 +218,10 @@ std::optional<u64> Program::resolve(std::string_view text) const {
     return std::nullopt;
 }
 
-std::vector<u64> Program::read_table_entries(const JumpTable& table, u64 fn_start, u64 fn_limit) const {
-    std::vector<u64> targets;
-    for (unsigned i = 0; i < 4096; ++i) {
-        u64 slot = table.table_va + u64(i) * table.entry_size;
-        std::optional<u64> target;
-        switch (table.encoding) {
-        case TableEncoding::absolute:
-            target = table.entry_size == 4 ? image_->read<u32>(slot).transform([](u32 v) { return u64(v); }) : image_->read<u64>(slot);
-            break;
-        case TableEncoding::relative:
-            target = image_->read<i32>(slot).transform([&](i32 v) { return table.table_va + static_cast<u64>(static_cast<i64>(v)); });
-            break;
-        case TableEncoding::rva:
-            target = image_->read<u32>(slot).transform([&](u32 v) { return image_->image_base() + v; });
-            break;
-        }
-        if (!target || *target < fn_start || *target >= fn_limit || !image_->is_code(*target)) break;
-        if (i > 0 && symbols_.at(slot) && symbols_.at(slot)->kind != SymbolKind::label) break;  // next object
-        targets.push_back(*target);
-    }
-    return targets;
-}
-
-std::optional<JumpTable> Program::read_jump_table(const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const {
-    // x86 switch dispatch: jmp dword ptr [reg*4 + table]
-    if (jmp.flow != x86::Flow::indirect_jump || jmp.operands.empty()) return std::nullopt;
-    const auto& op = jmp.operands[0];
-    if (op.kind != x86::OperandKind::mem || !op.mem.base.empty() || op.mem.index.empty()) return std::nullopt;
-    unsigned entry = pointer_size(arch());
-    if (op.mem.scale != entry || !jmp.memory_target) return std::nullopt;
-    JumpTable table;
-    table.jump_va = jmp.address;
-    table.table_va = *jmp.memory_target;
-    table.entry_size = entry;
-    table.encoding = TableEncoding::absolute;
-    table.targets = read_table_entries(table, fn_start, fn_limit);
-    if (table.targets.empty()) return std::nullopt;
-    return table;
-}
-
-std::optional<JumpTable> Program::read_x64_jump_table(std::span<const x86::Instruction> before, const x86::Instruction& jmp,
-                                                      u64 fn_start, u64 fn_limit) const {
-    // clang:  lea B, [rip+T]; movsxd R, dword ptr [B+I*4]; add R, B; jmp R          (entries: T + int32)
-    // MSVC:   lea B, [rip+__ImageBase]; mov R, dword ptr [B+I*4+T_rva]; add R, B; jmp R   (entries: RVAs)
-    if (arch() != Arch::x64 || jmp.flow != x86::Flow::indirect_jump || jmp.operands.empty() ||
-        jmp.operands[0].kind != x86::OperandKind::reg)
-        return std::nullopt;
-    const usize window = std::min<usize>(before.size(), 12);
-    const x86::Instruction* load = nullptr;
-    for (usize k = 0; k < window && !load; ++k) {
-        const auto& ins = before[before.size() - 1 - k];
-        for (const auto& op : ins.operands)
-            if (op.kind == x86::OperandKind::mem && op.mem.scale == 4 && !op.mem.base.empty() && !op.mem.index.empty() &&
-                (ins.mnemonic == "movsxd" || ins.mnemonic == "mov"))
-                load = &ins;
-    }
-    if (!load) return std::nullopt;
-    const x86::Operand* mem = nullptr;
-    for (const auto& op : load->operands)
-        if (op.kind == x86::OperandKind::mem) mem = &op;
-    std::optional<u64> base_value;
-    for (const auto& ins : before) {
-        if (ins.address >= load->address) break;
-        if (ins.mnemonic == "lea" && ins.operands.size() == 2 && ins.operands[0].kind == x86::OperandKind::reg &&
-            ins.operands[0].reg == mem->mem.base && ins.memory_target)
-            base_value = ins.memory_target;
-    }
-    if (!base_value) return std::nullopt;
-    JumpTable table;
-    table.jump_va = jmp.address;
-    table.load_va = load->address;
-    table.entry_size = 4;
-    if (*base_value == image_->image_base() && mem->mem.has_disp) {
-        table.encoding = TableEncoding::rva;
-        table.table_va = image_->image_base() + static_cast<u64>(mem->mem.disp);
-    } else if (!mem->mem.has_disp || mem->mem.disp == 0) {
-        table.encoding = TableEncoding::relative;
-        table.table_va = *base_value;
-    } else {
-        return std::nullopt;
-    }
-    table.targets = read_table_entries(table, fn_start, fn_limit);
-    if (table.targets.empty()) return std::nullopt;
-    return table;
+std::optional<JumpTable> Program::jump_table(std::span<const x86::Instruction> before, const x86::Instruction& jmp, u64 fn_start,
+                                            u64 fn_limit) const {
+    const JumpTableContext ctx{.image = image_.get(), .symbols = &symbols_, .fn_start = fn_start, .fn_limit = fn_limit};
+    return read_jump_table(ctx, before, jmp);
 }
 
 Result<FunctionExtent> Program::function_extent(u64 start) const {
@@ -312,12 +238,11 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
         auto list = decoder_->decode_all(*image_->view(start, ext.end - start), start);
         for (usize i = 0; i < list.size(); ++i) {
             const auto& ins = list[i];
-            std::optional<JumpTable> table = read_jump_table(ins, start, ext.end);
-            if (!table) table = read_x64_jump_table(std::span<const x86::Instruction>(list).first(i), ins, start, ext.end);
-            if (table) {
+            if (ins.flow != x86::Flow::indirect_jump) continue;
+            if (auto table = jump_table(std::span<const x86::Instruction>(list).first(i), ins, start, ext.end)) {
                 if (table->table_va >= start && table->table_va < ext.end) {
                     table->inside_code = true;
-                    ext.data_ranges.emplace_back(table->table_va, table->table_va + table->targets.size() * table->entry_size);
+                    for (const auto& range : table->data_ranges()) ext.data_ranges.push_back(range);
                 }
                 ext.jump_tables.push_back(std::move(*table));
             }
@@ -352,9 +277,9 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
                     stop = true;
                     break;
                 case x86::Flow::indirect_jump:
-                    if (auto table = read_jump_table(*ins, start, limit) ? read_jump_table(*ins, start, limit)
-                                                                          : read_x64_jump_table(recent, *ins, start, limit)) {
-                        for (u64 t : table->targets) work.push_back(t);
+                    if (auto table = jump_table(recent, *ins, start, limit)) {
+                        for (u64 t : table->targets)
+                            if (image_->read<u8>(t).value_or(0xCC) != 0xCC) work.push_back(t);  // int3: a case that cannot happen
                         ext.jump_tables.push_back(std::move(*table));
                     }
                     stop = true;
@@ -372,7 +297,7 @@ Result<FunctionExtent> Program::function_extent(u64 start) const {
         for (auto& table : ext.jump_tables) {
             if (table.table_va >= start && table.table_va < ext.end) {
                 table.inside_code = true;
-                ext.data_ranges.emplace_back(table.table_va, table.table_va + table.targets.size() * table.entry_size);
+                for (const auto& range : table.data_ranges()) ext.data_ranges.push_back(range);
             }
         }
     }
