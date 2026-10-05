@@ -73,6 +73,14 @@ Copy-Item "$root\tests\fixtures\include\rtti.h" (Join-Path $rttiProject "include
 & $decomp -C $rttiProject types check
 if ($LASTEXITCODE -ne 0) { throw "the classes of include\rtti.h differ from the PDB's with cl.exe ($Arch)" }
 Write-Host "MSVC types ($Arch): the headers' layouts equal the PDBs'"
+# Class skeletons from the RTTI cl.exe wrote compile with cl.exe to the vtables and base offsets it says.
+$skeletonProject = Join-Path $out "rtti-skeletons"
+if (Test-Path $skeletonProject) { Remove-Item -Recurse -Force $skeletonProject }
+& $decomp init "$out\rtti.exe" --dir $skeletonProject --toolchain "msvc-$Arch" --flag /O2 --flag /GR
+if ($LASTEXITCODE -ne 0) { throw "decomp init failed (rtti skeletons)" }
+& $decomp -C $skeletonProject types skeletons
+if ($LASTEXITCODE -ne 0) { throw "the RTTI class skeletons do not compile to the RTTI's layout with cl.exe ($Arch)" }
+Write-Host "MSVC class skeletons ($Arch): they compile to the RTTI's vtables and base offsets"
 
 # Types whose layouts a header has to get right (packing, alignment, bitfields, anonymous unions, member
 # pointers, virtual functions, multiple and virtual inheritance), built with cl.exe: declared from

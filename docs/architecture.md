@@ -253,6 +253,9 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   from them. `analyze_functions()` computes them for many functions (about a microsecond per
   instruction); runs queue their functions easiest first by the score (`run::make_queue_items()`), the
   GUI's workspace keeps an analysis per program generation, and the Function browser shows it.
+- Class skeletons (`analysis/skeletons.hpp`): layouts of the classes RTTI names, for targets without
+  a PDB: bases at the RTTI's offsets, vfptrs, virtual methods by slot with the signatures decorated
+  names give, fills where bases must reach the next base ([project-format.md](project-format.md#include)).
 - Typed pointers (`analysis/typeflow.hpp`, see [Types](#types)): which registers and stack slots point
   to known types as a function runs, for the field names in annotated listings.
 - Type layouts (`analysis/types.hpp`, see [Types](#types)): what the compiler made of a struct, class,

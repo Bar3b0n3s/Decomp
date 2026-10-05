@@ -108,4 +108,10 @@ struct TypeImport {
 Result<TypeImport> prepare_type_import(const Project& project, const Program& program, const matching::MatchSetup& setup,
                                        const std::vector<std::string>& names, std::string_view header);
 
+// Class skeletons from the target's RTTI (analysis/skeletons.hpp) for `names` (every class RTTI names
+// when empty), declared like an import; compiled, each class's vtables and base offsets must be what
+// RTTI says.
+Result<TypeImport> prepare_skeleton_import(const Project& project, const Program& program, const matching::MatchSetup& setup,
+                                           const std::vector<std::string>& names, std::string_view header);
+
 } // namespace decomp::project

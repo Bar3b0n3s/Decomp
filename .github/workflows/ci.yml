@@ -106,6 +106,14 @@ jobs:
             done
           done
           ./bin/Release/decomp -C "$p" types show Unit
+          # Without the PDB, class skeletons from the RTTI compile to the vtables and base offsets it says.
+          for arch in x86 x64; do
+            d="$(mktemp -d)"
+            mkdir "$d/bin"
+            cp tests/fixtures/$arch/rtti.exe "$d/bin/"
+            ./bin/Release/decomp init "$d/bin/rtti.exe" --dir "$d/project" --toolchain clang-cl-$arch
+            ./bin/Release/decomp -C "$d/project" types skeletons
+          done
 
       - name: Batch run smoke test
         run: |

@@ -288,6 +288,17 @@ contents.
   defines must have the PDB's layout, and the verified sources that include it must keep their
   byte-exact functions; the write is recorded in [`.decomp/changes.jsonl`](#changesjsonl-and-blobs).
 
+- `decomp types skeletons [<class>...]` declares class skeletons from the target's RTTI, for targets
+  without a PDB (`analysis/skeletons.hpp`): every class the RTTI names unless some are given. A
+  skeleton has the class's bases where RTTI puts them, the vfptr it adds, and the virtual methods it
+  introduces in slot order: named after the functions in its vftable, with the signatures their
+  decorated names give (`virtual int area() const;`), a destructor for a deleting destructor, `vf2`
+  for a function without a name, `= 0` for `_purecall`; overrides where the base's slot has the same
+  method, and the other member functions the symbols name. Fields are unknown: a class that another
+  base follows gets a `char` array that fills it up to that base's offset. Before the header is
+  written, the skeletons are compiled, and each class's vtables (their entry counts) and its direct
+  bases' offsets must be what RTTI says.
+
 The declarations rebuild what the type records flatten (`analysis/declarations.hpp`): the members of
 anonymous unions and structs (a member that starts back inside the previous one opens a union), anonymous
 member types (inline, with the member), unnamed bitfields where bits are skipped and `: 0` where a unit

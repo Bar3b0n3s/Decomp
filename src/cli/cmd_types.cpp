@@ -29,6 +29,26 @@ struct TypesContext {
     project::HeaderTypes headers;
 };
 
+// Writes an import (unless a dry run) and says what it declared.
+Result<int> finish_import(const GlobalOptions& g, const project::Project& p, const project::TypeImport& imported, bool dry_run, std::string_view reason) {
+    if (!dry_run) {
+        TRY_ASSIGN(auto run_lock, p.try_lock_active_run());
+        if (!run_lock) return make_error(ErrorCode::invalid_argument, "a run is active in this project; declare types when it is done");
+        TRY(project::commit_type_change(p, imported.change, project::ChangeOrigin{SymbolSource::user, "", std::string(reason)}, project::ChangeSubject{}));
+    }
+    if (g.json) {
+        print_json({{"header", imported.change.header}, {"defined", imported.defined}, {"declared", imported.declared}, {"skipped", imported.skipped},
+                    {"includes", imported.includes}, {"written", !dry_run}, {"content", imported.change.content}});
+        return 0;
+    }
+    if (dry_run) std::print("{}", imported.change.content);
+    std::println("{}{}: {} type{} defined ({}){}", dry_run ? "would write " : "", imported.change.header, imported.defined.size(),
+                 imported.defined.size() == 1 ? "" : "s", join(imported.defined, ", "),
+                 imported.declared.empty() ? std::string() : std::format(", {} declared forward ({})", imported.declared.size(), join(imported.declared, ", ")));
+    for (const auto& s : imported.skipped) std::println("  skipped {}", s);
+    return 0;
+}
+
 Result<TypesContext> open_types(const GlobalOptions& g) {
     TRY_ASSIGN(auto p, project::Project::find(g.project));
     TRY_ASSIGN(auto program, p.open_program());
@@ -157,24 +177,24 @@ void register_types_commands(CLI::App& app, GlobalOptions& g) {
             }
             if (names.empty()) return make_error(ErrorCode::invalid_argument, "name the types to import, or pass --all");
             TRY_ASSIGN(const auto imported, project::prepare_type_import(p, program, setup, names, *header));
-            if (!*dry_run) {
-                TRY_ASSIGN(auto run_lock, p.try_lock_active_run());
-                if (!run_lock) return make_error(ErrorCode::invalid_argument, "a run is active in this project; import types when it is done");
-                TRY(project::commit_type_change(p, imported.change, project::ChangeOrigin{SymbolSource::user, "", "decomp types import"},
-                                                project::ChangeSubject{}));
-            }
-            if (g.json) {
-                print_json({{"header", imported.change.header}, {"defined", imported.defined}, {"declared", imported.declared},
-                            {"skipped", imported.skipped}, {"includes", imported.includes}, {"written", !*dry_run},
-                            {"content", imported.change.content}});
-                return 0;
-            }
-            if (*dry_run) std::print("{}", imported.change.content);
-            std::println("{}{}: {} type{} defined ({}){}", *dry_run ? "would write " : "", imported.change.header, imported.defined.size(),
-                         imported.defined.size() == 1 ? "" : "s", join(imported.defined, ", "),
-                         imported.declared.empty() ? std::string() : std::format(", {} declared forward ({})", imported.declared.size(), join(imported.declared, ", ")));
-            for (const auto& s : imported.skipped) std::println("  skipped {}", s);
-            return 0;
+            return finish_import(g, p, imported, *dry_run, "decomp types import");
+        }));
+    });
+
+    auto* skeletons = cmd->add_subcommand("skeletons", "Declare class skeletons from the target's RTTI in a project header, checked against it");
+    auto classes = std::make_shared<std::vector<std::string>>();
+    auto skeleton_header = std::make_shared<std::string>();
+    auto skeleton_dry_run = std::make_shared<bool>(false);
+    skeletons->add_option("classes", *classes, "The classes to declare (default: every class the RTTI names)");
+    skeletons->add_option("--header", *skeleton_header, "The header under include/ (default: types.h)");
+    skeletons->add_flag("--dry-run", *skeleton_dry_run, "Print the header it would write, and write nothing");
+    skeletons->callback([&g, classes, skeleton_header, skeleton_dry_run] {
+        throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+            TRY_ASSIGN(auto p, project::Project::find(g.project));
+            TRY_ASSIGN(auto program, p.open_program());
+            TRY_ASSIGN(const auto setup, project::make_match_setup(&p, ""));
+            TRY_ASSIGN(const auto imported, project::prepare_skeleton_import(p, program, setup, *classes, *skeleton_header));
+            return finish_import(g, p, imported, *skeleton_dry_run, "decomp types skeletons");
         }));
     });
 

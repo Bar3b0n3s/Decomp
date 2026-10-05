@@ -2,6 +2,7 @@
 // back; and the program generations a run hands its sessions.
 
 #include "analysis/declarations.hpp"
+#include "analysis/skeletons.hpp"
 #include "core/fs.hpp"
 #include "llvm_fixture.hpp"
 #include "project/project.hpp"
@@ -253,4 +254,40 @@ TEST_CASE("importing the PDB's types: declarations the compiler lays out as the 
         const auto without = Program::open(*exe, OpenOptions{.use_pdb = false}).value();
         CHECK_FALSE(prepare_type_import(p, without, setup, {"Node"}, "other.h"));
     }
+}
+
+TEST_CASE("class skeletons from RTTI compile to the vtables and base offsets RTTI says") {
+    const auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    for (const Arch arch : {Arch::x86, Arch::x64}) {
+        const std::string a = arch == Arch::x86 ? "x86" : "x64";
+        CAPTURE(a);
+        // The image alone, without its PDB: what RTTI says is all there is.
+        auto dir = fs::TempDir::create("decomp-skeletons").value();
+        REQUIRE(fs::create_directories(dir.path() / "bin"));
+        std::filesystem::copy_file(test::fixture(a + "/rtti.exe"), dir.path() / "bin" / "rtti.exe");
+        auto p = Project::init(dir.path() / "p", dir.path() / "bin" / "rtti.exe", std::nullopt, "clang-cl-" + a).value();
+        const auto program = p.open_program().value();
+        REQUIRE(program.pdb_types().catalog.empty());
+        const auto setup = test::clang_setup(arch, tools->clang_cl, dir.path() / "work");
+        const auto imported = prepare_skeleton_import(p, program, setup, {}, "classes.h").value();
+        CHECK(imported.defined.size() == 6);
+        CHECK(imported.change.content.find("    virtual void vf0();\n") != std::string::npos);
+        REQUIRE(commit_type_change(p, imported.change, ChangeOrigin{SymbolSource::user, "", "test"}, ChangeSubject{}));
+        const auto headers = compile_header_types(p, setup, arch).value();
+        for (const RttiClass& c : program.rtti().classes) {
+            CAPTURE(c.name);
+            CHECK(compare_with_rtti(c, headers.catalog) == std::vector<std::string>{});
+        }
+        // Declared already: nothing more to do.
+        CHECK_FALSE(prepare_skeleton_import(p, program, setup, {"Unit"}, "classes.h"));
+    }
+    // A program without RTTI has none to make.
+    auto dir = fs::TempDir::create("decomp-skeletons").value();
+    auto p = Project::init(dir.path() / "p", test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86").value();
+    const auto basic = p.open_program().value();
+    CHECK_FALSE(prepare_skeleton_import(p, basic, test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "work"), {}, ""));
 }

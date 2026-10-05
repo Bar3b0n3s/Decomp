@@ -2,6 +2,7 @@
 
 #include "analysis/declarations.hpp"
 #include "analysis/demangle.hpp"
+#include "analysis/skeletons.hpp"
 #include "core/fs.hpp"
 #include "core/hash.hpp"
 #include "core/strings.hpp"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <cctype>
 #include <format>
+#include <functional>
 #include <optional>
 #include <set>
 
@@ -474,10 +476,16 @@ Result<HeaderTypes> compile_header_types(const Project& project, const matching:
     return out;
 }
 
-Result<TypeImport> prepare_type_import(const Project& project, const Program& program, const matching::MatchSetup& setup,
-                                       const std::vector<std::string>& names, std::string_view header_name) {
-    const TypeCatalog& pdb = program.pdb_types().catalog;
-    if (pdb.empty()) return make_error(ErrorCode::not_found, "the target has no PDB with types to import");
+namespace {
+
+// How a compiled type differs from what its declaration was made from.
+using Differences = std::function<std::vector<std::string>(const std::string& name, const TypeCatalog& compiled)>;
+
+// Declarations of `names` (and what they need) from the layouts in `source`, composed into `header`
+// and checked: compiled, `differences` must find nothing, and the verified sources that include the
+// header must keep their byte-exact functions.
+Result<TypeImport> prepare_declarations(const Project& project, const Program& program, const matching::MatchSetup& setup, const TypeCatalog& source,
+                                        const std::vector<std::string>& names, std::string_view header_name, const Differences& differences) {
     const std::string header(header_name.empty() ? kDefaultTypesHeader : header_name);
     if (!valid_header_name(header))
         return make_error(ErrorCode::invalid_argument, "'{}' is not a header name under include/ (such as types.h or game/player.h)", header);
@@ -493,8 +501,8 @@ Result<TypeImport> prepare_type_import(const Project& project, const Program& pr
     TRY_ASSIGN(const auto current, compile_header_types(project, setup, program.arch()));
     std::set<std::string> existing;
     for (const auto& declared : current.declared)
-        if (current.defines(declared.name) || !pdb.find(declared.name)) existing.insert(declared.name);
-    const DeclarationPlan plan = declare_types(pdb, names, existing);
+        if (current.defines(declared.name) || !source.find(declared.name)) existing.insert(declared.name);
+    const DeclarationPlan plan = declare_types(source, names, existing);
     out.skipped = plan.skipped;
     for (const std::string& name : names)
         if (existing.contains(name)) out.skipped.push_back(std::format("{}: {} declares it already", name, current.header_of(name)->header));
@@ -522,26 +530,50 @@ Result<TypeImport> prepare_type_import(const Project& project, const Program& pr
     out.change.content = std::move(text);
     out.change.name = join(out.defined, ", ");
 
-    // The compiler lays every new type out as the PDB says.
+    // The compiler lays every new type out as it should.
     TRY_ASSIGN(const auto compiled, compile_header_types(project, setup, program.arch(), {{out.change.header, out.change.content}}));
-    std::vector<std::string> differences;
+    std::vector<std::string> found;
     for (const std::string& name : out.defined) {
-        const TypeLayout* layout = compiled.catalog.find(name);
-        const TypeLayout* expected = pdb.find(name);
-        if (!layout || !expected) {
-            differences.push_back(std::format("{}: the compiler wrote no layout for it", name));
+        if (!compiled.catalog.find(name)) {
+            found.push_back(std::format("{}: the compiler wrote no layout for it", name));
             continue;
         }
-        for (const std::string& d : compare_layouts(*layout, *expected)) differences.push_back(std::format("{}: {}", name, d));
+        for (const std::string& d : differences(name, compiled.catalog)) found.push_back(std::format("{}: {}", name, d));
     }
-    if (!differences.empty())
-        return make_error(ErrorCode::invalid_argument, "the declarations do not reproduce the PDB's layouts:\n  {}\nthe header would have been:\n{}",
-                          join(differences, "\n  "), out.change.content);
+    if (!found.empty())
+        return make_error(ErrorCode::invalid_argument, "the declarations do not reproduce the layouts:\n  {}\nthe header would have been:\n{}",
+                          join(found, "\n  "), out.change.content);
 
     // The verified sources that include the header keep their byte-exact functions.
     TRY_ASSIGN(const auto staging, stage_headers(setup, {{header, out.change.content}}));
     TRY_ASSIGN(out.change.sources, check_sources_with_header(project, program, setup, staging.with, header, out.change.header));
     return out;
+}
+
+} // namespace
+
+Result<TypeImport> prepare_type_import(const Project& project, const Program& program, const matching::MatchSetup& setup,
+                                       const std::vector<std::string>& names, std::string_view header) {
+    const TypeCatalog& pdb = program.pdb_types().catalog;
+    if (pdb.empty()) return make_error(ErrorCode::not_found, "the target has no PDB with types to import");
+    return prepare_declarations(project, program, setup, pdb, names, header, [&](const std::string& name, const TypeCatalog& compiled) {
+        const TypeLayout* expected = pdb.find(name);
+        return expected ? compare_layouts(*compiled.find(name), *expected) : std::vector<std::string>{};
+    });
+}
+
+Result<TypeImport> prepare_skeleton_import(const Project& project, const Program& program, const matching::MatchSetup& setup,
+                                           const std::vector<std::string>& names, std::string_view header) {
+    const RttiInfo& rtti = program.rtti();
+    if (rtti.classes.empty()) return make_error(ErrorCode::not_found, "the target has no RTTI (classes compiled with /GR) to make skeletons from");
+    const TypeCatalog skeletons = rtti_skeletons(program);
+    std::vector<std::string> wanted = names;
+    if (wanted.empty())
+        for (const RttiClass& c : rtti.classes) wanted.push_back(c.name);
+    return prepare_declarations(project, program, setup, skeletons, wanted, header, [&](const std::string& name, const TypeCatalog& compiled) {
+        const RttiClass* c = rtti.find(name);
+        return c ? compare_with_rtti(*c, compiled) : std::vector<std::string>{};
+    });
 }
 
 } // namespace decomp::project

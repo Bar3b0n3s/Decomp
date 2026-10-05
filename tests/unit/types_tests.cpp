@@ -4,6 +4,7 @@
 #include "analysis/annotate.hpp"
 #include "analysis/declarations.hpp"
 #include "analysis/program.hpp"
+#include "analysis/skeletons.hpp"
 #include "analysis/typeflow.hpp"
 #include "analysis/types.hpp"
 #include "core/fs.hpp"
@@ -519,4 +520,71 @@ TEST_CASE("typed pointers flow through loads, lea, spills and calls, and meet wh
     // One path changes ecx: where they join, it is unknown. A loop that keeps it keeps it.
     CHECK(notes_for({0x85, 0xC0, 0x74, 0x02, 0x31, 0xC9, 0x8B, 0x01, 0xC3}) == std::vector<std::string>{"", "", "", "", ""});
     CHECK(notes_for({0x8B, 0x01, 0x48, 0x75, 0xFB, 0xC3}) == std::vector<std::string>{"this->value", "", "", ""});
+}
+
+TEST_CASE("member function declarations from decorated names") {
+    const auto area = method_from_decorated("?area@Shape@game@@UBEHXZ", "game::Shape", Arch::x86).value();
+    CHECK(area.name == "area");
+    CHECK(area.return_type == "int");
+    CHECK(area.parameters.empty());
+    CHECK(area.is_virtual);
+    CHECK(area.is_const);
+    CHECK(area.calling_convention.empty());
+    const auto make = method_from_decorated("?Make@Node@@SAPEAU1@XZ", "Node", Arch::x64).value();
+    CHECK(make.is_static);
+    CHECK(make.return_type == "struct Node *");
+    const auto log = method_from_decorated("?Log@Derived@@UEAAXPEBDZZ", "Derived", Arch::x64).value();
+    CHECK(log.parameters == std::vector<std::string>{"char const *", "..."});
+    const auto destructor = method_from_decorated("??1Base@@UEAA@XZ", "Base", Arch::x64).value();
+    CHECK(destructor.name == "~Base");
+    CHECK(destructor.return_type.empty());
+    CHECK(destructor.is_virtual);
+    const auto hit = method_from_decorated("?Hit@Player@@QAEXH@Z", "Player", Arch::x86).value();
+    CHECK(hit.parameters == std::vector<std::string>{"int"});
+    CHECK_FALSE(hit.is_virtual);
+    // On x86, a convention other than the default is kept.
+    const auto callback = method_from_decorated("?Callback@Derived@@UAGXH@Z", "Derived", Arch::x86).value();
+    CHECK(callback.calling_convention == "__stdcall");
+    CHECK_FALSE(method_from_decorated("?Hit@Player@@QAEXH@Z", "Enemy", Arch::x86));
+    CHECK_FALSE(method_from_decorated("?add@@YAHHH@Z", "Player", Arch::x86));
+    CHECK_FALSE(method_from_decorated("??_GMulti@@UEAAPEAXI@Z", "Multi", Arch::x64));
+}
+
+TEST_CASE("class skeletons from RTTI: bases where RTTI says, vfptrs, virtual methods by slot") {
+    const auto program = Program::open(test::fixture("x86/rtti.exe")).value();
+    const TypeCatalog skeletons = rtti_skeletons(program);
+    const TypeLayout* shape = skeletons.find("game::Shape");
+    REQUIRE(shape);
+    CHECK(shape->vfptr == 0);
+    CHECK(shape->vtable_slots == 2);
+    REQUIRE(shape->methods.size() == 2);
+    CHECK(shape->methods[0].name == "area");
+    CHECK(shape->methods[0].slot == 0);
+    CHECK(shape->methods[1].name == "sides");
+    // Square is Unit's first base and Named starts at +0xc: a fill takes Square there.
+    const TypeLayout* square = skeletons.find("game::Square");
+    REQUIRE(square);
+    REQUIRE(square->fields.size() == 1);
+    CHECK(square->fields[0].offset == 4);
+    CHECK(square->fields[0].size == 8);
+    CHECK(square->size == 12);
+    // Overrides: in the primary vftable (Unit::area), another base's (Unit::name), a virtual base's (Middle::value).
+    const TypeLayout* unit = skeletons.find("Unit");
+    REQUIRE(unit);
+    CHECK(unit->bases.size() == 2);
+    std::vector<std::string> overrides;
+    for (const auto& m : unit->methods) overrides.push_back(m.name);
+    CHECK(overrides == std::vector<std::string>{"area", "name"});
+    const TypeLayout* middle = skeletons.find("Middle");
+    REQUIRE(middle);
+    REQUIRE(middle->methods.size() == 1);
+    CHECK(middle->methods[0].name == "value");
+    CHECK_FALSE(middle->vfptr);
+    CHECK(definition_of(*shape, skeletons) == "class Shape {\npublic:\n    virtual int area() const;\n    virtual int sides() const;\n};\n");
+
+    // Without symbols, the slots go by number.
+    const auto bare = Program::open(test::fixture("x86/rtti.exe"), OpenOptions{.use_pdb = false}).value();
+    const TypeCatalog unnamed = rtti_skeletons(bare);
+    REQUIRE(unnamed.find("game::Shape"));
+    CHECK(definition_of(*unnamed.find("game::Shape"), unnamed) == "class Shape {\npublic:\n    virtual void vf0();\n    virtual void vf1();\n};\n");
 }
