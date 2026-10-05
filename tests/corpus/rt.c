@@ -1,7 +1,11 @@
 // Freestanding helpers the corpus needs without a C library: the memory functions and the x86 64-bit
 // arithmetic helpers that compilers call (MSVC more of them than clang). The corpus is only linked and
 // analyzed, never run, but the helpers are still written as working code.
-typedef __SIZE_TYPE__ size_t;
+#if defined(_WIN64)
+typedef unsigned __int64 size_t;
+#else
+typedef unsigned int size_t;
+#endif
 
 #pragma function(memset, memcpy, memcmp)
 void* memset(void* dst, int c, size_t n) {
@@ -115,7 +119,48 @@ __declspec(naked) void _aullrem(void) {
     }
 }
 
-// Signed 64-bit division and remainder through the unsigned helpers.
+// Unsigned 64-bit division with remainder (MSVC calls it when both are used): the quotient in edx:eax,
+// the remainder in ebx:ecx, the callee pops 16 bytes.
+__declspec(naked) void _aulldvrm(void) {
+    __asm {
+        push esi
+        push edi
+        push ebp
+        mov eax, [esp+16]
+        mov edx, [esp+20]
+        mov ebx, [esp+24]
+        mov ecx, [esp+28]
+        xor esi, esi
+        xor edi, edi
+        mov ebp, 64
+    next_bit:
+        shl eax, 1
+        rcl edx, 1
+        rcl edi, 1
+        rcl esi, 1
+        cmp esi, ecx
+        jb skip
+        ja take
+        cmp edi, ebx
+        jb skip
+    take:
+        sub edi, ebx
+        sbb esi, ecx
+        inc eax
+    skip:
+        dec ebp
+        jnz next_bit
+        mov ebx, edi
+        mov ecx, esi
+        pop ebp
+        pop edi
+        pop esi
+        ret 16
+    }
+}
+
+// The signed forms go through the unsigned helpers (right for operands that are not negative, which is
+// all the corpus needs: it is never run).
 __declspec(naked) void _alldiv(void) {
     __asm {
         jmp _aulldiv
@@ -124,6 +169,11 @@ __declspec(naked) void _alldiv(void) {
 __declspec(naked) void _allrem(void) {
     __asm {
         jmp _aullrem
+    }
+}
+__declspec(naked) void _alldvrm(void) {
+    __asm {
+        jmp _aulldvrm
     }
 }
 
@@ -157,19 +207,19 @@ __declspec(naked) void _allmul(void) {
 __declspec(naked) void _allshl(void) {
     __asm {
         cmp cl, 64
-        jae zero
+        jae ge64
         cmp cl, 32
-        jae high
+        jae ge32
         shld edx, eax, cl
         shl eax, cl
         ret
-    high:
+    ge32:
         mov edx, eax
         xor eax, eax
         and cl, 31
         shl edx, cl
         ret
-    zero:
+    ge64:
         xor eax, eax
         xor edx, edx
         ret
@@ -178,19 +228,19 @@ __declspec(naked) void _allshl(void) {
 __declspec(naked) void _aullshr(void) {
     __asm {
         cmp cl, 64
-        jae zero
+        jae ge64
         cmp cl, 32
-        jae low
+        jae ge32
         shrd eax, edx, cl
         shr edx, cl
         ret
-    low:
+    ge32:
         mov eax, edx
         xor edx, edx
         and cl, 31
         shr eax, cl
         ret
-    zero:
+    ge64:
         xor eax, eax
         xor edx, edx
         ret
@@ -199,19 +249,19 @@ __declspec(naked) void _aullshr(void) {
 __declspec(naked) void _allshr(void) {
     __asm {
         cmp cl, 64
-        jae sign
+        jae ge64
         cmp cl, 32
-        jae low
+        jae ge32
         shrd eax, edx, cl
         sar edx, cl
         ret
-    low:
+    ge32:
         mov eax, edx
         sar edx, 31
         and cl, 31
         sar eax, cl
         ret
-    sign:
+    ge64:
         sar edx, 31
         mov eax, edx
         ret
