@@ -5,10 +5,13 @@
 #include "llvm_fixture.hpp"
 #include "project/units.hpp"
 #include "test_util.hpp"
+#include "viewmodel/symbols_table.hpp"
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <format>
+#include <map>
 
 using namespace decomp;
 using namespace decomp::agent;
@@ -34,7 +37,7 @@ __declspec(noinline) int add(int a, int b) { return a + b + g_counter; }
 
 TEST_CASE("tool schemas are strict-compatible") {
     auto schemas = MatchSession::tool_schemas();
-    CHECK(schemas.size() == 6);
+    CHECK(schemas.size() == 8);
     for (auto it = schemas.begin(); it != schemas.end(); ++it) {
         CAPTURE(it.key());
         const auto& s = *it;
@@ -224,4 +227,139 @@ TEST_CASE("a session in a unit: the brief shows the unit, candidates compile in 
     REQUIRE(verified.size() == 1);
     CHECK(verified[0].verification.functions.size() == 2);
     CHECK(verified[0].verification.all_byte_exact());
+}
+
+TEST_CASE("set_symbol and define_type: approvals, provenance, checks and revert") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-session-tools").value();
+    REQUIRE(test::build_fixture_program(Arch::x86, *tools, dir.path()));
+    auto proj = project::Project::init(dir.path() / "p", dir.path() / "basic.exe", std::nullopt, "clang-cl-x86").value();
+    auto program = proj.open_program().value();
+    events::EventBus bus("run-tools");
+    events::RunState state;
+    bus.subscribe([&](const events::Event& e) { state.apply(e); });
+    auto setup = clang_setup(dir.path() / "work");
+    setup.include_dirs = {proj.root() / "include"};
+    MatchSession session(program, &proj, setup, *program.resolve("dispatch"), &bus, "s1", 0);
+    auto gate = std::make_shared<ApprovalGate>(&bus);
+    for (std::string_view action : approval_actions()) gate->set_policy(std::string(action), ApprovalPolicy::automatic);
+    session.set_approvals(gate);
+    auto set_symbol = [&](const char* address, const char* name, const char* kind = "", int size = 0) {
+        return session.call("set_symbol", Json{{"address", address}, {"name", name}, {"kind", kind}, {"size", size}, {"reason", "seen in dispatch"}});
+    };
+
+    SUBCASE("set_symbol") {
+        const u64 other = *program.resolve("other_value");
+        auto renamed = set_symbol("other_value", "lookup_other");
+        CHECK_FALSE(renamed.is_error);
+        CHECK(renamed.text.find("rename other_value to lookup_other") != std::string::npos);
+        const auto symbols = proj.symbols();
+        const auto it = std::ranges::find(symbols, other, &Symbol::va);
+        REQUIRE(it != symbols.end());
+        CHECK(it->name == "lookup_other");
+        CHECK(it->source == SymbolSource::agent);
+        // Provenance: the log names the session and the reason; the run's events have it.
+        const auto log = proj.symbol_log();
+        REQUIRE_FALSE(log.empty());
+        CHECK(log.back()["session"] == "s1");
+        CHECK(log.back()["reason"] == "seen in dispatch");
+        REQUIRE(state.data().symbol_changes.size() == 1);
+        CHECK(state.data().symbol_changes.back().change.new_name == "lookup_other");
+        CHECK(state.data().symbol_changes.back().change.source == "agent");
+        // A new data symbol at an address without one.
+        CHECK_FALSE(set_symbol("0x403020", "g_extra", "data", 4).is_error);
+        // Refused: the session's own function, a name in use, nothing to change, no reason, an unknown kind.
+        CHECK(set_symbol("dispatch", "dispatch2").is_error);
+        CHECK(set_symbol("read_counter", "add").is_error);
+        CHECK(set_symbol("read_counter", "").is_error);
+        CHECK(session.call("set_symbol", Json{{"address", "read_counter"}, {"name", "x"}, {"kind", ""}, {"size", 0}, {"reason", ""}}).is_error);
+        CHECK(set_symbol("read_counter", "", "import").is_error);
+        // Refused: a matched function, and a name a verified source uses.
+        REQUIRE(proj.update_function(*program.resolve("add"), {project::FunctionStatus::matched, 100, 1, 0}));
+        CHECK(set_symbol("add", "add2").is_error);
+        REQUIRE(fs::write_text(proj.root() / "src" / "functions" / "read_counter_401070.cpp",
+                               "extern int g_table[8];\nint read_counter() { return g_table[0]; }\n"));
+        const auto used = set_symbol("g_table", "g_fib");
+        CHECK(used.is_error);
+        CHECK(used.text.find("src/functions/read_counter_401070.cpp") != std::string::npos);
+        // Denied by policy: nothing changes.
+        gate->set_policy(std::string(kSetSymbolAction), ApprovalPolicy::deny);
+        const auto denied = set_symbol("sum_array", "sum_ints");
+        CHECK(denied.is_error);
+        CHECK(denied.text.find("not allowed by this run's policy") != std::string::npos);
+        CHECK(program.resolve("sum_array"));
+        CHECK(std::ranges::none_of(proj.symbols(), [](const Symbol& s) { return s.name == "sum_ints"; }));
+
+        // Revert, as `decomp symbols revert` and the Symbols view do.
+        const auto records = vm::parse_symbol_log(proj.symbol_log());
+        std::map<u64, vm::SymbolState> current;
+        for (const Symbol& s : proj.symbols()) current.emplace(s.va, vm::symbol_state(s));
+        const usize first = records.size() - 2;  // the rename (the data symbol came after it)
+        const auto plan = vm::plan_revert(records, std::vector<usize>{first}, [&](u64 va) -> std::optional<vm::SymbolState> {
+            auto c = current.find(va);
+            return c == current.end() ? std::nullopt : std::optional(c->second);
+        });
+        REQUIRE(plan);
+        REQUIRE(plan->size() == 1);
+        REQUIRE(proj.set_symbol(plan->front().edit, project::ChangeOrigin{SymbolSource::user, "", "revert"}));
+        const auto reverted = proj.symbols();
+        CHECK(std::ranges::find(reverted, other, &Symbol::va)->name == program.symbols().at(other)->name);
+    }
+
+    SUBCASE("define_type") {
+        auto define = [&](const char* name, const char* declaration, const char* header = "") {
+            return session.call("define_type", Json{{"name", name}, {"declaration", declaration}, {"header", header}, {"reason", "fields at +0, +4"}});
+        };
+        const auto made = define("Point", "struct Point {\n    int x;\n    int y;\n};");
+        CHECK_FALSE(made.is_error);
+        CHECK(made.text.find("#include \"types.h\"") != std::string::npos);
+        const auto header = proj.root() / "include" / "types.h";
+        CHECK(fs::read_text(header).value() == "#pragma once\n\nstruct Point {\n    int x;\n    int y;\n};\n");
+        auto changes = proj.changes();
+        REQUIRE_FALSE(changes.empty());
+        CHECK(changes.back()["path"] == "include/types.h");
+        CHECK(changes.back()["source"] == "agent");
+        CHECK(changes.back()["reason"] == "fields at +0, +4");
+        REQUIRE_FALSE(state.data().files_written.empty());
+        CHECK(state.data().files_written.back().file.path == "include/types.h");
+
+        // Refused: no such type in the declaration, functions, a bad header name, a header that does not compile.
+        CHECK(define("Player", "struct Other { int a; };").is_error);
+        CHECK(define("Player", "struct Player { int hp; };\nint f() { return 0; }").is_error);
+        CHECK(define("Player", "struct Player { int hp; };", "../player.h").is_error);
+        const auto broken = define("Player", "struct Player { int hp; nonsense; };");
+        CHECK(broken.is_error);
+        CHECK(broken.text.find("does not compile") != std::string::npos);
+        CHECK(fs::read_text(header).value().find("Player") == std::string::npos);
+
+        // A verified source that includes the header and defines Player itself: adding Player there would
+        // break it, while another header is fine.
+        REQUIRE(proj.update_function(*program.resolve("read_counter"), {project::FunctionStatus::matched, 100, 1, 0}));
+        REQUIRE(fs::write_text(proj.root() / "src" / "functions" / "read_counter_401070.cpp",
+                               "#include \"types.h\"\nstruct Player { int hp; };\nextern int g_counter;\n"
+                               "__declspec(noinline) int read_counter() { return g_counter; }\n"));
+        const auto breaks = define("Player", "struct Player { int hp; float speed; };");
+        CHECK(breaks.is_error);
+        CHECK(breaks.text.find("read_counter") != std::string::npos);
+        CHECK_FALSE(define("Player", "struct Player { int hp; float speed; };", "game/player.h").is_error);
+        CHECK(std::filesystem::exists(proj.root() / "include" / "game" / "player.h"));
+
+        // Replacing a definition keeps its place.
+        CHECK_FALSE(define("Point", "struct Point {\n    int x;\n    int y;\n    int z;\n};").is_error);
+        const std::string replaced = fs::read_text(header).value();
+        CHECK(replaced == "#pragma once\n\nstruct Point {\n    int x;\n    int y;\n    int z;\n};\n");
+
+        // Revert the replacement: the first definition is back.
+        changes = proj.changes();
+        REQUIRE(proj.revert_change(changes.back(), project::ChangeOrigin{SymbolSource::user, "", "revert"}));
+        CHECK(fs::read_text(header).value() == "#pragma once\n\nstruct Point {\n    int x;\n    int y;\n};\n");
+        // Denied by policy.
+        gate->set_policy(std::string(kDefineTypeAction), ApprovalPolicy::deny);
+        CHECK(define("Rect", "struct Rect { Point a, b; };").is_error);
+        CHECK(fs::read_text(header).value().find("Rect") == std::string::npos);
+    }
 }

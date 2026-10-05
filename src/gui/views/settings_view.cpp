@@ -3,6 +3,7 @@
 
 #include "gui/views/settings_view.hpp"
 
+#include "agent/approvals.hpp"
 #include "agent/client.hpp"
 #include "agent/cost.hpp"
 #include "core/fs.hpp"
@@ -135,15 +136,24 @@ private:
         a.max_tokens_per_function = std::max(0LL, a.max_tokens_per_function);
         a.max_minutes_per_function = std::max(0, a.max_minutes_per_function);
 
-        const std::string policy = a.approvals.contains("write_source") ? a.approvals["write_source"] : std::string("auto");
-        ImGui::SetNextItemWidth(field);
-        if (ImGui::BeginCombo("Saving a verified match", policy.c_str())) {
-            for (const char* p : {"auto", "ask", "deny"})
-                if (ImGui::Selectable(p, policy == p)) a.approvals["write_source"] = p;
-            ImGui::EndCombo();
+        // An action decomp.json leaves out has its default: saving a verified match is automatic; symbol and
+        // type edits ask in the GUI (and are denied in command-line runs).
+        for (std::string_view action : agent::approval_actions()) {
+            const std::string name(action);
+            const std::string policy = a.approvals.contains(name) ? a.approvals[name] : std::string(agent::to_string(agent::default_policy(action, true)));
+            const char* label = action == agent::kWriteSourceAction ? "Saving a verified match"
+                                : action == agent::kSetSymbolAction ? "Symbol changes (set_symbol)"
+                                                                    : "Type definitions (define_type)";
+            ImGui::SetNextItemWidth(field);
+            if (ImGui::BeginCombo(label, policy.c_str())) {
+                for (const char* p : {"auto", "ask", "deny"})
+                    if (ImGui::Selectable(p, policy == p)) a.approvals[name] = p;
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+                ImGui::SetTooltip("auto: at once; ask: wait for a decision in Changes and approvals (command-line runs deny instead); "
+                                  "deny: never");
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
-            ImGui::SetTooltip("auto: save at once; ask: wait for a decision in Changes and approvals; deny: never save");
 
         const bool changed = !(a.model == project->config().agent.model && a.effort == project->config().agent.effort &&
                                a.fallbacks == project->config().agent.fallbacks && a.workers == project->config().agent.workers &&

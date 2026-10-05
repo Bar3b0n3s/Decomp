@@ -147,8 +147,9 @@ Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
     // One live run per project.
     TRY_ASSIGN(auto active_run, project.try_lock_active_run());
     if (!active_run) return make_error(ErrorCode::invalid_argument, "another agent run is active in this project");
-    TRY_ASSIGN(auto opened_program, project.open_program());
-    auto program = std::make_shared<const Program>(std::move(opened_program));
+    // Each session gets the program with the symbols as they are when it starts (set_symbol changes them).
+    TRY_ASSIGN(auto generations, project::ProgramGenerations::open(project));
+    auto program = generations->current();
     TRY_ASSIGN(auto setup, make_match_setup(g, a.toolchain, a.flags));
 
     // A resumed run keeps its recorded settings unless the command line changes them.
@@ -240,7 +241,7 @@ Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
     if (show_progress) renderer.attach(live->bus);
 
     run::RunDeps deps;
-    deps.program = [program] { return program; };
+    deps.program = [generations] { return generations->current(); };
     deps.project = &project;
     deps.setup = setup;
     deps.transport = transport;

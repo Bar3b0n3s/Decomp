@@ -7,8 +7,9 @@
 
 #include <filesystem>
 #include <functional>
-#include <memory>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -142,8 +143,10 @@ public:
     // The same for many functions at once (the GUI's bulk status changes): one lock, one reload and one
     // rewrite of symbols.txt for all of them.
     Result<void> modify_functions(std::span<const u64> vas, const std::function<void(u64, FunctionInfo&)>& change);
-    // Renames, creates, resizes or removes a symbol; recorded in .decomp/symbols.log.jsonl.
-    Result<SymbolChange> set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin);
+    // Renames, creates, resizes or removes a symbol; recorded in .decomp/symbols.log.jsonl. A renamed
+    // function's history (.decomp/functions/<fn>/) and own source (src/functions/<fn>.cpp) move to its
+    // new key.
+    Result<SymbolChange> set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin) const;
     // Sets the object file (the unit; obj= in symbols.txt) of each listed symbol that exists, an empty
     // name clearing it, starting from the latest symbols.txt. Returns how many changed. Not logged: units
     // are derived from the build's records (project/units.hpp).
@@ -154,6 +157,8 @@ public:
     Result<bool> reload_if_changed();
     // Increases on every change to symbols or function state (in this process or picked up from disk).
     u64 version() const;
+    // Increases when the symbols change (not on function state updates alone), and on every reload.
+    u64 symbols_version() const;
 
     // Working data for one function (attempts, best source, notes).
     std::filesystem::path function_dir(const Symbol& fn) const;
@@ -205,6 +210,23 @@ private:
     std::filesystem::path root_;
     Config config_;
     std::shared_ptr<State> state_;  // shared by copies of this Project
+};
+
+// The program with the project's symbols applied, a new generation whenever they change
+// (Project::symbols_version()): what a run gives each session it dispatches, so that later sessions see
+// the symbols earlier ones named. Thread-safe; generations share the image and decoder.
+class ProgramGenerations {
+public:
+    static Result<std::shared_ptr<ProgramGenerations>> open(const Project& project);
+    std::shared_ptr<const Program> current();
+
+private:
+    explicit ProgramGenerations(const Project& project) : project_(project) {}
+    Project project_;  // shares the caller's state
+    std::unique_ptr<const Program> base_;  // the binary's own symbols
+    std::mutex mutex_;
+    u64 version_ = 0;
+    std::shared_ptr<const Program> current_;
 };
 
 // "Player::Hit" at 0x401000 -> "Player__Hit_401000" (stable, filesystem-safe, unique per address).

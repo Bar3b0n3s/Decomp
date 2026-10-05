@@ -440,14 +440,16 @@ The built-in agent ([agent.md](agent.md) has the full design):
   request or token allowance is spent (below 2% left) until its reset time, and puts every session
   into backoff after a 429 or 529 until `retry-after`.
 - `ApprovalGate` (`agent/approvals.hpp`): per-action policies (`automatic`, `ask`, `deny`) for gated
-  actions; today the one action is `write_source`, saving a verified match. `ask` publishes
+  actions: `write_source` (saving a verified match), `set_symbol` and `define_type`, each with a default
+  policy (`default_policy()`: automatic for the first; ask in the GUI and deny elsewhere for the others). `ask` publishes
   `approval_requested` and waits (Abort ends the wait) until the supervisor decides.
 - `Conversation`: the append-only message history. It serializes the system prompt, tools and model
   once and reuses them byte-identically.
 - `ToolRegistry` with a JSON Schema validator, and `MatchSession`, which holds the per-function
   state and implements the match tools, the brief and the status line. In a translation unit with a
   source, it composes candidates into the unit's source, compiles and verifies the whole unit, and
-  saves matches there ([agent.md](agent.md#translation-units)).
+  saves matches there ([agent.md](agent.md#translation-units)). Its `set_symbol` and `define_type`
+  tools change the project's symbols and headers through the approval gate, with provenance.
 - `run_loop()`, which returns a `LoopOutcome`, and `LoopControl`, its thread-safe commands: pause,
   resume, stop and abort with a reason (user, skip, run budget, shutdown), guidance with an id that can
   be retracted until it is sent, and live `LoopLimits` (turns, tokens, USD, wall clock) that take
@@ -477,6 +479,13 @@ The built-in agent ([agent.md](agent.md) has the full design):
 - `write_project_file()`: every file Decomp writes or removes in the project goes through it, with the
   replaced content kept in `.decomp/blobs/` and the change recorded in `changes.jsonl`. It writes only
   inside the project and outside `.decomp/` (`writable_project_path()`), as does `revert_change()`.
+- Types in project headers (`project/types.hpp`): `compose_type()` puts a type's definition into a
+  header (in place of an earlier one), and `prepare_type_change()` checks the result before
+  `commit_type_change()` writes it: the header compiles and names the type, and every verified source
+  that includes it keeps its byte-exact functions. The agent's `define_type` tool is built on it.
+- `ProgramGenerations` (`project/project.hpp`): the program with the project's symbols, a new
+  generation whenever they change (`Project::symbols_version()`), which `decomp run` hands each
+  session it dispatches, so later sessions see the symbols earlier ones named with `set_symbol`.
 - Function status and history (`.decomp/functions/<fn>/`) and the per-function counters behind
   `decomp status` (`project/progress.hpp`), and the match setup a session needs
   (`project/setup.hpp`).

@@ -3,6 +3,7 @@
 
 #include "gui/views/changes_view.hpp"
 
+#include "agent/approvals.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
 #include "gui/views/text_diff.hpp"
@@ -34,7 +35,8 @@ private:
         const auto pending = commands.pending_approvals();
         ImGui::SeparatorText(std::format("Waiting for a decision ({})", pending.size()).c_str());
         if (pending.empty()) {
-            ImGui::TextDisabled(commands.live() ? "Nothing waits. With the policy \"ask\", verified matches wait here before they are saved."
+            ImGui::TextDisabled(commands.live() ? "Nothing waits. With the policy \"ask\", verified matches, symbol changes and type "
+                                                  "definitions wait here before they are made."
                                                 : "No live run.");
             return;
         }
@@ -73,24 +75,31 @@ private:
     void draw_policy(ViewContext& ctx, RunCommands& commands) {
         ImGui::SeparatorText("Policy");
         const auto* s = ctx.snapshot.get();
-        std::string current = "auto";
-        if (s && s->config.is_object())
-            if (auto p = s->config.find("policies"); p != s->config.end() && p->is_object()) current = json_string_or(*p, "write_source", "auto");
-        // Live changes are recorded as control events; the newest one wins.
-        if (s)
-            for (const auto& c : s->controls)
-                if (c.control.command == "set_policy" && c.control.target == "write_source") current = c.control.detail;
         ImGui::BeginDisabled(!commands.live());
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
-        if (ImGui::BeginCombo("Saving a verified match", current.c_str())) {
-            for (const char* name : {"auto", "ask", "deny"})
-                if (ImGui::Selectable(name, current == name))
-                    if (auto policy = agent::parse_approval_policy(name)) commands.set_policy("write_source", *policy);
-            ImGui::EndCombo();
+        for (std::string_view action : agent::approval_actions()) {
+            const std::string name(action);
+            std::string current(agent::to_string(agent::default_policy(action, true)));
+            if (s && s->config.is_object())
+                if (auto p = s->config.find("policies"); p != s->config.end() && p->is_object()) current = json_string_or(*p, name, current);
+            // Live changes are recorded as control events; the newest one wins.
+            if (s)
+                for (const auto& c : s->controls)
+                    if (c.control.command == "set_policy" && c.control.target == name) current = c.control.detail;
+            const char* label = action == agent::kWriteSourceAction ? "Saving a verified match"
+                                : action == agent::kSetSymbolAction ? "Symbol changes (set_symbol)"
+                                                                    : "Type definitions (define_type)";
+            ImGui::PushID(name.c_str());
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            if (ImGui::BeginCombo(label, current.c_str())) {
+                for (const char* policy_name : {"auto", "ask", "deny"})
+                    if (ImGui::Selectable(policy_name, current == policy_name))
+                        if (auto policy = agent::parse_approval_policy(policy_name)) commands.set_policy(name, *policy);
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::TextDisabled("For this run; Settings saves the project's default in decomp.json.");
+        ImGui::TextDisabled("For this run; Settings saves the project's defaults in decomp.json.");
     }
 
     void draw_changes(ViewContext& ctx) {

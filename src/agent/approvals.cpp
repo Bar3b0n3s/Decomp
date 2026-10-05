@@ -22,10 +22,21 @@ std::optional<ApprovalPolicy> parse_approval_policy(std::string_view text) {
     return std::nullopt;
 }
 
+std::span<const std::string_view> approval_actions() {
+    static constexpr std::string_view actions[] = {kWriteSourceAction, kSetSymbolAction, kDefineTypeAction};
+    return actions;
+}
+
+ApprovalPolicy default_policy(std::string_view action, bool can_ask) {
+    if (action == kSetSymbolAction || action == kDefineTypeAction) return can_ask ? ApprovalPolicy::ask : ApprovalPolicy::deny;
+    return ApprovalPolicy::automatic;
+}
+
 Result<std::map<std::string, ApprovalPolicy, std::less<>>> resolve_approval_policies(const std::map<std::string, std::string>& configured,
                                                                                      const std::vector<std::string>& overrides,
                                                                                      bool allow_ask) {
     std::map<std::string, ApprovalPolicy, std::less<>> out;
+    for (std::string_view action : approval_actions()) out[std::string(action)] = default_policy(action, allow_ask);
     auto add = [&](const std::string& action, const std::string& text, std::string_view origin) -> Result<void> {
         auto policy = parse_approval_policy(text);
         if (!policy) return make_error(ErrorCode::invalid_argument, "{}: approval policy '{}' for '{}' must be auto, ask or deny", origin, text, action);
@@ -45,7 +56,8 @@ Result<std::map<std::string, ApprovalPolicy, std::less<>>> resolve_approval_poli
         const auto eq = o.find('=');
         if (eq == std::string::npos || eq == 0) return make_error(ErrorCode::invalid_argument, "--policy '{}' must look like write_source=deny", o);
         const std::string action = o.substr(0, eq);
-        if (action != kWriteSourceAction) return make_error(ErrorCode::invalid_argument, "--policy: unknown action '{}' (known: write_source)", action);
+        if (std::ranges::find(approval_actions(), action) == approval_actions().end())
+            return make_error(ErrorCode::invalid_argument, "--policy: unknown action '{}' (known: write_source, set_symbol, define_type)", action);
         TRY(add(action, o.substr(eq + 1), "--policy"));
     }
     return out;

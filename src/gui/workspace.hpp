@@ -187,6 +187,7 @@ private:
     bool runs_loaded_ = false;
     u64 run_serial_ = 0;
     std::shared_ptr<const events::RunStateData> run_history_;
+    std::pair<std::chrono::system_clock::time_point, usize> symbol_changes_seen_{};  // the live run's latest symbol change
     std::string error_;
 };
 

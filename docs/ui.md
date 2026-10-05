@@ -410,9 +410,8 @@ until the new one is ready.
   hidden and reordered.
 - For the selected symbol, who set it (its source: analysis, import, export, PDB, agent or user) and
   its recorded edits: when, by whom (with the session), what changed and why.
-- Agent edits: every symbol change the agent made, grouped by session, each linked to its session.
-  Agent edits will be bindings recorded on a match (planned) and `set_symbol` calls from Phase 3, so
-  the tab stays empty until then.
+- Agent edits: every symbol change the agent made with `set_symbol`, grouped by session, each linked
+  to its session (bindings recorded on a match are planned).
 
 **Actions**
 
@@ -456,8 +455,8 @@ until the new one is ready.
 |---|---|
 | Write a verified source into its unit's source or `src/functions/` (`write_source`) | auto (mechanically verified) |
 | Record symbol bindings from a match (planned) | auto (can be switched to ask) |
-| Rename or create a symbol through `set_symbol` (Phase 3) | ask |
-| Change shared headers through `define_type` (Phase 3) | ask |
+| Rename, create or resize a symbol through `set_symbol` | ask (deny in `decomp run`, where nobody can answer) |
+| Add or replace a type in a shared header through `define_type` | ask (deny in `decomp run`) |
 
 **Data sources**
 

@@ -87,6 +87,17 @@ void Workspace::poll() {
             error_ = std::format("cannot open the run: {}", loaded.error().message);
         }
     }
+    // Symbols the live run's sessions changed (set_symbol): later sessions get a program generation that
+    // has them.
+    if (live_ && live_->state)
+        if (const auto snap = live_->state->snapshot(); snap && !snap->symbol_changes.empty()) {
+            const auto& last = snap->symbol_changes.back();
+            const auto marker = std::pair{last.time, snap->symbol_changes.size()};
+            if (marker != symbol_changes_seen_) {
+                symbol_changes_seen_ = marker;
+                reload_symbols();
+            }
+        }
     poll_analysis();
 }
 

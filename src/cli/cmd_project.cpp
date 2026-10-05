@@ -10,6 +10,7 @@
 #include "project/progress.hpp"
 #include "project/project.hpp"
 #include "project/units.hpp"
+#include "viewmodel/symbols_table.hpp"
 
 #include <format>
 #include <map>
@@ -346,6 +347,118 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
                     }
                 }
                 return 0;
+            }));
+        });
+    }
+    {
+        // The files Decomp wrote into the project (.decomp/changes.jsonl), and undoing one.
+        auto* cmd = app.add_subcommand("changes", "Files written into the project (verified sources, unit sources, headers), newest last");
+        auto* revert = cmd->add_subcommand("revert", "Undo a change: restore what it replaced, or remove the file it created");
+        auto index = std::make_shared<usize>(0);
+        revert->add_option("index", *index, "The change's number (from `decomp changes`)")->required();
+        revert->callback([&g, index] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                TRY_ASSIGN(auto run_lock, p.try_lock_active_run());
+                if (!run_lock) return make_error(ErrorCode::invalid_argument, "a run is active in this project; stop it before reverting");
+                const auto changes = p.changes();
+                if (*index >= changes.size()) return make_error(ErrorCode::not_found, "no change {} (there are {})", *index, changes.size());
+                TRY(p.revert_change(changes[*index], project::ChangeOrigin{SymbolSource::user, "", std::format("revert of change {}", *index)}));
+                if (g.json) print_json({{"reverted", *index}, {"path", changes[*index].value("path", "")}});
+                else std::println("reverted change {}: {}", *index, changes[*index].value("path", ""));
+                return 0;
+            }));
+        });
+        cmd->callback([&g, cmd] {
+            if (!cmd->get_subcommands().empty()) return;
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                const auto changes = p.changes();
+                if (g.json) {
+                    Json arr = Json::array();
+                    for (usize i = 0; i < changes.size(); ++i) {
+                        Json c = changes[i];
+                        c["index"] = i;
+                        arr.push_back(std::move(c));
+                    }
+                    print_json(arr);
+                    return 0;
+                }
+                if (changes.empty()) std::println("nothing written yet");
+                for (usize i = 0; i < changes.size(); ++i) {
+                    const Json& c = changes[i];
+                    const std::string session = c.value("session", "");
+                    std::println("{:>4}  {}  {}{}  {} {}{}", i, c.value("time", ""), c.value("path", ""), c["sha1"].is_null() ? " (removed)" : "",
+                                 c.value("source", ""), session.empty() ? std::string() : session + " ", c.value("reason", ""));
+                }
+                return 0;
+            }));
+        });
+    }
+    {
+        // Symbol edits made through Decomp (.decomp/symbols.log.jsonl), and undoing them.
+        auto* cmd = app.add_subcommand("symbols", "Symbol edits and their provenance (who, when, why)");
+        auto* log = cmd->add_subcommand("log", "Every recorded symbol edit, oldest first");
+        auto agent_only = std::make_shared<bool>(false);
+        log->add_flag("--agent", *agent_only, "Only the agent's edits");
+        log->callback([&g, agent_only] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                const auto records = vm::parse_symbol_log(p.symbol_log());
+                Json arr = Json::array();
+                for (const auto& r : records) {
+                    if (*agent_only && !r.by_agent()) continue;
+                    const std::string what = vm::describe_edit(r.before, r.after);
+                    if (g.json) {
+                        arr.push_back({{"index", r.index}, {"time", r.time_text}, {"va", r.va}, {"edit", what},
+                                       {"source", std::string(to_string(r.source))}, {"session", r.session}, {"reason", r.reason}});
+                        continue;
+                    }
+                    std::println("{:>4}  {}  {:#010x}  {}  ({}{}){}", r.index, r.time_text, r.va, what, to_string(r.source),
+                                 r.session.empty() ? std::string() : ", " + r.session, r.reason.empty() ? std::string() : ": " + r.reason);
+                }
+                if (g.json) print_json(arr);
+                else if (records.empty()) std::println("no symbol edits recorded");
+                return 0;
+            }));
+        });
+        auto* revert = cmd->add_subcommand("revert", "Undo symbol edits (the newest first); refused when a later edit changed the symbol");
+        auto indices = std::make_shared<std::vector<usize>>();
+        auto session = std::make_shared<std::string>();
+        revert->add_option("index", *indices, "The edits' numbers (from `decomp symbols log`)");
+        revert->add_option("--session", *session, "Every edit of this agent session");
+        revert->callback([&g, indices, session] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                TRY_ASSIGN(auto run_lock, p.try_lock_active_run());
+                if (!run_lock) return make_error(ErrorCode::invalid_argument, "a run is active in this project; stop it before reverting");
+                const auto records = vm::parse_symbol_log(p.symbol_log());
+                std::vector<usize> chosen = *indices;
+                if (!session->empty())
+                    for (usize i = 0; i < records.size(); ++i)
+                        if (records[i].session == *session) chosen.push_back(i);
+                if (chosen.empty()) return make_error(ErrorCode::invalid_argument, "name the edits to revert, or --session <id>");
+                std::map<u64, vm::SymbolState> current;
+                for (const Symbol& s : p.symbols()) current.emplace(s.va, vm::symbol_state(s));
+                TRY_ASSIGN(const auto plan, vm::plan_revert(records, chosen, [&](u64 va) -> std::optional<vm::SymbolState> {
+                    auto it = current.find(va);
+                    return it == current.end() ? std::nullopt : std::optional(it->second);
+                }));
+                for (const auto& step : plan) {
+                    const auto& r = records[step.record];
+                    TRY(p.set_symbol(step.edit, project::ChangeOrigin{SymbolSource::user, "",
+                                                                      std::format("revert of the edit of {}{}", r.time_text,
+                                                                                  r.session.empty() ? "" : " in session " + r.session)}));
+                    if (!g.json) std::println("reverted {}: {:#010x} {}", r.index, r.va, vm::describe_edit(r.before, r.after));
+                }
+                if (g.json) print_json({{"reverted", plan.size()}});
+                return 0;
+            }));
+        });
+        cmd->callback([&g, cmd] {
+            if (!cmd->get_subcommands().empty()) return;
+            throw CLI::RuntimeError(run(g, []() -> Result<int> {
+                return make_error(ErrorCode::invalid_argument, "decomp symbols log | revert <index...> [--session <id>]");
             }));
         });
     }

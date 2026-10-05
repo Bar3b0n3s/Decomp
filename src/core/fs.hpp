@@ -35,7 +35,9 @@ std::optional<stdfs::path> find_upwards(const stdfs::path& start, std::string_vi
 // A uniquely named directory removed (recursively) on destruction unless released.
 class TempDir {
 public:
-    static Result<TempDir> create(std::string_view prefix = "decomp");
+    // A new directory "<prefix>-<random>" in `parent` (created when missing), or in the system's temp
+    // directory; removed with everything in it when the TempDir goes.
+    static Result<TempDir> create(std::string_view prefix = "decomp", const stdfs::path& parent = {});
 
     TempDir(TempDir&& other) noexcept;
     TempDir& operator=(TempDir&& other) noexcept;

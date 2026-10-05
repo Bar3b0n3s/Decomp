@@ -7,6 +7,7 @@
 #include "project/text_format.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <set>
 
@@ -283,6 +284,30 @@ const Unit* matching_unit(const Project& project, const std::vector<Unit>& units
     if (!unit || unit->origin != UnitOrigin::analysis) return unit;
     std::error_code ec;
     return std::filesystem::exists(project.root() / fs::from_utf8(unit->source), ec) ? unit : nullptr;
+}
+
+std::vector<std::string> verified_sources_using(const Project& project, std::string_view word) {
+    auto uses = [&](std::string_view text) {
+        auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+        for (usize at = text.find(word); !word.empty() && at != std::string_view::npos; at = text.find(word, at + 1)) {
+            const bool starts = at == 0 || !ident(text[at - 1]);
+            const bool ends = at + word.size() >= text.size() || !ident(text[at + word.size()]);
+            if (starts && ends) return true;
+        }
+        return false;
+    };
+    std::vector<std::string> out;
+    if (auto units = load_units(project))
+        for (const auto& unit : *units) {
+            if (unit.kind != UnitKind::code || unit.source.empty()) continue;
+            if (auto text = fs::read_text(project.root() / fs::from_utf8(unit.source)); text && uses(*text)) out.push_back(unit.source);
+        }
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(project.root() / "src" / "functions", ec))
+        if (entry.path().extension() == ".cpp")
+            if (auto text = fs::read_text(entry.path()); text && uses(*text))
+                out.push_back("src/functions/" + fs::to_utf8(entry.path().filename()));
+    return out;
 }
 
 std::vector<const matching::UnitCheck*> failing_functions(const UnitChange& change, u64 except) {

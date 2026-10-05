@@ -109,10 +109,11 @@ std::optional<stdfs::path> find_upwards(const stdfs::path& start, std::string_vi
     }
 }
 
-Result<TempDir> TempDir::create(std::string_view prefix) {
+Result<TempDir> TempDir::create(std::string_view prefix, const stdfs::path& parent) {
     std::error_code ec;
-    auto base = stdfs::temp_directory_path(ec);
+    auto base = parent.empty() ? stdfs::temp_directory_path(ec) : parent;
     if (ec) return make_error(ErrorCode::io, "no temp directory: {}", ec.message());
+    if (!parent.empty()) stdfs::create_directories(base, ec);
     for (int attempt = 0; attempt < 16; ++attempt) {
         auto candidate = base / from_utf8(std::string(prefix) + "-" + unique_suffix());
         if (stdfs::create_directory(candidate, ec) && !ec) return TempDir(candidate);

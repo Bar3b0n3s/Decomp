@@ -61,6 +61,11 @@ public:
     ToolOutput read_memory(const Json& input);
     ToolOutput lookup_symbol(const Json& input);
     ToolOutput record_note(const Json& input);
+    ToolOutput set_symbol(const Json& input);
+    // Asks the approval gate (when there is one): nullopt when the action may go ahead (`approval` says
+    // how), else the tool's error.
+    std::optional<ToolOutput> approve(ApprovalRequest request, std::string& approval);
+    ToolOutput define_type(const Json& input);
     ToolOutput submit_result(const Json& input);
 
     // Saving a verified match asks this gate first (the setup's `cancelled` ends a wait).

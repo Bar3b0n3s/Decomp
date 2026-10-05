@@ -25,7 +25,7 @@ changing defaults.
 | `Client` | `agent/client.hpp` | Builds requests, applies retries and backoff, assembles messages from the stream (`MessageAccumulator` in `agent/messages.hpp`), captures response headers |
 | `Conversation` | `agent/conversation.hpp` | The append-only history. It serializes the frozen prefix once and produces each request body. |
 | `ToolRegistry` | `agent/tools.hpp` | Tool definitions, the input validator, and dispatch to handlers |
-| `MatchSession` | `agent/match_session.hpp` | Per-function state: target function, toolchain setup, attempts, best attempt and source. Implements the six tools and builds the brief and the status line. The frozen system prompt lives next to it. |
+| `MatchSession` | `agent/match_session.hpp` | Per-function state: target function, toolchain setup, attempts, best attempt and source. Implements the eight tools and builds the brief and the status line. The frozen system prompt lives next to it. |
 | `run_loop` | `agent/loop.hpp` | The tool-use loop. Returns a `LoopOutcome` whose status is `finished`, `end_turn_without_finish`, `refused`, `budget_exhausted`, `run_budget_exhausted`, `max_turns`, `aborted`, `stopped` or `error`. |
 | `LoopControl` | `agent/loop.hpp` | Thread-safe commands for a running loop: pause, resume, stop and abort (with a reason), guidance that can be retracted until it is sent, and live limits |
 | `run_function` | `agent/runner.hpp` | Runs one session: wires the session, tools, conversation and loop together, publishes events, writes the transcript and updates the project |
@@ -75,7 +75,7 @@ uses it to check the key.
 | `thinking` | `{type: "adaptive", display: "summarized"}` | Thinking cannot be disabled on this model. Summaries (and the short progress notes between tool calls) go to the transcript for supervision. The raw reasoning is never returned. |
 | `output_config.effort` | `"high"` | This model's API default is `medium`, so Decomp sets the effort explicitly. Effort is fixed for a session (see [caching](#prompt-caching)). |
 | `tool_choice` | `{type: "auto"}` | Forced tool choice (`any`/`tool`) is rejected with a 400 by this model. The prompt steers the model toward tools, and the loop nudges it when a turn ends without a call. |
-| `tools` | The [six tools](#tools), sorted by name, each with `strict: true` and `eager_input_streaming: true` | `strict` keeps inputs schema-valid. Eager streaming sends large inputs, such as a full translation unit, as they are generated. |
+| `tools` | The [eight tools](#tools), sorted by name, each with `strict: true` and `eager_input_streaming: true` | `strict` keeps inputs schema-valid. Eager streaming sends large inputs, such as a full translation unit, as they are generated. |
 | `system` | One text block (the frozen system prompt) with `cache_control: {type: "ephemeral"}` | An explicit cache breakpoint at the end of the shared prefix |
 | `cache_control` (top level) | `{type: "ephemeral"}` | Automatic caching of the growing conversation |
 | `fallbacks` | `"default"` | Server-side refusal fallbacks ([below](#refusals-and-fallbacks)) |
@@ -723,12 +723,137 @@ match returns "accepted: byte-exact match verified."; a rejected one returns an 
 starts with "not accepted: the submitted source is not byte-exact." followed by the diff. `give_up`
 returns "recorded: gave up (<reason>). Best match <n>%." and ends the session.
 
+### `set_symbol`
+
+```json
+{
+  "description": "Name a function or global whose purpose the code shows, or correct a symbol's kind or size (\"\" and 0 keep a field). Recorded with your reason in symbols.txt's log; later sessions see the change. The supervisor may have to approve it. The function you are matching, matched functions, and names verified sources use cannot change.",
+  "eager_input_streaming": true,
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "address": {
+        "description": "The symbol's address or current name (e.g. \"0x401100\", \"sub_401100\", \"data_403010\")",
+        "type": "string"
+      },
+      "kind": {
+        "description": "The new kind (\"\" keeps the kind)",
+        "enum": [
+          "",
+          "function",
+          "data"
+        ],
+        "type": "string"
+      },
+      "name": {
+        "description": "The new name: a C name, or an MSVC decorated name for C++ (\"\" keeps the name)",
+        "type": "string"
+      },
+      "reason": {
+        "description": "The evidence: what in the code shows it (recorded with the change)",
+        "type": "string"
+      },
+      "size": {
+        "description": "The new size in bytes (0 keeps the size)",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "address",
+      "kind",
+      "name",
+      "reason",
+      "size"
+    ],
+    "type": "object"
+  },
+  "name": "set_symbol",
+  "strict": true
+}
+```
+
+Names a function or global, creates a symbol at an address without one (with a name), or changes a
+symbol's kind (`function` or `data`) or size. `address` is resolved like `disassemble`'s target: an
+address or a name. An empty `name` or `kind` and a `size` of 0 keep that field, and at least one field
+must change. `reason` must not be empty. The result is an `is_error` and nothing changes when:
+
+- the symbol is the function the session matches (its history and source are kept under its name);
+- the new name already names another address, or holds spaces or control characters;
+- the symbol is a matched function: its verified source depends on its name, kind and size;
+- a verified source (a unit source or a function's own file) uses the current name: renaming it would
+  stop that source matching (the result lists the sources);
+- the [approval](#approvals) for `set_symbol` is declined ("Not done: the symbol change was declined
+  by the supervisor: ..." or "... is not allowed by this run's policy.").
+
+Otherwise `Project::set_symbol` applies it with provenance `agent`, the session and the reason
+(`.decomp/symbols.log.jsonl`; [project-format.md](project-format.md#symbolslogjsonl)), and a
+`symbol_changed` event is published. A renamed function's history and own source move to its new key.
+The session's brief and listings keep the names they started with; sessions dispatched later get a
+program generation with the change. The result reads "Done (auto): 0x401100: rename sub_401100 to
+PlayerUpdate. Recorded in symbols.txt; ...". `decomp symbols revert` and the GUI's Symbols view undo it.
+
+### `define_type`
+
+```json
+{
+  "description": "Add or replace a type in a shared project header under include/ (types.h by default), so this and later functions can #include it instead of declaring it themselves. The header must compile and every verified source that includes it must stay byte-exact. The supervisor may have to approve it.",
+  "eager_input_streaming": true,
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "declaration": {
+        "description": "Its complete definition as C/C++ source: a struct, class, union or enum definition or a typedef, with #pragma pack lines around it if it needs them",
+        "type": "string"
+      },
+      "header": {
+        "description": "The project header under include/ to put it in (\"\" for types.h)",
+        "type": "string"
+      },
+      "name": {
+        "description": "The type's name (e.g. \"Player\")",
+        "type": "string"
+      },
+      "reason": {
+        "description": "The evidence: what in the code shows the layout (recorded with the change)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "declaration",
+      "header",
+      "name",
+      "reason"
+    ],
+    "type": "object"
+  },
+  "name": "define_type",
+  "strict": true
+}
+```
+
+Adds a type to a project header under `include/` (`types.h` when `header` is empty), or replaces the
+header's definition of it in place (a forward declaration counts). `declaration` is one or more type
+declarations (`struct`, `class`, `union` and `enum` definitions, typedefs, `using` aliases), with
+`#pragma` lines such as `#pragma pack` around them, and one of them must declare `name`
+(`declared_types()` in `matching/source_items.hpp`). A new header starts with `#pragma once`. Before
+anything is written (`project::prepare_type_change()` in `project/types.hpp`):
+
+- the new header must compile (as C++, with the project's toolchain, flags and include directories,
+  `#include`d by a probe that names the type);
+- every verified source that includes the header (unit sources and functions' own files) is compiled
+  with the new header and with the current one, and each function byte-exact with the current one must
+  stay byte-exact. The result names the functions that would break otherwise.
+
+Then the [approval](#approvals) for `define_type` shows the header before and after, and the header
+is written through `write_project_file()` (recorded in `.decomp/changes.jsonl` with provenance `agent`,
+so `decomp changes revert` and the GUI's Changes view undo it). The result reads "Done (auto): Player is
+defined in include/types.h. Use it with #include \"types.h\"." The session's own compiles find the
+header at once, since the project's `include/` is among their include directories.
+
 ### Later tools
 
 | Tool | Phase | Purpose |
 |---|---|---|
-| `set_symbol` | 3 | Name an address, or set its kind and size. Provenance `agent`; subject to the approval policy. |
-| `define_type` | 3 | Add or replace a type declaration in the project's shared headers |
 | `get_type` | 4 | Return a type's exact layout (sizes and offsets read back from a PDB) |
 | `search_matched_examples` | Later | Find matched functions in the project with a similar shape, to reuse idioms |
 
@@ -744,7 +869,9 @@ then, the first `request` record of every transcript contains the full text. It 
    functions of a compiled x86/x64 program as C/C++ that the original compiler and flags turn into
    byte-identical code. This is preservation and interoperability work, and the user is entitled to
    study the binary.
-2. *Tools and scope.* One target function per conversation, and what each of the six tools is for.
+2. *Tools and scope.* One target function per conversation, and what each of the eight tools is for.
+   `set_symbol` and `define_type` record facts the code establishes, with the evidence as the reason;
+   they never change the function being matched, and a declined one is not an error in the work.
 3. *Method.* Read the brief; work out the signature, calling convention and types (disassembling
    callers or callees when needed); write a first complete candidate and compile it early; fix
    structural differences before operand-level ones.
@@ -867,21 +994,25 @@ the session's own retry delay. Waits end early on Abort. Each change is publishe
 
 ### Approvals
 
-Some actions can need the supervisor's approval. The one gated action is `write_source`: saving a
-verified match into its unit's source or to `src/functions/`. Each action has a policy:
+Some actions can need the supervisor's approval. Three actions are gated: `write_source`, saving a
+verified match into its unit's source or to `src/functions/`; `set_symbol`, a symbol change; and
+`define_type`, a type definition in a project header. Each action has a policy:
 
 | Policy | Effect |
 |---|---|
-| `auto` (default) | The source is saved at once. |
-| `ask` | The match waits: `approval_requested` is published, the session's phase becomes "waiting for approval", and the supervisor approves or denies it, with an optional reason, in the GUI's Changes and approvals view. Stop does not cancel the wait; Abort does. Only the GUI can answer, so `decomp run` refuses `ask` (an `ask` in `decomp.json` must be overridden with `--policy`). |
-| `deny` | Matches are never saved. |
+| `auto` | The action happens at once. The default for `write_source`. |
+| `ask` | The action waits: `approval_requested` is published, the session's phase becomes "waiting for approval", and the supervisor approves or denies it, with an optional reason, in the GUI's Changes and approvals view. Stop does not cancel the wait; Abort does. Only the GUI can answer, so `decomp run` refuses `ask` (an `ask` in `decomp.json` must be overridden with `--policy`). The default for `set_symbol` and `define_type` in the GUI. |
+| `deny` | The action never happens. The default for `set_symbol` and `define_type` in `decomp run` and `decomp agent`. |
 
-The check comes after the byte-exact verification and before the write. A denied match is not saved,
+An action that `decomp.json` leaves out gets its default (`agent::default_policy()`), so the agent
+renames symbols and defines types only where someone answers or the project allows it.
+
+For `write_source`, the check comes after the byte-exact verification and before the write. A denied match is not saved,
 and the model gets a tool error: "Verified byte-exact, but the supervisor declined saving it ..."
 with the reason, so it can adjust the source or give up. A declined source is not submitted again
 automatically at the end of the session. Policies come from `agent.approvals` in `decomp.json`
-(`{"write_source": "ask"}`), `decomp run --policy write_source=deny`, or the GUI, which can change a
-live run's policy. `file_written` events and `.decomp/changes.jsonl` record how each write was
+(`{"write_source": "ask", "set_symbol": "auto"}`), `decomp run --policy set_symbol=auto` (repeatable;
+any of the three actions), or the GUI, which can change a live run's policies. `file_written` events and `.decomp/changes.jsonl` record how each write was
 approved.
 
 ### Resuming
@@ -977,9 +1108,11 @@ roll up per turn (`turn_finished` events), per session (the outcome, `summary.js
   and never launches the target.
 - **Writes are confined to the project.** The agent has no general file-writing tool. Decomp itself
   writes only to unit sources (`src/<unit>.cpp`, at the paths `units.txt` gives) and
-  `src/functions/<fn>.cpp` (verified sources), `symbols.txt` (statuses, scores and spend) and
-  `.decomp/` (history, runs, build directories, cache). Paths come from `units.txt` and sanitized
-  function keys, never from model output.
+  `src/functions/<fn>.cpp` (verified sources), headers under `include/` (`define_type`, at a header
+  name checked to stay inside it), `symbols.txt` (statuses, scores, spend and `set_symbol`'s changes)
+  and `.decomp/` (history, runs, build directories, cache). Paths come from `units.txt`, checked
+  header names and sanitized function keys; every write of a source or header goes through
+  `write_project_file()`, which refuses paths outside the project or inside `.decomp/`.
 - **Compiler inputs are checked (planned).** Each candidate compiles in a fresh directory. Rejecting
   `#include` directives with absolute paths or `..` escapes outside the configured include directories,
   as well as MSVC `#import`, is planned; until then a candidate could pull local files into

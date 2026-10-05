@@ -6,6 +6,7 @@
 #include "core/log.hpp"
 #include "core/strings.hpp"
 #include "matching/unit_source.hpp"
+#include "project/types.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -46,6 +47,8 @@ You work on exactly one target function per conversation. Tools:
 - read_memory: read data from the target image (strings, tables, constants, initial values of globals).
 - lookup_symbol: find symbols by name or address.
 - record_note: save a short note for future attempts on this function (what you learned, what did not work).
+- set_symbol: name a function or global the code shows you the purpose of (a callee, a table, a counter), or correct a symbol's kind or size. Later sessions see the name; the supervisor may have to approve it.
+- define_type: put a struct, class, union, enum or typedef into a shared project header (include/types.h unless you name another), so this and later functions can #include it. It is checked against every verified source that includes the header; the supervisor may have to approve it.
 - submit_result: finish with outcome "matched" and the exact source that matched (it is re-verified; only byte-exact results are accepted), or "give_up" with your best source and the reason.
 
 How to work:
@@ -64,6 +67,8 @@ Matching tips (MSVC and clang-cl):
 - String literals and floating-point constants are compared by value, so their content must be exact.
 - When the diff says only registers or stack offsets differ, you are close: try small reorderings rather than rewriting.
 - Listing notation: `imagerel X` (MSVC x64 `[r8+rcx*4+imagerel X]` after `lea r8, __ImageBase`) is an ordinary indexed access to X, such as X[i]. A call annotated "via thunk" goes to the named function; the linker made the thunk, so it is not part of your source.
+
+Use set_symbol and define_type for facts the code establishes, with the evidence as the reason; they never change the function you are matching, and a declined one is not an error in your work.
 
 Keep text between tool calls short; put reasoning into code and notes. When the result is byte-exact, call submit_result with outcome "matched" and that exact source. If you are stuck after many attempts with no improvement, record a note with what you learned and call submit_result with outcome "give_up", your best source, and the reason.)";
     return prompt;
@@ -109,6 +114,20 @@ Json MatchSession::tool_schemas() {
     });
     t["lookup_symbol"] = object_schema({{"query", string_prop("Name, part of a name, or address")}});
     t["record_note"] = object_schema({{"text", string_prop("Short note for future attempts on this function")}});
+    t["set_symbol"] = object_schema({
+        {"address", string_prop("The symbol's address or current name (e.g. \"0x401100\", \"sub_401100\", \"data_403010\")")},
+        {"name", string_prop("The new name: a C name, or an MSVC decorated name for C++ (\"\" keeps the name)")},
+        {"kind", {{"type", "string"}, {"enum", {"", "function", "data"}}, {"description", "The new kind (\"\" keeps the kind)"}}},
+        {"size", {{"type", "integer"}, {"description", "The new size in bytes (0 keeps the size)"}}},
+        {"reason", string_prop("The evidence: what in the code shows it (recorded with the change)")},
+    });
+    t["define_type"] = object_schema({
+        {"name", string_prop("The type's name (e.g. \"Player\")")},
+        {"declaration", string_prop("Its complete definition as C/C++ source: a struct, class, union or enum definition or a typedef, "
+                                    "with #pragma pack lines around it if it needs them")},
+        {"header", string_prop("The project header under include/ to put it in (\"\" for types.h)")},
+        {"reason", string_prop("The evidence: what in the code shows the layout (recorded with the change)")},
+    });
     t["submit_result"] = object_schema({
         {"outcome", {{"type", "string"}, {"enum", {"matched", "give_up"}}, {"description", "matched (re-verified) or give_up"}}},
         {"source", string_prop("The matching source, or your best attempt when giving up")},
@@ -134,6 +153,14 @@ std::string MatchSession::tool_description(std::string_view name) {
     if (name == "record_note")
         return "Save a short note for future attempts on this function (what you learned, what did not work). Notes "
                "persist across sessions.";
+    if (name == "set_symbol")
+        return "Name a function or global whose purpose the code shows, or correct a symbol's kind or size (\"\" and 0 keep "
+               "a field). Recorded with your reason in symbols.txt's log; later sessions see the change. The supervisor may have "
+               "to approve it. The function you are matching, matched functions, and names verified sources use cannot change.";
+    if (name == "define_type")
+        return "Add or replace a type in a shared project header under include/ (types.h by default), so this and later "
+               "functions can #include it instead of declaring it themselves. The header must compile and every verified "
+               "source that includes it must stay byte-exact. The supervisor may have to approve it.";
     if (name == "submit_result")
         return "Finish this function. Use outcome \"matched\" with the exact source once compile_and_diff reported a "
                "byte-exact match (it is re-verified), or \"give_up\" with your best source and the reason when stuck.";
@@ -146,6 +173,8 @@ ToolOutput MatchSession::call(std::string_view tool, const Json& input) {
     if (tool == "read_memory") return read_memory(input);
     if (tool == "lookup_symbol") return lookup_symbol(input);
     if (tool == "record_note") return record_note(input);
+    if (tool == "set_symbol") return set_symbol(input);
+    if (tool == "define_type") return define_type(input);
     if (tool == "submit_result") return submit_result(input);
     return ToolOutput::error(std::format("unknown tool '{}'", tool));
 }
@@ -382,6 +411,133 @@ ToolOutput MatchSession::record_note(const Json& input) {
         if (auto r = project_->append_note(symbol_, text); !r) return ToolOutput::error("could not save the note: " + r.error().message);
     }
     return ToolOutput::ok("noted");
+}
+
+std::optional<ToolOutput> MatchSession::approve(ApprovalRequest request, std::string& approval) {
+    approval = "auto";
+    if (!approvals_) return std::nullopt;
+    const std::string action = request.action;
+    const ApprovalDecision decision = approvals_->request(std::move(request), setup_.cancelled, worker_);
+    if (decision.verdict == "cancelled") return ToolOutput::error("The session ended before the supervisor decided; nothing was changed.");
+    if (!decision.approved())
+        return ToolOutput::error(std::format("Not done: {} {}{}", action == kSetSymbolAction ? "the symbol change" : "the type definition",
+                                             decision.by == "policy" ? "is not allowed by this run's policy"
+                                                                     : "was declined by the supervisor",
+                                             decision.reason.empty() ? "." : ": " + decision.reason + "."));
+    approval = decision.by == "policy" ? "auto" : "approved by " + decision.by;
+    return std::nullopt;
+}
+
+ToolOutput MatchSession::set_symbol(const Json& input) {
+    if (!project_) return ToolOutput::error("set_symbol needs a project; this session has none.");
+    const std::string address(trim(json_string_or(input, "address", "")));
+    const std::string name(trim(json_string_or(input, "name", "")));
+    const std::string kind_text(trim(json_string_or(input, "kind", "")));
+    const i64 size = json_int_or(input, "size", 0);
+    const std::string reason(trim(json_string_or(input, "reason", "")));
+    if (address.empty()) return ToolOutput::error("`address` is empty.");
+    if (name.empty() && kind_text.empty() && size == 0) return ToolOutput::error("Nothing to change: give a name, a kind or a size.");
+    if (reason.empty()) return ToolOutput::error("Give the reason: what in the code shows it. It is recorded with the change.");
+    const auto va = program_.resolve(address);
+    if (!va) return ToolOutput::error(std::format("No symbol or address '{}'.", address));
+    if (*va == va_)
+        return ToolOutput::error("The function this session matches cannot be changed during the session (its history and source are "
+                                 "kept under its name). Record a note with what you found instead.");
+    const Symbol* current = program_.symbols().at(*va);
+    if (!name.empty()) {
+        if (name.size() > 512 || std::ranges::any_of(name, [](char c) { return static_cast<unsigned char>(c) <= ' '; }))
+            return ToolOutput::error("A name has no spaces or control characters.");
+        if (auto other = program_.resolve(name); other && *other != *va)
+            return ToolOutput::error(std::format("'{}' already names {:#x}.", name, *other));
+    }
+    std::optional<SymbolKind> kind;
+    if (!kind_text.empty()) {
+        kind = symbol_kind_from_string(kind_text);
+        if (kind != SymbolKind::function && kind != SymbolKind::data) return ToolOutput::error("`kind` is \"function\", \"data\" or \"\".");
+    }
+    if (size < 0 || size > 0x1000000) return ToolOutput::error("`size` is a byte count (0 keeps the size).");
+    if (!current && name.empty()) return ToolOutput::error(std::format("{:#x} has no symbol yet: a new one needs a name.", *va));
+    // What verified sources depend on stays.
+    if (current) {
+        if (current->kind == SymbolKind::function && project_->function_info(*va).status == project::FunctionStatus::matched)
+            return ToolOutput::error(std::format("{} is matched: its verified source depends on its name, kind and size.", current->display));
+        if (!name.empty())
+            for (const std::string& used : {qualified_name(current->name), current->pdb_name}) {
+                if (used.empty()) continue;
+                if (const auto sources = project::verified_sources_using(*project_, used); !sources.empty())
+                    return ToolOutput::error(std::format("'{}' is used by verified sources ({}): renaming it would stop them matching.", used,
+                                                         join(sources, ", ")));
+            }
+    }
+    project::SymbolEdit edit;
+    edit.va = *va;
+    if (!name.empty()) edit.name = name;
+    edit.kind = kind;
+    if (size > 0) edit.size = static_cast<u32>(size);
+
+    // What symbols.txt would hold before and after, for the supervisor.
+    Symbol after = current ? *current : Symbol{};
+    if (!current) {
+        after.va = *va;
+        after.kind = SymbolKind::function;
+    }
+    if (edit.name) after.name = *edit.name;
+    if (edit.kind) after.kind = *edit.kind;
+    if (edit.size) after.size = *edit.size;
+    after.source = SymbolSource::agent;
+    std::vector<std::string> what;
+    if (edit.name) what.push_back(current ? std::format("rename {} to {}", qualified_name(current->name), *edit.name) : std::format("name it {}", *edit.name));
+    if (edit.kind && (!current || current->kind != *edit.kind)) what.push_back(std::format("make it {}", to_string(*edit.kind)));
+    if (edit.size && (!current || current->size != *edit.size)) what.push_back(std::format("size {:#x}", *edit.size));
+    const std::string summary = std::format("{:#x}: {}", *va, what.empty() ? std::string("no change") : join(what, ", "));
+    const std::string display = symbol_.display.empty() ? symbol_.name : symbol_.display;
+    std::string approval;
+    if (auto refused = approve(ApprovalRequest{std::string(kSetSymbolAction), session_id_, display, *va, "symbols.txt", summary,
+                                               project::format_symbol_line(after, nullptr) + "\n",
+                                               current ? project::format_symbol_line(*current, nullptr) + "\n" : std::string()},
+                               approval))
+        return *refused;
+    auto change = project_->set_symbol(edit, project::ChangeOrigin{SymbolSource::agent, session_id_, reason});
+    if (!change) return ToolOutput::error("Not done: " + change.error().message);
+    const Symbol& done = change->after ? *change->after : after;
+    publish(events::SymbolChanged{*va, change->before ? change->before->name : std::string(), done.name, std::string(to_string(done.kind)),
+                                  done.size, "agent", session_id_});
+    return ToolOutput::ok(std::format("Done ({}): {}. Recorded in symbols.txt; later sessions see it, while this session's brief and "
+                                      "listings keep the names they started with.",
+                                      approval, summary));
+}
+
+ToolOutput MatchSession::define_type(const Json& input) {
+    if (!project_) return ToolOutput::error("define_type needs a project; this session has none.");
+    const std::string name(trim(json_string_or(input, "name", "")));
+    const std::string declaration = json_string_or(input, "declaration", "");
+    const std::string header(trim(json_string_or(input, "header", "")));
+    const std::string reason(trim(json_string_or(input, "reason", "")));
+    if (name.empty() || trim(declaration).empty()) return ToolOutput::error("Give the type's name and its definition.");
+    if (reason.empty()) return ToolOutput::error("Give the reason: what in the code shows the layout. It is recorded with the change.");
+    const std::string display = symbol_.display.empty() ? symbol_.name : symbol_.display;
+    for (int attempt = 0;; ++attempt) {
+        auto change = project::prepare_type_change(*project_, program_, setup_, name, declaration, header);
+        if (!change) return ToolOutput::error("Not defined: " + change.error().message);
+        std::string approval = "auto";
+        if (attempt == 0) {
+            const std::string summary =
+                std::format("define {} in {} ({}{})", name, change->header,
+                            change->base.empty() ? "new header" : change->replaced ? "replaces its definition" : "added",
+                            change->sources.empty() ? std::string() : std::format("; {} verified source(s) include it and still verify", change->sources.size()));
+            if (auto refused = approve(ApprovalRequest{std::string(kDefineTypeAction), session_id_, display, va_, change->header, summary,
+                                                       change->content, change->base},
+                                       approval))
+                return *refused;
+        }
+        auto written = project::commit_type_change(*project_, *change, project::ChangeOrigin{SymbolSource::agent, session_id_, reason},
+                                                   project::ChangeSubject{symbol_.name, va_, {}, {}});
+        if (!written && written.error().code == ErrorCode::conflict && attempt < 3) continue;  // another writer changed the header
+        if (!written) return ToolOutput::error("Not defined: " + written.error().message);
+        publish(events::FileWritten{change->header, "type definition", written->size, written->sha1, session_id_, approval});
+        return ToolOutput::ok(std::format("Done ({}): {} is defined in {}. Use it with #include \"{}\".", approval, name, change->header,
+                                          change->header.substr(std::string_view("include/").size())));
+    }
 }
 
 ToolOutput MatchSession::submit_result(const Json& input) {

@@ -535,5 +535,18 @@ TEST_CASE("resolve_approval_policies: decomp.json, overrides and where ask is al
     CHECK_FALSE(resolve_approval_policies({}, {"write_source"}, false));
     CHECK_FALSE(resolve_approval_policies({}, {"write_everything=auto"}, false));
     CHECK_FALSE(resolve_approval_policies({}, {"write_source=sometimes"}, false));
-    CHECK(resolve_approval_policies({}, {}, false)->empty());
+    // Every gated action gets a policy: saving a verified match is automatic; symbol and type edits ask
+    // where someone can answer, and are denied where nobody can, unless configured.
+    const auto cli = resolve_approval_policies({}, {}, false).value();
+    CHECK(cli.size() == approval_actions().size());
+    CHECK(cli.at("write_source") == ApprovalPolicy::automatic);
+    CHECK(cli.at("set_symbol") == ApprovalPolicy::deny);
+    CHECK(cli.at("define_type") == ApprovalPolicy::deny);
+    const auto gui = resolve_approval_policies({}, {}, true).value();
+    CHECK(gui.at("set_symbol") == ApprovalPolicy::ask);
+    CHECK(gui.at("define_type") == ApprovalPolicy::ask);
+    r = resolve_approval_policies({{"set_symbol", "auto"}}, {"define_type=auto"}, false);
+    REQUIRE(r);
+    CHECK(r->at("set_symbol") == ApprovalPolicy::automatic);
+    CHECK(r->at("define_type") == ApprovalPolicy::automatic);
 }

@@ -230,6 +230,7 @@ struct Project::State {
     std::map<u64, Symbol> symbols;  // symbols.txt, by address
     std::shared_ptr<const std::map<u64, FunctionInfo>> functions = std::make_shared<const std::map<u64, FunctionInfo>>();
     std::atomic<u64> version{1};
+    std::atomic<u64> symbols_version{1};  // the symbols alone (not function states): set_symbol, saves, units, reloads
     std::filesystem::file_time_type mtime{};
     std::uintmax_t size = 0;
 };
@@ -301,6 +302,7 @@ Result<void> Project::load_symbols_file(State& state) const {
     state.symbols = std::move(symbols);
     state.functions = std::make_shared<const std::map<u64, FunctionInfo>>(std::move(functions));
     ++state.version;
+    ++state.symbols_version;
     return {};
 }
 
@@ -372,6 +374,7 @@ Result<void> Project::save_symbols(const SymbolDb& symbols) {
     TRY_ASSIGN(auto file_lock, lock_project());
     state_->symbols.clear();
     for (const auto& [va, s] : symbols) state_->symbols[va] = s;
+    ++state_->symbols_version;
     return write_symbols_locked(*state_);
 }
 
@@ -415,7 +418,7 @@ Result<void> Project::modify_functions(std::span<const u64> vas, const std::func
     return write_symbols_locked(*state_);
 }
 
-Result<SymbolChange> Project::set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin) {
+Result<SymbolChange> Project::set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin) const {
     if (edit.va == 0) return make_error(ErrorCode::invalid_argument, "set_symbol: no address");
     if (edit.name && trim(*edit.name).empty()) return make_error(ErrorCode::invalid_argument, "set_symbol: empty name");
     std::lock_guard lock(state_->mutex);
@@ -446,6 +449,7 @@ Result<SymbolChange> Project::set_symbol(const SymbolEdit& edit, const ChangeOri
         state_->symbols[edit.va] = s;
         change.after = std::move(s);
     }
+    ++state_->symbols_version;
     TRY(write_symbols_locked(*state_));
     Json record = {{"time", now_iso()},
                    {"va", edit.va},
@@ -455,6 +459,17 @@ Result<SymbolChange> Project::set_symbol(const SymbolEdit& edit, const ChangeOri
                    {"session", origin.session},
                    {"reason", origin.reason}};
     TRY(fs::append_text(root_ / ".decomp" / "symbols.log.jsonl", dump_compact(record) + "\n"));
+    // A function's history is kept under its name: it follows a rename (when nothing is there yet).
+    if (change.before && change.after && change.before->kind == SymbolKind::function && change.after->kind == SymbolKind::function &&
+        safe_function_name(*change.before) != safe_function_name(*change.after)) {
+        std::error_code ec;
+        for (const auto& [from, to] : {std::pair{function_dir(*change.before), function_dir(*change.after)},
+                                       std::pair{matched_source_path(*change.before), matched_source_path(*change.after)}}) {
+            if (!std::filesystem::exists(from, ec) || std::filesystem::exists(to, ec)) continue;
+            std::filesystem::rename(from, to, ec);
+            if (ec) log::warn("cannot move {} to {}: {}", fs::to_utf8(from), fs::to_utf8(to), ec.message());
+        }
+    }
     return change;
 }
 
@@ -469,7 +484,10 @@ Result<usize> Project::assign_objects(const std::map<u64, std::string>& objects)
         it->second.object = object;
         ++changed;
     }
-    if (changed) TRY(write_symbols_locked(*state_));
+    if (changed) {
+        ++state_->symbols_version;
+        TRY(write_symbols_locked(*state_));
+    }
     return changed;
 }
 
@@ -489,6 +507,28 @@ Result<bool> Project::reload_if_changed() {
 }
 
 u64 Project::version() const { return state_->version.load(); }
+u64 Project::symbols_version() const { return state_->symbols_version.load(); }
+
+Result<std::shared_ptr<ProgramGenerations>> ProgramGenerations::open(const Project& project) {
+    auto out = std::shared_ptr<ProgramGenerations>(new ProgramGenerations(project));
+    std::optional<std::filesystem::path> pdb;
+    if (!project.config().pdb.empty()) pdb = project.root() / fs::from_utf8(project.config().pdb);
+    TRY(project.open_program());  // the target is still the one decomp.json describes
+    TRY_ASSIGN(Program base, Program::open(project.target_path(), OpenOptions{.pdb = pdb, .discover = false}));
+    out->base_ = std::make_unique<const Program>(std::move(base));
+    out->current();
+    return out;
+}
+
+std::shared_ptr<const Program> ProgramGenerations::current() {
+    std::lock_guard lock(mutex_);
+    if (current_ && version_ == project_.symbols_version()) return current_;
+    version_ = project_.symbols_version();
+    SymbolDb merged = base_->symbols();
+    for (const auto& s : project_.symbols()) merged.add(s);
+    current_ = std::make_shared<const Program>(base_->with_symbols(std::move(merged)));
+    return current_;
+}
 
 std::filesystem::path Project::function_dir(const Symbol& fn) const {
     return root_ / ".decomp" / "functions" / fs::from_utf8(safe_function_name(fn));

@@ -134,6 +134,10 @@ struct SavedSource {
 Result<SavedSource> save_verified_function(const Project& project, const Program& program, const matching::MatchSetup& setup, const Symbol& fn,
                                            const std::string& source, const ChangeOrigin& origin);
 
+// The verified sources (unit sources and functions' own files, project-relative) that use `word` as a
+// whole identifier: what renaming a symbol of that name would stop matching.
+std::vector<std::string> verified_sources_using(const Project& project, std::string_view word);
+
 // The functions of a prepared change that are not byte-exact in it, other than `except`.
 std::vector<const matching::UnitCheck*> failing_functions(const UnitChange& change, u64 except = 0);
 // The failing functions (other than `except`) that were byte-exact in the unit source the change starts

@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <span>
 #include <vector>
 
 namespace decomp::agent {
@@ -28,20 +29,30 @@ std::optional<ApprovalPolicy> parse_approval_policy(std::string_view text);
 
 // Saving a byte-exact source into the project's src/ tree.
 inline constexpr std::string_view kWriteSourceAction = "write_source";
+// Renaming, creating or resizing a symbol (the set_symbol tool).
+inline constexpr std::string_view kSetSymbolAction = "set_symbol";
+// Adding or replacing a type in a project header under include/ (the define_type tool).
+inline constexpr std::string_view kDefineTypeAction = "define_type";
 
-// The policies of decomp.json's agent.approvals with `overrides` ("write_source=deny", e.g. from the
-// command line) applied on top. Without `allow_ask` (command-line runs, where nobody can answer) an
-// "ask" policy is an error.
+// The gated actions, in the order the GUI lists them.
+std::span<const std::string_view> approval_actions();
+// An action's policy when nothing configures one: write_source is automatic (the match is verified);
+// set_symbol and define_type ask where someone can answer (`can_ask`, the GUI) and are denied elsewhere.
+ApprovalPolicy default_policy(std::string_view action, bool can_ask);
+
+// Every gated action's policy: its default_policy(), then decomp.json's agent.approvals, then
+// `overrides` ("write_source=deny", e.g. from the command line). Without `allow_ask` (command-line
+// runs, where nobody can answer) an "ask" policy is an error.
 Result<std::map<std::string, ApprovalPolicy, std::less<>>> resolve_approval_policies(const std::map<std::string, std::string>& configured,
                                                                                      const std::vector<std::string>& overrides,
                                                                                      bool allow_ask);
 
 struct ApprovalRequest {
-    std::string action;  // kWriteSourceAction
+    std::string action;  // kWriteSourceAction, kSetSymbolAction or kDefineTypeAction
     std::string session;
     std::string function;  // display name
     u64 va = 0;
-    std::string path;      // project-relative path of the file to write
+    std::string path;      // project-relative path of the file to write (symbols.txt for set_symbol)
     std::string summary;   // one line for lists
     std::string content;   // the new content
     std::string previous;  // what it replaces (empty for a new file)

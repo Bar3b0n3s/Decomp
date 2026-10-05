@@ -243,12 +243,20 @@ move.
 ## `include/`
 
 Shared headers: declarations of types, globals and functions used by more than one source. `init`
-creates the directory empty and lists it in `include_dirs`. In the slice, the agent writes
-self-contained translation units and does not change headers; its brief lists the files found in the
-include directories. The headers enter the compile cache key through their paths, sizes and
-modification times ([matching.md](matching.md#compile-cache)). From Phase 3, the `define_type` tool
-edits headers under the approval policy. From Phase 4, headers are the source of truth for types, and
-their layouts are checked against the PDB.
+creates the directory empty and lists it in `include_dirs`. Sessions write self-contained translation
+units, and their brief lists the files found in the include directories. The headers enter the compile
+cache key through their paths, sizes and modification times
+([matching.md](matching.md#compile-cache)).
+
+The agent's `define_type` tool adds a type to a header here (`types.h` unless it names another, such as
+`game/player.h`), or replaces the header's definition of the type in place, under the approval policy
+([agent.md](agent.md#define_type)). A new header starts with `#pragma once`. Before it is written, the
+new header must compile and name the type, and every verified source that includes it (unit sources and
+functions' own files) must keep its byte-exact functions byte-exact. Each write is recorded in
+[`.decomp/changes.jsonl`](#changesjsonl-and-blobs) and can be reverted. Header names are relative to
+`include/`, written with forward slashes, without `.` or `..`, and end in `.h`, `.hh`, `.hpp` or
+`.hxx`. From Phase 4, headers are the source of truth for types, and their layouts are checked against
+the PDB.
 
 ## Unit sources
 
@@ -470,8 +478,8 @@ The `run.json` of the same run, with one queue entry:
 
 ### `changes.jsonl` and `blobs/`
 
-Every file Decomp writes into the project (today: verified sources, in unit sources and
-`src/functions/`) is recorded in `changes.jsonl`, one JSON object per write, and the content it
+Every file Decomp writes into the project (verified sources, in unit sources and `src/functions/`,
+and the headers `define_type` writes) is recorded in `changes.jsonl`, one JSON object per write, and the content it
 replaced is kept in `blobs/<sha1 of that content>`, so any write can be undone:
 
 ```json
@@ -488,7 +496,8 @@ replaced is kept in `blobs/<sha1 of that content>`, so any write can be undone:
 | `unit`, `functions` | For a unit source: the unit, and the addresses of the functions the written source holds |
 
 A record with `sha1: null` removed the file (`decomp units emit` removes the files it took in).
-Reverting a change (`Project::revert_change`, the GUI's Changes and approvals view) restores the
+`decomp changes` lists the changes with their numbers (`--json` for the records). Reverting a change
+(`decomp changes revert <n>`, `Project::revert_change`, the GUI's Changes and approvals view) restores the
 content it replaced, or removes the file when there was none, and appends its own record with
 `reason: "revert"`; the reverted content goes to `blobs/` too. Only a file still holding the content
 of that change can be reverted, so later changes are reverted first. A function of the change that no
@@ -498,9 +507,17 @@ attempts and best source stay.
 ### `symbols.log.jsonl`
 
 Every symbol edit made through Decomp's project API (`Project::set_symbol`: renames, new symbols, kind
-and size changes, removals) appends `{time, va, before, after, source, session, reason}`, where `before` and `after` hold the symbol's `name`, `kind`, `size` and `source` (`null` when
-it did not exist). `symbols.txt` holds the result; the log holds the provenance. Edits made to
-`symbols.txt` by hand are not logged.
+and size changes, removals) appends `{time, va, before, after, source, session, reason}`, where `before`
+and `after` hold the symbol's `name`, `kind`, `size` and `source` (`null` when it did not exist). The
+agent's `set_symbol` tool records `source: "agent"` with its session and the evidence it gave as the
+reason ([agent.md](agent.md#set_symbol)). `symbols.txt` holds the result; the log holds the provenance.
+Edits made to `symbols.txt` by hand are not logged. A renamed function's history
+(`.decomp/functions/<fn>/`) and own source move to its new key.
+
+`decomp symbols log` lists the edits with their numbers (`--agent` for the agent's, `--json` for the
+records). `decomp symbols revert <n>...` (or `--session <id>` for every edit of an agent session) undoes
+edits, newest first, as the GUI's Symbols view does: each symbol gets back what it had before, recorded
+as a user edit. A revert is refused when a later edit changed the symbol.
 
 ### Locks
 
