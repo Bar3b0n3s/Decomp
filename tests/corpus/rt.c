@@ -7,7 +7,7 @@ typedef unsigned __int64 size_t;
 typedef unsigned int size_t;
 #endif
 
-#pragma function(memset, memcpy, memcmp)
+#pragma function(memset, memcpy, memcmp, memmove)
 void* memset(void* dst, int c, size_t n) {
     unsigned char* d = (unsigned char*)dst;
     while (n--) *d++ = (unsigned char)c;
