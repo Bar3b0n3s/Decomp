@@ -163,6 +163,7 @@ Result<Program> Program::open(const std::filesystem::path& binary, const OpenOpt
         for (const auto& procedure : reader->procedures())
             if (procedure.type_index != 0) types->types.function_types.emplace(p.image_->image_base() + procedure.rva, procedure.type_index);
         types->types.stream = reader->take_types();
+        for (const auto& [index, file] : reader->type_sources()) types->types.sources.emplace(types->types.stream.key_of(index), file);
         p.pdb_types_ = std::move(types);
     }
     p.fold_linker_thunks();

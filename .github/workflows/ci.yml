@@ -98,6 +98,11 @@ jobs:
               ./bin/Release/decomp init tests/fixtures/$arch/$name.exe --dir "$p" --toolchain clang-cl-$arch
               cp tests/fixtures/include/$name.h "$p/include/"
               ./bin/Release/decomp -C "$p" types check
+              # Declared from the PDB instead, they compile to the same layouts.
+              q="$(mktemp -d)/project"
+              ./bin/Release/decomp init tests/fixtures/$arch/$name.exe --dir "$q" --toolchain clang-cl-$arch
+              ./bin/Release/decomp -C "$q" types import --all
+              ./bin/Release/decomp -C "$q" types check
             done
           done
           ./bin/Release/decomp -C "$p" types show Unit

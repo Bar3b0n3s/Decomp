@@ -277,6 +277,25 @@ contents.
 - `decomp types check` compares every declared type with the PDB's layout of the same name and lists
   each difference ("field speed at +0x8, expected +0x4", "virtual slot 1: reset, expected none"); it
   exits with 1 when any type differs.
+- `decomp types import <name>...` declares the PDB's types in a header (`types.h` unless `--header`
+  names another), with what they need: the types they hold or derive from are defined first, the ones
+  they only point to are declared forward, a nested type comes with its class, and the headers that
+  define the existing types they use are included. `--all` takes every type the PDB defines except
+  templates, anonymous types, the compiler's own and those defined in compilers' and SDKs' headers
+  (where the PDB records the file, Visual C++ 8.0 and later); `--from <text>` keeps those defined in
+  files whose path contains the text. `--dry-run` prints the header instead of writing it. Types the
+  headers define already are left alone. Before the header is written it is compiled and every type it
+  defines must have the PDB's layout, and the verified sources that include it must keep their
+  byte-exact functions; the write is recorded in [`.decomp/changes.jsonl`](#changesjsonl-and-blobs).
+
+The declarations rebuild what the type records flatten (`analysis/declarations.hpp`): the members of
+anonymous unions and structs (a member that starts back inside the previous one opens a union), anonymous
+member types (inline, with the member), unnamed bitfields where bits are skipped and `: 0` where a unit
+ends early, `#pragma pack` when offsets are tighter than the fields' alignment, `__declspec(align)` when
+the size is larger than they need, methods with their signatures (virtual ones in slot order,
+`__stdcall` and the like where not the default, `= 0`), static members, nested types, and enums with
+explicit values. Struct and class keep their keyword (decorated names differ, `PAUPlayer@@` and
+`PAVPlayer@@`); every member is public; enums are plain (`enum class` leaves no trace in the records).
 
 Session briefs list the types the headers declare and show the layouts of the types the function's
 signature names in the PDB (its class, and what its parameters and return value are or point to): the

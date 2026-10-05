@@ -257,7 +257,8 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   union or enum, read from CodeView type records: size, bases, table pointers, virtual methods and
   their slots, fields (offsets, sizes, bits, array dimensions, the types they are or point to) and
   enumerators. A `TypeCatalog` holds them by name and names the field at an offset ("pos.x",
-  "items[2].count", "Named::__vfptr").
+  "items[2].count", "Named::__vfptr"). `analysis/declarations.hpp` writes C++ declarations that
+  reproduce layouts.
 - Translation units (`analysis/units.hpp`): the object files the program was linked from, in link
   order, and the unit of each function and global. `units_from_pdb()` takes them from the PDB's modules
   and section contributions, `units_from_objects()` from the object files a link map (or a library
@@ -397,7 +398,7 @@ union or enum into a `TypeLayout`:
   entry count (`LF_VTSHAPE`);
 - virtual methods: the ones a class introduces with their slots (vtable offset over the pointer size,
   `= 0` when pure), and the ones it overrides;
-- fields in offset order: offset, size, bitfield position and width, the type as C++ writes it
+- fields in declaration order: offset, size, bitfield position and width, the type as C++ writes it
   (`const char*`, `short[2][3]`, `void (__cdecl*)(int)`), array dimensions, and the struct, class or
   union a field is or points to;
 - an enum's underlying type and enumerators (values read as the underlying type: clang writes -2 as an
@@ -405,6 +406,12 @@ union or enum into a `TypeLayout`:
 
 Visual C++ 7.0 and 7.1 write records with length-prefixed names (`LF_STRUCTURE_ST` and friends); they
 read the same way. VC6's 16-bit type indices are not read.
+
+Layouts also keep what a declaration needs that is not layout: methods with their signatures (return
+and parameter types, `const`, `static`, calling convention, virtual slot), static members and nested
+types; fields stay in declaration order. `analysis/declarations.hpp` turns layouts back into C++
+declarations for `decomp types import` ([project-format.md](project-format.md#include)), and the
+compiled declarations are compared with the PDB before they are written.
 
 `TypeCatalog::field_ref()` names the field at an offset as C++ would: through nested structs and
 arrays (`pos.y`, `grid[1][2]`, `pair.b`), a base's fields by their own names, the table pointers as

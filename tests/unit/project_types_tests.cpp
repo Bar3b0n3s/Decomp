@@ -1,6 +1,7 @@
 // Types in project headers (project/types.hpp): composing them, compiling them and reading their layouts
 // back; and the program generations a run hands its sessions.
 
+#include "analysis/declarations.hpp"
 #include "core/fs.hpp"
 #include "llvm_fixture.hpp"
 #include "project/project.hpp"
@@ -175,4 +176,81 @@ TEST_CASE("header types: none without headers; headers that do not compile; tool
     REQUIRE_FALSE(broken);
     CHECK(broken.error().message.find("do not compile") != std::string::npos);
     CHECK(broken.error().message.find("include/game/broken.h:1") != std::string::npos);
+}
+
+TEST_CASE("composing namespace blocks, and appending without replacing") {
+    const auto composed = compose_type("", "game::Shape", "namespace game {\nclass Shape { int id; };\n}").value();
+    CHECK(composed.text == "#pragma once\n\nnamespace game {\nclass Shape { int id; };\n}\n");
+    CHECK_FALSE(compose_type("", "Shape", "namespace game {\nclass Shape { int id; };\n}"));  // it declares game::Shape
+    CHECK_FALSE(compose_type("", "game::Shape", "namespace game {\nint area();\n}"));
+    // A namespace block that declares only the type is replaced; one that declares more is left to the user.
+    const auto replaced = compose_type(composed.text, "game::Shape", "namespace game {\nclass Shape { int id, kind; };\n}").value();
+    CHECK(replaced.replaced);
+    CHECK(replaced.text == "#pragma once\n\nnamespace game {\nclass Shape { int id, kind; };\n}\n");
+    CHECK_FALSE(compose_type("namespace game {\nclass Shape;\nclass Square;\n}\n", "game::Shape", "namespace game {\nclass Shape { int id; };\n}"));
+    // Appending keeps an earlier forward declaration where it is.
+    const auto appended = compose_type("#pragma once\n\nstruct Node;\n", "Node", "struct Node { Node* next; };", false).value();
+    CHECK(appended.text == "#pragma once\n\nstruct Node;\n\nstruct Node { Node* next; };\n");
+    CHECK_FALSE(appended.replaced);
+}
+
+TEST_CASE("importing the PDB's types: declarations the compiler lays out as the PDB says") {
+    const auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    for (const Arch arch : {Arch::x86, Arch::x64}) {
+        const std::string a = arch == Arch::x86 ? "x86" : "x64";
+        CAPTURE(a);
+        auto dir = fs::TempDir::create("decomp-type-import").value();
+        const auto exe = test::build_program(arch, *tools, dir.path() / "build", {test::fixture("src/layouts.cpp")}, "layouts");
+        REQUIRE(exe);
+        auto p = Project::init(dir.path() / "p", *exe, std::nullopt, "clang-cl-" + a).value();
+        const auto program = p.open_program().value();
+        const auto setup = test::clang_setup(arch, tools->clang_cl, dir.path() / "work");
+        const ProgramTypes& pdb = program.pdb_types();
+        // The PDB says where each type was defined.
+        REQUIRE(pdb.sources.contains("Node"));
+        CHECK(pdb.sources.at("Node").ends_with("layouts.cpp"));
+        CHECK_FALSE(system_header(pdb.sources.at("Node")));
+
+        std::vector<std::string> names;
+        for (const TypeLayout& t : pdb.catalog.types())
+            if (!anonymous_type_name(t.name)) names.push_back(t.name);
+        const auto imported = prepare_type_import(p, program, setup, names, "").value();
+        CHECK(imported.change.header == "include/types.h");
+        CHECK(imported.defined.size() == 13);
+        const std::string& text = imported.change.content;
+        INFO(text);
+        const std::string callback = arch == Arch::x86 ? "    virtual void __stdcall Callback(int);\n" : "    virtual void Callback(int);\n";
+        for (const std::string& expected : {std::string("#pragma pack(push, 1)\nstruct Packed {"), std::string("struct __declspec(align(16)) Aligned {"),
+                                           std::string("    unsigned int : 4;\n"), std::string("    union {\n        int raw;\n        float scaled;\n    };\n"),
+                                           std::string("    } pair;\n"), std::string("    void (__cdecl* handlers[2])(int);\n"),
+                                           std::string("    int (Node::* method)(int) const;\n"), std::string("    static int count;\n"),
+                                           std::string("    static Node* Make();\n"), std::string("    struct Link {\n"), std::string("    virtual ~Base();\n"),
+                                           std::string("    virtual int Value() const = 0;\n"), callback, std::string("class Multi : public Derived, public Mixin {"),
+                                           std::string("class Diamond : public virtual Base {"), std::string("enum Kind : unsigned char {"),
+                                           std::string("    FlagB = -2,\n")}) {
+            CAPTURE(expected);
+            CHECK(text.find(expected) != std::string::npos);
+        }
+        REQUIRE(commit_type_change(p, imported.change, ChangeOrigin{SymbolSource::user, "", "test"}, ChangeSubject{}));
+        const auto headers = compile_header_types(p, setup, arch).value();
+        CHECK(headers.declared.size() == 13);
+        for (const auto& declared : headers.declared) {
+            CAPTURE(declared.name);
+            REQUIRE(headers.catalog.find(declared.name));
+            REQUIRE(pdb.catalog.find(declared.name));
+            CHECK(compare_layouts(*headers.catalog.find(declared.name), *pdb.catalog.find(declared.name)) == std::vector<std::string>{});
+        }
+        // Declared already: nothing to import. A header name outside include/ is refused.
+        const auto again = prepare_type_import(p, program, setup, {"Node"}, "");
+        REQUIRE_FALSE(again);
+        CHECK(again.error().message.find("include/types.h declares it already") != std::string::npos);
+        CHECK_FALSE(prepare_type_import(p, program, setup, {"Node"}, "../node.h"));
+        // Without a PDB there is nothing to import from.
+        const auto without = Program::open(*exe, OpenOptions{.use_pdb = false}).value();
+        CHECK_FALSE(prepare_type_import(p, without, setup, {"Node"}, "other.h"));
+    }
 }

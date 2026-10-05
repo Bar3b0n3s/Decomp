@@ -1,5 +1,7 @@
 #include "analysis/types.hpp"
 
+#include "core/strings.hpp"
+
 #include <algorithm>
 #include <format>
 #include <limits>
@@ -45,6 +47,48 @@ std::vector<u64> dimensions_of(const TypeStream& types, TypeIndex type, usize po
     return out;
 }
 
+// The structs, classes, unions and enums a type names, through modifiers, pointers, arrays, bitfields and
+// function types; each once, in the order met.
+void collect_named(const TypeStream& types, TypeIndex index, std::vector<std::string>& out, int depth) {
+    if (depth > 16 || index < codeview::kFirstTypeIndex) return;
+    const auto record = types.record(index);
+    if (!record) return;
+    const auto add = [&](std::string name) {
+        if (!name.empty() && std::ranges::find(out, name) == out.end()) out.push_back(std::move(name));
+    };
+    if (types.udt(index)) {
+        add(types.key_of(index));
+        return;
+    }
+    switch (record->leaf) {
+    case leaf::modifier: collect_named(types, types.unmodified(index), out, depth + 1); break;
+    case leaf::pointer:
+        if (const auto p = types.pointer(index)) collect_named(types, p->referent, out, depth + 1);
+        break;
+    case leaf::array:
+    case leaf::array_st:
+        if (const auto a = types.array(index)) collect_named(types, a->element, out, depth + 1);
+        break;
+    case leaf::bitfield:
+        if (const auto b = types.bitfield(index)) collect_named(types, b->type, out, depth + 1);
+        break;
+    case leaf::procedure:
+    case leaf::mfunction:
+        if (const auto f = types.function(index)) {
+            collect_named(types, f->return_type, out, depth + 1);
+            for (const TypeIndex t : f->parameters) collect_named(types, t, out, depth + 1);
+        }
+        break;
+    default: break;
+    }
+}
+
+std::vector<std::string> named_types(const TypeStream& types, TypeIndex index) {
+    std::vector<std::string> out;
+    collect_named(types, index, out, 0);
+    return out;
+}
+
 FieldLayout field_layout(const TypeStream& types, const Member& m, usize pointer_size) {
     FieldLayout f;
     f.name = m.name;
@@ -60,16 +104,33 @@ FieldLayout field_layout(const TypeStream& types, const Member& m, usize pointer
     f.udt = types.udt_name(type);
     f.dimensions = dimensions_of(types, type, pointer_size);
     f.pointee = types.pointee_udt(type);
+    f.named = named_types(types, type);
     return f;
 }
 
-VirtualMethod virtual_method(std::string name, u16 attribute, u32 vtable_offset, usize pointer_size) {
+// A method from its attributes and type; nullopt for what the compiler generated (and pseudo methods).
+std::optional<MethodLayout> method_layout(const TypeStream& types, const std::string& name, u16 attribute, TypeIndex type, u32 vtable_offset,
+                                          usize pointer_size) {
+    if ((attribute & 0x0120) != 0) return std::nullopt;  // pseudo (0x20), compiler-generated (0x100)
     const u8 property = static_cast<u8>((attribute >> 2) & 7);
-    VirtualMethod v;
-    v.name = std::move(name);
-    if (property == 4 || property == 6) v.slot = vtable_offset / std::max<usize>(pointer_size, 1);
-    v.pure = property == 5 || property == 6;
-    return v;
+    MethodLayout m;
+    m.name = name;
+    m.is_static = property == 2;
+    m.is_virtual = property == 1 || property == 4 || property == 5 || property == 6;
+    m.pure = property == 5 || property == 6;
+    if (property == 4 || property == 6) m.slot = vtable_offset / std::max<usize>(pointer_size, 1);
+    if (const auto f = types.function(type)) {
+        m.return_type = types.name_of(f->return_type);
+        for (const TypeIndex p : f->parameters) m.parameters.push_back(p == 0 ? "..." : types.name_of(p));
+        if (f->this_type != 0)
+            if (const auto self = types.pointer(f->this_type)) m.is_const = types.name_of(self->referent).starts_with("const ");
+        // x86 has conventions to choose from: __thiscall is a method's default, __cdecl a static one's.
+        const u8 standard = m.is_static ? 0x00 : 0x0b;
+        if (pointer_size == 4 && f->calling_convention != standard) m.calling_convention = codeview::calling_convention_name(f->calling_convention);
+        collect_named(types, f->return_type, m.named, 0);
+        for (const TypeIndex p : f->parameters) collect_named(types, p, m.named, 0);
+    }
+    return m;
 }
 
 std::string base_name(const TypeStream& types, TypeIndex type) {
@@ -151,19 +212,33 @@ Result<TypeLayout> layout_of(const TypeStream& types, TypeIndex index, usize poi
             break;
         case leaf::member: layout.fields.push_back(field_layout(types, m, pointer_size)); break;
         case leaf::onemethod:
-            if (m.is_virtual()) layout.virtuals.push_back(virtual_method(m.name, m.attribute, m.vtable_offset, pointer_size));
+            if (auto method = method_layout(types, m.name, m.attribute, m.type, m.vtable_offset, pointer_size)) layout.methods.push_back(std::move(*method));
             break;
         case leaf::method: {
             auto overloads = types.method_list(m.type, m.method_count);
             if (!overloads) return std::unexpected(std::move(overloads.error()).with_context(layout.name));
             for (const codeview::MethodEntry& e : *overloads)
-                if (e.is_virtual()) layout.virtuals.push_back(virtual_method(m.name, e.attribute, e.vtable_offset, pointer_size));
+                if (auto method = method_layout(types, m.name, e.attribute, e.type, e.vtable_offset, pointer_size)) layout.methods.push_back(std::move(*method));
             break;
         }
-        default: break;  // static members, nested types, friends, the indirect virtual bases
+        case leaf::stmember: layout.statics.push_back({m.name, types.name_of(m.type), named_types(types, m.type)}); break;
+        case leaf::nesttype:
+        case leaf::nesttypeex: {
+            // A type declared in the class is named after it; another name for a type is a typedef.
+            NestedType nested{m.name, types.name_of(m.type), true};
+            if (types.udt(m.type)) {
+                const std::string key = types.key_of(types.definition(m.type).value_or(m.type));
+                nested.type = key;
+                nested.is_typedef = key != layout.name + "::" + m.name && !key.starts_with(layout.name + "::<");
+            }
+            layout.nested.push_back(std::move(nested));
+            break;
+        }
+        default: break;  // friends, the indirect virtual bases
         }
     }
-    std::ranges::stable_sort(layout.fields, {}, [](const FieldLayout& f) { return std::pair(f.offset, f.bit_offset.value_or(0)); });
+    for (const MethodLayout& method : layout.methods)
+        if (method.is_virtual) layout.virtuals.push_back({method.name, method.slot, method.pure});
     std::ranges::stable_sort(layout.virtuals, {}, [](const VirtualMethod& v) { return v.slot.value_or(std::numeric_limits<u64>::max()); });
     return layout;
 }
@@ -234,6 +309,17 @@ std::optional<TypeCatalog::FieldRef> TypeCatalog::resolve(const TypeLayout& layo
     for (const auto& [at, name] : {std::pair(layout.vfptr, "__vfptr"), std::pair(layout.vbptr, "__vbptr")})
         if (at && offset >= *at && offset - *at < pointer_size_) return FieldRef{name, nullptr, offset == *at};
     return std::nullopt;
+}
+
+bool system_header(std::string_view path) {
+    std::string p = to_lower(path);
+    std::ranges::replace(p, '\\', '/');
+    static constexpr std::string_view kMarkers[] = {
+        "/microsoft visual studio", "/windows kits/", "/microsoft sdks/", "/microsoft platform sdk", "/platformsdk/", "/platform sdk/",
+        "/vc98/include", "/vc98/mfc", "/vc98/atl", "/vc/include", "/vc/atlmfc", "/vc/platformsdk", "/vc7/include", "/vc7/atlmfc",
+        "/vc7/platformsdk", "/dxsdk", "/directx sdk", "/directx9", "/ucrt/", "/include/um/", "/include/shared/", "/lib/clang/", "/stlport",
+    };
+    return std::ranges::any_of(kMarkers, [&](std::string_view m) { return p.find(m) != std::string::npos; });
 }
 
 std::vector<std::string> types_of_function(const ProgramTypes& types, u64 va) {
@@ -335,12 +421,22 @@ std::vector<std::string> compare_layouts(const TypeLayout& actual, const TypeLay
 std::string field_declaration(const FieldLayout& field) {
     const std::string& type = field.type;
     std::string out;
-    // A pointer to a function: the name goes in the parentheses, "void (__cdecl* cb)(int)".
+    // A pointer to a function: the name goes in the parentheses, "void (__cdecl* cb)(int)", and so do an
+    // array's dimensions, "void (__cdecl* table[4])(int)".
     const auto group = type.find("*)");
     const auto bracket = type.find('[');
-    if (group != std::string::npos && type.find('(') < group) out = type.substr(0, group + 1) + " " + field.name + type.substr(group + 1);
-    else if (bracket != std::string::npos) out = type.substr(0, bracket) + " " + field.name + type.substr(bracket);
-    else out = type + " " + field.name;
+    if (group != std::string::npos && type.find('(') < group) {
+        std::string tail = type.substr(group + 1), dims;
+        if (const auto close = tail.rfind(')'); close != std::string::npos && close + 1 < tail.size() && tail[close + 1] == '[') {
+            dims = tail.substr(close + 1);
+            tail.resize(close + 1);
+        }
+        out = type.substr(0, group + 1) + " " + field.name + dims + tail;
+    } else if (bracket != std::string::npos) {
+        out = type.substr(0, bracket) + " " + field.name + type.substr(bracket);
+    } else {
+        out = type + " " + field.name;
+    }
     if (field.bit_width) out += std::format(" : {}", *field.bit_width);
     return out;
 }

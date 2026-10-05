@@ -30,6 +30,7 @@ struct FieldLayout {
     std::string udt;                          // the struct, class or union it is (or is an array of), else ""
     std::vector<u64> dimensions;              // arrays: each dimension's extent, outermost first ("int[2][3]": 2, 3)
     std::string pointee;                      // the struct, class or union it points to, else ""
+    std::vector<std::string> named;           // the structs, classes, unions and enums its type names, at any depth
 
     bool is_bitfield() const { return bit_width.has_value(); }
 };
@@ -46,6 +47,33 @@ struct VirtualMethod {
     bool pure = false;
 };
 
+// A method a class declares (not the ones the compiler generates), with its signature.
+struct MethodLayout {
+    std::string name;
+    std::string return_type;              // as C++ writes it ("void" for constructors and destructors)
+    std::vector<std::string> parameters;  // their types; "..." for a variable argument list
+    std::string calling_convention;       // when not the default (__thiscall on x86, __cdecl for static methods)
+    bool is_static = false;
+    bool is_const = false;
+    bool is_virtual = false;
+    bool pure = false;
+    std::optional<u64> slot;          // a virtual method the class introduces: its vtable entry
+    std::vector<std::string> named;   // the structs, classes, unions and enums its signature names
+};
+
+struct StaticMember {
+    std::string name;
+    std::string type;
+    std::vector<std::string> named;
+};
+
+// A type declared in a class: a nested struct, class, union or enum, or a typedef.
+struct NestedType {
+    std::string name;         // as the class names it
+    std::string type;         // a nested type's name in the catalog; a typedef's type as C++ writes it
+    bool is_typedef = false;  // a typedef (or a nested type of another class)
+};
+
 struct Enumerator {
     std::string name;
     i64 value = 0;
@@ -60,9 +88,13 @@ struct TypeLayout {
     std::optional<u64> vbptr;             // the virtual base table pointer it adds
     u64 vtable_slots = 0;                 // entries in its (primary) virtual function table
     std::vector<VirtualMethod> virtuals;  // introduced (in slot order), then overriding
-    std::vector<FieldLayout> fields;      // its own non-static data members, in offset order
+    std::vector<FieldLayout> fields;      // its own non-static data members, in declaration order
     std::string underlying;               // enums: the underlying type
     std::vector<Enumerator> enumerators;  // enums
+    // What its declaration holds besides the layout (for declarations the compiler lays out the same).
+    std::vector<MethodLayout> methods;  // in declaration order
+    std::vector<StaticMember> statics;
+    std::vector<NestedType> nested;
 
     // The field holding byte `offset` (of bitfields sharing a unit and of a union's members, the first),
     // or null.
@@ -112,7 +144,12 @@ struct ProgramTypes {
     codeview::TypeStream stream;
     TypeCatalog catalog;
     std::unordered_map<u64, codeview::TypeIndex> function_types;
+    std::unordered_map<std::string, std::string> sources;  // type name -> the file it was defined in, where known
 };
+
+// Whether a path is a compiler's, an SDK's or a library's header (Visual Studio, the Windows SDKs, the
+// Platform and DirectX SDKs, clang's): where the types a program only uses come from.
+bool system_header(std::string_view path);
 
 // The structs, classes and unions a function's PDB type names: its class (`this`), then what its
 // parameters and return value are or point to, without repeats. Empty when the PDB does not type it.

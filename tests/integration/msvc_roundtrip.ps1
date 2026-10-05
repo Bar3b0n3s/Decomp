@@ -73,3 +73,20 @@ Copy-Item "$root\tests\fixtures\include\rtti.h" (Join-Path $rttiProject "include
 & $decomp -C $rttiProject types check
 if ($LASTEXITCODE -ne 0) { throw "the classes of include\rtti.h differ from the PDB's with cl.exe ($Arch)" }
 Write-Host "MSVC types ($Arch): the headers' layouts equal the PDBs'"
+
+# Types whose layouts a header has to get right (packing, alignment, bitfields, anonymous unions, member
+# pointers, virtual functions, multiple and virtual inheritance), built with cl.exe: declared from
+# link.exe's PDB by decomp types import and compiled again with cl.exe, they have the PDB's layouts.
+& cl.exe @cflags "$src\layouts.cpp" "/Fo$out\layouts.obj"
+if ($LASTEXITCODE -ne 0) { throw "cl.exe failed on layouts.cpp" }
+& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug "/out:$out\layouts.exe" "/pdb:$out\layouts.pdb" "$out\layouts.obj" kernel32.lib
+if ($LASTEXITCODE -ne 0) { throw "link.exe failed on layouts.obj" }
+$layoutsProject = Join-Path $out "layouts-project"
+if (Test-Path $layoutsProject) { Remove-Item -Recurse -Force $layoutsProject }
+& $decomp init "$out\layouts.exe" --dir $layoutsProject --toolchain "msvc-$Arch" --flag /O2 --flag /GR- --flag /EHs-c-
+if ($LASTEXITCODE -ne 0) { throw "decomp init failed (layouts)" }
+& $decomp -C $layoutsProject types import --all
+if ($LASTEXITCODE -ne 0) { throw "decomp types import failed with cl.exe ($Arch)" }
+& $decomp -C $layoutsProject types check
+if ($LASTEXITCODE -ne 0) { throw "the imported types differ from the PDB's with cl.exe ($Arch)" }
+Write-Host "MSVC type import ($Arch): the declarations compile to the PDB's layouts"

@@ -147,6 +147,7 @@ decomp disasm sum_array                           # annotated disassembly of one
 
 # Types: the headers in include/ are the source of truth, compiled and read back with the original compiler
 decomp types --pdb --filter Player                # the types the target's PDB defines
+decomp types import --all                         # declare them in include/types.h, checked against the PDB
 decomp types check                                # each type the headers declare against the PDB's layout
 decomp types show Player                          # a type's layout: offsets, sizes, bases, vtable slots
 

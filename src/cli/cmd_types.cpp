@@ -1,6 +1,7 @@
 // decomp types: the program's types. The project's headers under include/ are the source of truth;
 // compiled with the project's toolchain, their layouts read back are compared with the target's PDB.
 
+#include "analysis/declarations.hpp"
 #include "cli/common.hpp"
 #include "core/strings.hpp"
 #include "project/project.hpp"
@@ -121,6 +122,59 @@ void register_types_commands(CLI::App& app, GlobalOptions& g) {
                 std::println("{} equal, {} differ, {} not in the PDB, {} without a layout (of {} declared in {})", equal, differ, absent, undefined,
                              ctx.headers.declared.size(), "include/");
             return differ > 0 ? 1 : 0;
+        }));
+    });
+
+    auto* import = cmd->add_subcommand("import", "Declare the target PDB's types in a project header, checked against the PDB's layouts");
+    auto import_names = std::make_shared<std::vector<std::string>>();
+    auto all = std::make_shared<bool>(false);
+    auto from = std::make_shared<std::string>();
+    auto header = std::make_shared<std::string>();
+    auto dry_run = std::make_shared<bool>(false);
+    import->add_option("names", *import_names, "The types to declare (what they need comes with them)");
+    import->add_flag("--all", *all, "Every type the PDB defines, but templates, anonymous ones, the compiler's and those of compilers' and SDKs' headers");
+    import->add_option("--from", *from, "With --all: only the types defined in files whose path contains this text");
+    import->add_option("--header", *header, "The header under include/ (default: types.h)");
+    import->add_flag("--dry-run", *dry_run, "Print the header it would write, and write nothing");
+    import->callback([&g, import_names, all, from, header, dry_run] {
+        throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+            TRY_ASSIGN(auto p, project::Project::find(g.project));
+            TRY_ASSIGN(auto program, p.open_program());
+            TRY_ASSIGN(const auto setup, project::make_match_setup(&p, ""));
+            std::vector<std::string> names = *import_names;
+            if (*all) {
+                const ProgramTypes& types = program.pdb_types();
+                for (const TypeLayout& t : types.catalog.types()) {
+                    // Not templates, anonymous types, and not the compiler's own (__vc_attributes::..., type_info).
+                    if (anonymous_type_name(t.name) || t.name.find('<') != std::string::npos || t.name == "type_info" || t.name.starts_with("__") ||
+                        t.name.starts_with("std::"))
+                        continue;
+                    const auto source = types.sources.find(t.name);
+                    if (source != types.sources.end() && system_header(source->second)) continue;
+                    if (!from->empty() && (source == types.sources.end() || source->second.find(*from) == std::string::npos)) continue;
+                    names.push_back(t.name);
+                }
+            }
+            if (names.empty()) return make_error(ErrorCode::invalid_argument, "name the types to import, or pass --all");
+            TRY_ASSIGN(const auto imported, project::prepare_type_import(p, program, setup, names, *header));
+            if (!*dry_run) {
+                TRY_ASSIGN(auto run_lock, p.try_lock_active_run());
+                if (!run_lock) return make_error(ErrorCode::invalid_argument, "a run is active in this project; import types when it is done");
+                TRY(project::commit_type_change(p, imported.change, project::ChangeOrigin{SymbolSource::user, "", "decomp types import"},
+                                                project::ChangeSubject{}));
+            }
+            if (g.json) {
+                print_json({{"header", imported.change.header}, {"defined", imported.defined}, {"declared", imported.declared},
+                            {"skipped", imported.skipped}, {"includes", imported.includes}, {"written", !*dry_run},
+                            {"content", imported.change.content}});
+                return 0;
+            }
+            if (*dry_run) std::print("{}", imported.change.content);
+            std::println("{}{}: {} type{} defined ({}){}", *dry_run ? "would write " : "", imported.change.header, imported.defined.size(),
+                         imported.defined.size() == 1 ? "" : "s", join(imported.defined, ", "),
+                         imported.declared.empty() ? std::string() : std::format(", {} declared forward ({})", imported.declared.size(), join(imported.declared, ", ")));
+            for (const auto& s : imported.skipped) std::println("  skipped {}", s);
+            return 0;
         }));
     });
 

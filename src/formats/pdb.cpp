@@ -5,6 +5,7 @@
 #include <PDB.h>
 #include <PDB_DBIStream.h>
 #include <PDB_InfoStream.h>
+#include <PDB_NamesStream.h>
 #include <PDB_RawFile.h>
 #include <PDB_TPITypes.h>
 
@@ -59,6 +60,26 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
     if (auto types = read_type_stream(raw, 2)) reader.types_ = std::move(*types);
     // S_GPROC32_ID and S_LPROC32_ID name an item (LF_FUNC_ID, LF_MFUNC_ID) that names the function type.
     const auto items = info_stream.HasIPIStream() ? read_type_stream(raw, 4) : std::nullopt;
+    // Where each type was defined: LF_UDT_SRC_LINE names the file with an LF_STRING_ID, LF_UDT_MOD_SRC_LINE
+    // with an offset in the /names stream.
+    if (items) {
+        std::optional<PDB::NamesStream> names;
+        if (info_stream.HasNamesStream()) names.emplace(info_stream.CreateNamesStream(raw));
+        for (codeview::TypeIndex i = items->first(); i < items->end(); ++i) {
+            const auto record = items->record(i);
+            if (!record || record->data.size() < 12 ||
+                (record->leaf != codeview::leaf::udt_src_line && record->leaf != codeview::leaf::udt_mod_src_line))
+                continue;
+            u32 udt = 0, file = 0;
+            std::memcpy(&udt, record->data.data(), 4);
+            std::memcpy(&file, record->data.data() + 4, 4);
+            if (record->leaf == codeview::leaf::udt_src_line) {
+                if (auto text = items->string_id(file)) reader.type_sources_.emplace(udt, std::move(*text));
+            } else if (names && names->GetHeader() && file < names->GetHeader()->size) {
+                reader.type_sources_.emplace(udt, std::string(names->GetFilename(file)));
+            }
+        }
+    }
 
     const PDB::DBIStream dbi = PDB::CreateDBIStream(raw);
     if (dbi.HasValidImageSectionStream(raw) != PDB::ErrorCode::Success ||

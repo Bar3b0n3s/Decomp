@@ -68,9 +68,12 @@ inline constexpr u16 nesttype_st = 0x1408;
 inline constexpr u16 onemethod_st = 0x140b;
 inline constexpr u16 nesttypeex_st = 0x140d;
 
-// Item (IPI) records: what S_GPROC32_ID and S_LPROC32_ID name.
+// Item (IPI) records: what S_GPROC32_ID and S_LPROC32_ID name, and where types were defined.
 inline constexpr u16 func_id = 0x1601;
 inline constexpr u16 mfunc_id = 0x1602;
+inline constexpr u16 string_id = 0x1605;
+inline constexpr u16 udt_src_line = 0x1606;      // the file as an LF_STRING_ID (objects, lld-link)
+inline constexpr u16 udt_mod_src_line = 0x1607;  // the file as an offset in the PDB's /names stream (link.exe)
 } // namespace leaf
 
 // A struct, class, interface, union or enum record.
@@ -170,6 +173,8 @@ public:
     std::optional<u16> vtshape_count(TypeIndex index) const;
     // An item stream's LF_FUNC_ID or LF_MFUNC_ID: the function type it names (in the type stream).
     std::optional<TypeIndex> function_type_of_id(TypeIndex index) const;
+    // An item stream's LF_STRING_ID: its text.
+    std::optional<std::string> string_id(TypeIndex index) const;
 
     // The definition of a struct, class, union or enum: `index` itself, or the record a forward reference
     // stands for (by unique name, else by name). nullopt when none is defined in the stream.
@@ -198,6 +203,10 @@ private:
     TypeIndex first_ = kFirstTypeIndex;
     std::unordered_map<std::string, TypeIndex> by_unique_name_, by_name_;  // definitions
 };
+
+// A calling convention as C++ writes it ("__cdecl", "__stdcall", "__fastcall", "__thiscall",
+// "__vectorcall"); "" for others.
+std::string calling_convention_name(u8 cc);
 
 // A simple (built-in) type's name, size and signedness: indices below 0x1000.
 std::string simple_type_name(TypeIndex index);

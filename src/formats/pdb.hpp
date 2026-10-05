@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace decomp::pdb {
@@ -70,6 +71,9 @@ public:
     // The TPI stream: every type the program's code uses (empty when the PDB has none that reads).
     const codeview::TypeStream& types() const { return types_; }
     codeview::TypeStream take_types() { return std::move(types_); }
+    // The file each struct, class, union and enum was defined in, by its index in types(), where the PDB
+    // says (Visual C++ 8.0 and later, lld-link).
+    const std::unordered_map<codeview::TypeIndex, std::string>& type_sources() const { return type_sources_; }
 
     // True when the GUID and age match a PE's CodeView record.
     bool matches(const std::array<u8, 16>& guid, u32 age) const { return guid == info_.guid && age == info_.age; }
@@ -82,6 +86,7 @@ private:
     std::vector<Module> modules_;
     std::vector<Contribution> contributions_;
     codeview::TypeStream types_;
+    std::unordered_map<codeview::TypeIndex, std::string> type_sources_;
 };
 
 } // namespace decomp::pdb

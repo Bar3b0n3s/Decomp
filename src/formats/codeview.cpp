@@ -95,7 +95,9 @@ bool length_prefixed_udt(u16 kind) { return kind >= leaf::class_st && kind <= le
 
 bool is_array(u16 kind) { return kind == leaf::array || kind == leaf::array_st; }
 
-std::string calling_convention(u8 cc) {
+} // namespace
+
+std::string calling_convention_name(u8 cc) {
     switch (cc) {
     case 0x00: return "__cdecl";
     case 0x04: return "__fastcall";
@@ -105,8 +107,6 @@ std::string calling_convention(u8 cc) {
     default: return "";
     }
 }
-
-} // namespace
 
 std::string simple_type_name(TypeIndex index) {
     std::string base;
@@ -444,6 +444,15 @@ std::optional<TypeIndex> TypeStream::function_type_of_id(TypeIndex index) const 
     return c.ok() ? std::optional(type) : std::nullopt;
 }
 
+std::optional<std::string> TypeStream::string_id(TypeIndex index) const {
+    const auto r = record(index);
+    if (!r || r->leaf != leaf::string_id) return std::nullopt;
+    Cursor c(r->data);
+    c.read<u32>();  // a list of substrings
+    std::string text = c.name();
+    return c.ok() ? std::optional(std::move(text)) : std::nullopt;
+}
+
 std::optional<TypeIndex> TypeStream::definition(TypeIndex index) const {
     const auto u = udt(index);
     if (!u) return std::nullopt;
@@ -531,12 +540,30 @@ std::string TypeStream::name_of(TypeIndex index) const {
     case leaf::pointer: {
         const auto p = pointer(index);
         if (!p) break;
+        if (p->mode == 2 || p->mode == 3) {
+            // A pointer to a member: the class follows the attributes. "int Player::*",
+            // "void (Player::*)(int) const".
+            c.read<u32>();
+            c.read<u32>();
+            const std::string owner = name_of(c.read<u32>());
+            if (const auto f = function(p->referent); f && p->mode == 3) {
+                std::string params;
+                for (usize i = 0; i < f->parameters.size(); ++i) params += (i ? ", " : "") + name_of(f->parameters[i]);
+                // __thiscall is the default on x86, and x64 methods have the one convention (written as near C).
+                const bool standard = f->calling_convention == 0x0b || f->calling_convention == 0x00;
+                const std::string cc = standard ? std::string() : calling_convention_name(f->calling_convention) + " ";
+                const auto self = f->this_type != 0 ? pointer(f->this_type) : std::nullopt;
+                const bool is_const = self && name_of(self->referent).starts_with("const ");
+                return std::format("{} ({}{}::*)({}){}", name_of(f->return_type), cc, owner, params, is_const ? " const" : "");
+            }
+            return std::format("{} {}::*", name_of(p->referent), owner);
+        }
         std::string suffix = p->mode == 1 ? "&" : p->mode == 4 ? "&&" : "*";
         if (p->is_const) suffix += " const";
         if (const auto f = function(p->referent)) {
             std::vector<std::string> params;
             for (TypeIndex t : f->parameters) params.push_back(name_of(t));
-            return std::format("{} ({}{})({})", name_of(f->return_type), calling_convention(f->calling_convention), suffix, [&] {
+            return std::format("{} ({}{})({})", name_of(f->return_type), calling_convention_name(f->calling_convention), suffix, [&] {
                 std::string out;
                 for (usize i = 0; i < params.size(); ++i) out += (i ? ", " : "") + params[i];
                 return out;

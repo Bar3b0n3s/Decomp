@@ -1,6 +1,7 @@
 // CodeView type records (formats/codeview.hpp) and type layouts (analysis/types.hpp): the fixture PDBs'
 // types, and a header compiled with clang-cl /Z7.
 
+#include "analysis/declarations.hpp"
 #include "analysis/program.hpp"
 #include "analysis/types.hpp"
 #include "core/fs.hpp"
@@ -363,4 +364,64 @@ TEST_CASE("CodeView records that do not decode leave the rest readable") {
     CHECK(stream.size_of(0x0670, 8) == 8);
     CHECK(stream.name_of(0x5000) == "<type 0x5000>");
     CHECK_FALSE(codeview::TypeStream::from_debug_t(std::vector<std::byte>{std::byte{1}, std::byte{0}, std::byte{0}, std::byte{0}}));
+}
+
+TEST_CASE("declarations rebuild the anonymous unions and structs whose members a layout flattens") {
+    TypeLayout word;
+    word.name = "Word";
+    word.kind = TypeKind::union_;
+    word.size = 4;
+    word.fields = {field("lo", 0, 2, "short"), field("hi", 2, 2, "short"), field("whole", 0, 4, "int")};
+    TypeLayout pixel;
+    pixel.name = "game::Pixel";
+    pixel.size = 8;
+    pixel.fields = {field("r", 0, 1, "char"), field("g", 1, 1, "char"), field("b", 2, 1, "char"), field("a", 3, 1, "char"),
+                    field("rgba", 0, 4, "unsigned int"), field("extra", 4, 4, "int")};
+    TypeCatalog catalog;
+    catalog.add(word);
+    catalog.add(pixel);
+    CHECK(definition_of(word, catalog) == "union Word {\n    struct {\n        short lo;\n        short hi;\n    };\n    int whole;\n};\n");
+    CHECK(definition_of(pixel, catalog) == R"(struct Pixel {
+    union {
+        struct {
+            char r;
+            char g;
+            char b;
+            char a;
+        };
+        unsigned int rgba;
+    };
+    int extra;
+};
+)");
+    // In its namespace, after what it needs.
+    const auto plan = declare_types(catalog, {"game::Pixel"}, {});
+    REQUIRE(plan.declarations.size() == 1);
+    CHECK(plan.declarations[0].text.starts_with("namespace game {\nstruct Pixel {\n"));
+    CHECK(plan.declarations[0].text.ends_with("};\n}\n"));
+    CHECK(declare_types(catalog, {"game::Pixel"}, {"game::Pixel"}).declarations.empty());
+    CHECK(declare_types(catalog, {"Missing"}, {}).skipped == std::vector<std::string>{"Missing: no definition in the type records"});
+
+    // Packing a layout's offsets need: none for natural ones, 1 for an int at offset 1.
+    CHECK(packing_of(pixel, catalog) == 0);
+    TypeLayout packed;
+    packed.name = "Packed";
+    packed.size = 5;
+    packed.fields = {field("tag", 0, 1, "char"), field("value", 1, 4, "int")};
+    CHECK(packing_of(packed, catalog) == 1);
+    CHECK(alignment_of(packed, catalog) == 1);
+    CHECK(alignment_of(pixel, catalog) == 4);
+}
+
+TEST_CASE("system headers") {
+    for (const char* path : {"C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\VC\\Tools\\MSVC\\14.29\\include\\vector",
+                             "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.19041.0\\um\\winnt.h", "c:\\vc98\\include\\stdio.h",
+                             "C:/DXSDK/Include/d3d9.h", "/usr/lib/llvm-18/lib/clang/18/include/stddef.h"}) {
+        CAPTURE(path);
+        CHECK(system_header(path));
+    }
+    for (const char* path : {"d:\\game\\src\\player.h", "/home/user/game/include/types.h"}) {
+        CAPTURE(path);
+        CHECK_FALSE(system_header(path));
+    }
 }

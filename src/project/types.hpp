@@ -27,14 +27,16 @@ inline constexpr std::string_view kDefaultTypesHeader = "types.h";
 bool valid_header_name(std::string_view header);
 
 // Puts `declaration`, the definition of the type `name`, into `header_text`: in place of the header's
-// items that declare `name` (a definition or a forward declaration), or at the end. A new header starts
-// with `#pragma once`. The declaration may hold several type declarations and #pragma lines (for
-// `#pragma pack`), but no functions, data or other directives, and one of its items must declare `name`.
+// items that declare `name` (a definition or a forward declaration, or a namespace block that declares
+// only it), or at the end; with `replace` false, always at the end. A new header starts with
+// `#pragma once`. The declaration may hold several type declarations, #pragma lines (for `#pragma
+// pack`) and namespace blocks of them, but no functions, data or other directives, and it must declare
+// `name` ("game::Shape" in `namespace game { ... }`).
 struct ComposedType {
     std::string text;
     bool replaced = false;  // the header declared the type already
 };
-Result<ComposedType> compose_type(std::string_view header_text, std::string_view name, std::string_view declaration);
+Result<ComposedType> compose_type(std::string_view header_text, std::string_view name, std::string_view declaration, bool replace = true);
 
 // A type change, composed and checked but not written yet.
 struct TypeChange {
@@ -77,14 +79,33 @@ struct HeaderType {
 // (/Z7; clang-cl also -fstandalone-debug, so that it writes every type's definition), each declared type
 // referenced (a `T*` variable) so that the compiler writes it, and the layouts read back from the
 // object's type records (.debug$T). Fails when the headers do not compile, or the toolchain writes no
-// type records this reads (GCC-style toolchains, CodeView before Visual C++ 7.0).
+// type records this reads (GCC-style toolchains, CodeView before Visual C++ 7.0). `staged` gives headers
+// ("include/types.h") a text other than the file's, or adds them.
 struct HeaderTypes {
     std::vector<HeaderType> declared;  // in header order
     TypeCatalog catalog;               // every type the compile wrote: also those the headers use from elsewhere
     std::string source;                // the translation unit compiled
 
     const HeaderType* header_of(std::string_view name) const;
+    // The declared types the compile defined (not only declared forward, not typedefs of other types).
+    bool defines(std::string_view name) const { return header_of(name) && catalog.find(name); }
 };
-Result<HeaderTypes> compile_header_types(const Project& project, const matching::MatchSetup& setup, Arch arch);
+Result<HeaderTypes> compile_header_types(const Project& project, const matching::MatchSetup& setup, Arch arch,
+                                         const std::vector<std::pair<std::string, std::string>>& staged = {});
+
+// The target PDB's types `names`, and what they need, declared in a project header
+// (analysis/declarations.hpp): written at the end of `header` (types.h unless named), checked first. The
+// header must compile, every type it defines must have the PDB's layout, and the verified sources that
+// include it must keep their byte-exact functions. Types the project's headers define already are left
+// as they are; types they declare in other headers are included from there.
+struct TypeImport {
+    TypeChange change;                  // the header before and after
+    std::vector<std::string> defined;   // in the order the header defines them
+    std::vector<std::string> declared;  // declared forward
+    std::vector<std::string> skipped;   // what was not declared, and why
+    std::vector<std::string> includes;  // headers it now includes
+};
+Result<TypeImport> prepare_type_import(const Project& project, const Program& program, const matching::MatchSetup& setup,
+                                       const std::vector<std::string>& names, std::string_view header);
 
 } // namespace decomp::project

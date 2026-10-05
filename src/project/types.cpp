@@ -1,5 +1,6 @@
 #include "project/types.hpp"
 
+#include "analysis/declarations.hpp"
 #include "analysis/demangle.hpp"
 #include "core/fs.hpp"
 #include "core/hash.hpp"
@@ -14,6 +15,7 @@
 #include <cctype>
 #include <format>
 #include <optional>
+#include <set>
 
 namespace decomp::project {
 
@@ -83,6 +85,9 @@ std::string diagnostics_with_files(const matching::CompileResult& compiled, cons
     return out;
 }
 
+// The head and the text between the braces of a block item (defined below).
+std::optional<std::pair<std::string_view, std::string_view>> block_parts(std::string_view body);
+
 std::string first_line(std::string_view text) {
     text = trim(text);
     const auto eol = text.find('\n');
@@ -108,9 +113,11 @@ bool valid_header_name(std::string_view header) {
     return ext == ".h" || ext == ".hh" || ext == ".hpp" || ext == ".hxx";
 }
 
-Result<ComposedType> compose_type(std::string_view header_text, std::string_view name, std::string_view declaration) {
-    bool declares = false;
-    for (const auto& item : matching::parse_source_items(declaration)) {
+namespace {
+
+// What a type declaration may hold: type declarations, #pragma lines, and namespace blocks of them.
+Result<void> check_type_items(std::string_view text, int depth) {
+    for (const auto& item : matching::parse_source_items(text)) {
         switch (item.kind) {
         case matching::ItemKind::comment: break;
         case matching::ItemKind::preprocessor:
@@ -118,22 +125,43 @@ Result<ComposedType> compose_type(std::string_view header_text, std::string_view
                 return make_error(ErrorCode::invalid_argument, "`{}`: only #pragma lines (such as #pragma pack) may come with a type definition",
                                   first_line(matching::item_body(item)));
             break;
-        case matching::ItemKind::declaration: {
-            const auto types = matching::declared_types(item);
-            if (types.empty())
+        case matching::ItemKind::declaration:
+            if (matching::declared_types(item).empty())
                 return make_error(ErrorCode::invalid_argument,
                                   "`{}` declares no type: give a struct, class, union or enum definition, a typedef or a using alias",
                                   first_line(matching::item_body(item)));
-            declares = declares || std::ranges::find(types, name) != types.end();
             break;
+        case matching::ItemKind::block: {
+            const auto parts = block_parts(matching::item_body(item));
+            if (parts && parts->first.starts_with("namespace") && depth < 8) {
+                TRY(check_type_items(parts->second, depth + 1));
+                break;
+            }
+            [[fallthrough]];
         }
         case matching::ItemKind::function:
-        case matching::ItemKind::block:
-            return make_error(ErrorCode::invalid_argument, "`{}`: a type definition holds types only, not functions or blocks",
+            return make_error(ErrorCode::invalid_argument, "`{}`: a type definition holds types only, not functions or blocks other than namespaces",
                               first_line(matching::item_body(item)));
         }
     }
-    if (!declares) return make_error(ErrorCode::invalid_argument, "the declaration does not declare {} at its top level", name);
+    return {};
+}
+
+// The types a header item declares: a declaration's, or those of a namespace or extern "C" block (qualified).
+std::vector<std::string> item_declared_types(const matching::SourceItem& item) {
+    if (item.kind == matching::ItemKind::declaration) return matching::declared_types(item);
+    std::vector<std::string> out;
+    if (item.kind == matching::ItemKind::block)
+        for (const auto& declared : header_declared_types(item.text)) out.push_back(declared.name);
+    return out;
+}
+
+} // namespace
+
+Result<ComposedType> compose_type(std::string_view header_text, std::string_view name, std::string_view declaration, bool replace) {
+    TRY(check_type_items(declaration, 0));
+    if (!std::ranges::any_of(header_declared_types(declaration), [&](const DeclaredType& d) { return d.name == name; }))
+        return make_error(ErrorCode::invalid_argument, "the declaration does not declare {} at its top level or in a namespace", name);
     const std::string decl(trim(declaration));
 
     ComposedType out;
@@ -142,16 +170,19 @@ Result<ComposedType> compose_type(std::string_view header_text, std::string_view
         return out;
     }
     // The items' texts follow one another from the start of the header: the definition takes the place
-    // of the first item that declares the type (after its leading comments), and later ones go.
-    bool placed = false;
+    // of the first item that declares the type (after its leading comments), and later ones go. A
+    // namespace block goes only when the type is all it declares.
+    bool placed = !replace;
     usize consumed = 0;
     for (const auto& item : matching::parse_source_items(header_text)) {
         consumed += item.text.size();
-        const auto types = matching::declared_types(item);
+        const auto types = replace ? item_declared_types(item) : std::vector<std::string>{};
         if (std::ranges::find(types, name) == types.end()) {
             out.text += item.text;
             continue;
         }
+        if (item.kind == matching::ItemKind::block && std::ranges::any_of(types, [&](const std::string& t) { return t != name; }))
+            return make_error(ErrorCode::invalid_argument, "{} is declared in a namespace block with other types; edit the header by hand", name);
         out.replaced = true;
         if (placed) continue;
         const std::string_view body = matching::item_body(item);
@@ -160,7 +191,7 @@ Result<ComposedType> compose_type(std::string_view header_text, std::string_view
         placed = true;
     }
     out.text += header_text.substr(std::min(consumed, header_text.size()));
-    if (!placed) {
+    if (!placed || !replace) {
         while (!out.text.empty() && std::isspace(static_cast<unsigned char>(out.text.back())) != 0) out.text.pop_back();
         out.text += "\n\n" + decl + "\n";
     } else if (!out.text.ends_with('\n')) {
@@ -168,6 +199,83 @@ Result<ComposedType> compose_type(std::string_view header_text, std::string_view
     }
     return out;
 }
+
+namespace {
+
+// Headers' new texts (by their path under include/) where the compiler finds them before the project's own.
+struct StagedHeaders {
+    fs::TempDir dir;
+    matching::MatchSetup with;  // the setup with the staging directory first
+};
+
+Result<StagedHeaders> stage_headers(const matching::MatchSetup& setup, const std::vector<std::pair<std::string, std::string>>& headers) {
+    TRY_ASSIGN(auto dir, fs::TempDir::create("types", setup.work_dir));
+    for (const auto& [header, content] : headers) {
+        const auto path = dir.path() / fs::from_utf8(header);
+        TRY(fs::create_directories(path.parent_path()));
+        TRY(fs::write_text(path, content));
+    }
+    matching::MatchSetup with = setup;
+    with.include_dirs.insert(with.include_dirs.begin(), dir.path());
+    return StagedHeaders{std::move(dir), std::move(with)};
+}
+
+// The verified sources that include `header` (unit sources, and matched functions' own files): each of
+// their functions byte-exact with `setup` must stay so with `with`, which finds the new header first.
+// Returns the sources checked.
+Result<std::vector<std::string>> check_sources_with_header(const Project& project, const Program& program, const matching::MatchSetup& setup,
+                                                            const matching::MatchSetup& with, const std::string& header, const std::string& shown) {
+    std::vector<std::string> sources, broken;
+    auto compare = [&](const std::string& where, const std::vector<std::pair<u64, bool>>& before, const std::vector<std::pair<u64, bool>>& after,
+                       const std::string& failure) {
+        if (!failure.empty()) {
+            if (std::ranges::any_of(before, [](const auto& b) { return b.second; })) broken.push_back(std::format("{} no longer compiles: {}", where, failure));
+            return;
+        }
+        for (const auto& [va, exact] : before)
+            if (exact && std::ranges::find(after, std::pair{va, true}) == after.end())
+                broken.push_back(std::format("{} in {}", function_label(program, va), where));
+    };
+    auto checks = [](const matching::UnitVerification& v) {
+        std::vector<std::pair<u64, bool>> out;
+        for (const auto& c : v.functions) out.emplace_back(c.va, c.byte_exact());
+        return out;
+    };
+    TRY_ASSIGN(const auto units, load_units(project));
+    for (const auto& unit : units) {
+        if (unit.kind != UnitKind::code || unit.source.empty()) continue;
+        auto text = fs::read_text(project.root() / fs::from_utf8(unit.source));
+        if (!text || !includes_header(*text, header)) continue;
+        sources.push_back(unit.source);
+        std::vector<u64> vas;
+        for (const auto& f : matching::UnitSource::parse(*text).functions) vas.push_back(f.va);
+        TRY_ASSIGN(const auto before, matching::verify_unit(program, setup, *text, unit.source, vas));
+        TRY_ASSIGN(const auto after, matching::verify_unit(program, with, *text, unit.source, vas));
+        compare(unit.source, checks(before), checks(after), after.error);
+    }
+    // Matched functions' own files: src/functions/<name>_<address>.cpp.
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(project.root() / "src" / "functions", ec)) {
+        if (entry.path().extension() != ".cpp") continue;
+        const std::string stem = fs::to_utf8(entry.path().stem());
+        const auto underscore = stem.rfind('_');
+        const auto va = underscore == std::string::npos ? std::nullopt : parse_u64("0x" + stem.substr(underscore + 1));
+        if (!va || !program.symbols().at(*va)) continue;
+        auto text = fs::read_text(entry.path());
+        if (!text || !includes_header(*text, header)) continue;
+        const std::string where = "src/functions/" + fs::to_utf8(entry.path().filename());
+        sources.push_back(where);
+        TRY_ASSIGN(const auto before, matching::compile_and_diff(program, setup, *va, *text));
+        TRY_ASSIGN(const auto after, matching::compile_and_diff(program, with, *va, *text));
+        const bool exact_before = before.diff && before.diff->byte_exact, exact_after = after.diff && after.diff->byte_exact;
+        compare(where, {{*va, exact_before}}, {{*va, exact_after}}, after.compile.ok ? std::string() : std::string("compilation failed"));
+    }
+    if (!broken.empty())
+        return make_error(ErrorCode::invalid_argument, "with the new {}, verified functions are no longer byte-exact: {}", shown, join(broken, "; "));
+    return sources;
+}
+
+} // namespace
 
 Result<TypeChange> prepare_type_change(const Project& project, const Program& program, const matching::MatchSetup& setup, std::string_view name,
                                        std::string_view declaration, std::string_view header_name) {
@@ -189,12 +297,8 @@ Result<TypeChange> prepare_type_change(const Project& project, const Program& pr
     change.replaced = composed.replaced;
 
     // The new header goes where the compiler finds it before the project's own.
-    TRY_ASSIGN(auto staging, fs::TempDir::create("types", setup.work_dir));
-    const auto staged = staging.path() / fs::from_utf8(header);
-    TRY(fs::create_directories(staged.parent_path()));
-    TRY(fs::write_text(staged, change.content));
-    matching::MatchSetup with = setup;
-    with.include_dirs.insert(with.include_dirs.begin(), staging.path());
+    TRY_ASSIGN(const auto staging, stage_headers(setup, {{header, change.content}}));
+    const matching::MatchSetup& with = staging.with;
 
     // It compiles on its own and names the type.
     matching::Compiler compiler(with.toolchain, with.work_dir, with.cache_dir);
@@ -207,56 +311,10 @@ Result<TypeChange> prepare_type_change(const Project& project, const Program& pr
     TRY_ASSIGN(const auto compiled, compiler.compile(probe));
     if (!compiled.ok)
         return make_error(ErrorCode::invalid_argument, "{} does not compile with it:\n{}", change.header,
-                          diagnostics_with_files(compiled, {{staging.path(), "include"}, {project.root() / "include", "include"}}));
+                          diagnostics_with_files(compiled, {{staging.dir.path(), "include"}, {project.root() / "include", "include"}}));
 
     // The verified sources that include it keep their byte-exact functions.
-    std::vector<std::string> broken;
-    auto compare = [&](const std::string& where, const std::vector<std::pair<u64, bool>>& before, const std::vector<std::pair<u64, bool>>& after,
-                       const std::string& failure) {
-        if (!failure.empty()) {
-            if (std::ranges::any_of(before, [](const auto& b) { return b.second; })) broken.push_back(std::format("{} no longer compiles: {}", where, failure));
-            return;
-        }
-        for (const auto& [va, exact] : before)
-            if (exact && std::ranges::find(after, std::pair{va, true}) == after.end())
-                broken.push_back(std::format("{} in {}", function_label(program, va), where));
-    };
-    auto checks = [](const matching::UnitVerification& v) {
-        std::vector<std::pair<u64, bool>> out;
-        for (const auto& c : v.functions) out.emplace_back(c.va, c.byte_exact());
-        return out;
-    };
-    TRY_ASSIGN(const auto units, load_units(project));
-    for (const auto& unit : units) {
-        if (unit.kind != UnitKind::code || unit.source.empty()) continue;
-        auto text = fs::read_text(project.root() / fs::from_utf8(unit.source));
-        if (!text || !includes_header(*text, header)) continue;
-        change.sources.push_back(unit.source);
-        std::vector<u64> vas;
-        for (const auto& f : matching::UnitSource::parse(*text).functions) vas.push_back(f.va);
-        TRY_ASSIGN(const auto before, matching::verify_unit(program, setup, *text, unit.source, vas));
-        TRY_ASSIGN(const auto after, matching::verify_unit(program, with, *text, unit.source, vas));
-        compare(unit.source, checks(before), checks(after), after.error);
-    }
-    // Matched functions' own files: src/functions/<name>_<address>.cpp.
-    for (const auto& entry : std::filesystem::directory_iterator(project.root() / "src" / "functions", ec)) {
-        if (entry.path().extension() != ".cpp") continue;
-        const std::string stem = fs::to_utf8(entry.path().stem());
-        const auto underscore = stem.rfind('_');
-        const auto va = underscore == std::string::npos ? std::nullopt : parse_u64("0x" + stem.substr(underscore + 1));
-        if (!va || !program.symbols().at(*va)) continue;
-        auto text = fs::read_text(entry.path());
-        if (!text || !includes_header(*text, header)) continue;
-        const std::string where = "src/functions/" + fs::to_utf8(entry.path().filename());
-        change.sources.push_back(where);
-        TRY_ASSIGN(const auto before, matching::compile_and_diff(program, setup, *va, *text));
-        TRY_ASSIGN(const auto after, matching::compile_and_diff(program, with, *va, *text));
-        const bool exact_before = before.diff && before.diff->byte_exact, exact_after = after.diff && after.diff->byte_exact;
-        compare(where, {{*va, exact_before}}, {{*va, exact_after}}, after.compile.ok ? std::string() : std::string("compilation failed"));
-    }
-    if (!broken.empty())
-        return make_error(ErrorCode::invalid_argument, "with the new {}, verified functions are no longer byte-exact: {}", change.header,
-                          join(broken, "; "));
+    TRY_ASSIGN(change.sources, check_sources_with_header(project, program, setup, with, header, change.header));
     return change;
 }
 
@@ -348,19 +406,35 @@ const HeaderType* HeaderTypes::header_of(std::string_view name) const {
     return it == declared.end() ? nullptr : &*it;
 }
 
-Result<HeaderTypes> compile_header_types(const Project& project, const matching::MatchSetup& setup, Arch arch) {
+Result<HeaderTypes> compile_header_types(const Project& project, const matching::MatchSetup& setup, Arch arch,
+                                         const std::vector<std::pair<std::string, std::string>>& staged) {
     HeaderTypes out;
     out.catalog = TypeCatalog(arch == Arch::x64 ? 8 : 4);
-    TRY_ASSIGN(const auto headers, project_headers(project));
+    TRY_ASSIGN(auto headers, project_headers(project));
+    for (const auto& [header, content] : staged)
+        if (std::ranges::find(headers, header) == headers.end()) headers.push_back(header);
+    std::ranges::sort(headers);
     if (headers.empty()) return out;
     TRY_ASSIGN(const auto debug_flags, debug_type_flags(setup.toolchain));
+    std::optional<StagedHeaders> staging;
+    if (!staged.empty()) {
+        std::vector<std::pair<std::string, std::string>> below_include;  // the staged headers by their path under include/
+        for (const auto& [header, content] : staged) below_include.emplace_back(header.substr(8), content);
+        TRY_ASSIGN(auto made, stage_headers(setup, below_include));
+        staging = std::move(made);
+    }
 
     // One translation unit: every header, then a pointer to each type each declares. The headers' hash
     // keys the compile cache on their contents.
     std::string includes, references, contents;
     usize n = 0;
     for (const std::string& header : headers) {
-        TRY_ASSIGN(const auto text, fs::read_text(project.root() / fs::from_utf8(header)));
+        std::string text;
+        if (const auto it = std::ranges::find(staged, header, &std::pair<std::string, std::string>::first); it != staged.end()) {
+            text = it->second;
+        } else {
+            TRY_ASSIGN(text, fs::read_text(project.root() / fs::from_utf8(header)));
+        }
         contents += header + '\0' + text + '\0';
         includes += std::format("#include \"{}\"\n", header.substr(8));
         for (const DeclaredType& type : header_declared_types(text)) {
@@ -378,13 +452,15 @@ Result<HeaderTypes> compile_header_types(const Project& project, const matching:
     request.include_dirs = setup.include_dirs;
     const auto include = project.root() / "include";
     if (std::ranges::find(request.include_dirs, include) == request.include_dirs.end()) request.include_dirs.insert(request.include_dirs.begin(), include);
+    if (staging) request.include_dirs.insert(request.include_dirs.begin(), staging->dir.path());
     request.file_name = "decomp_types.cpp";
     request.cancelled = setup.cancelled;
     request.bypass_cache = setup.bypass_cache;
     matching::Compiler compiler(setup.toolchain, setup.work_dir, setup.cache_dir);
     TRY_ASSIGN(auto compiled, compiler.compile(request));
     if (!compiled.ok)
-        return make_error(ErrorCode::invalid_argument, "the project's headers do not compile:\n{}", diagnostics_with_files(compiled, {{include, "include"}}));
+        return make_error(ErrorCode::invalid_argument, "the project's headers do not compile:\n{}",
+                          diagnostics_with_files(compiled, {{staging ? staging->dir.path() : include, "include"}, {include, "include"}}));
     TRY_ASSIGN(const auto object, coff::Object::parse(std::move(compiled.object_data)));
     const auto section = std::ranges::find(object.sections(), std::string(".debug$T"), &coff::Section::name);
     if (section == object.sections().end())
@@ -395,6 +471,76 @@ Result<HeaderTypes> compile_header_types(const Project& project, const matching:
         return make_error(ErrorCode::unsupported, "{} put the types in a PDB (LF_TYPESERVER2): its flags ask for /Zi, which /Z7 must replace",
                           setup.toolchain.name);
     out.catalog = TypeCatalog::from(*stream, arch == Arch::x64 ? 8 : 4);
+    return out;
+}
+
+Result<TypeImport> prepare_type_import(const Project& project, const Program& program, const matching::MatchSetup& setup,
+                                       const std::vector<std::string>& names, std::string_view header_name) {
+    const TypeCatalog& pdb = program.pdb_types().catalog;
+    if (pdb.empty()) return make_error(ErrorCode::not_found, "the target has no PDB with types to import");
+    const std::string header(header_name.empty() ? kDefaultTypesHeader : header_name);
+    if (!valid_header_name(header))
+        return make_error(ErrorCode::invalid_argument, "'{}' is not a header name under include/ (such as types.h or game/player.h)", header);
+    TypeImport out;
+    out.change.header = "include/" + header;
+    const auto path = project.root() / fs::from_utf8(out.change.header);
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+        TRY_ASSIGN(out.change.base, fs::read_text(path));
+    }
+
+    // What the headers define now stays theirs.
+    TRY_ASSIGN(const auto current, compile_header_types(project, setup, program.arch()));
+    std::set<std::string> existing;
+    for (const auto& declared : current.declared)
+        if (current.defines(declared.name) || !pdb.find(declared.name)) existing.insert(declared.name);
+    const DeclarationPlan plan = declare_types(pdb, names, existing);
+    out.skipped = plan.skipped;
+    for (const std::string& name : names)
+        if (existing.contains(name)) out.skipped.push_back(std::format("{}: {} declares it already", name, current.header_of(name)->header));
+    if (plan.declarations.empty()) return make_error(ErrorCode::invalid_argument, "nothing to import: {}", join(out.skipped, "; "));
+
+    // The headers that declare the existing types the new ones use, then the declarations in order.
+    std::string text = out.change.base;
+    if (trim(text).empty()) text = "#pragma once\n";
+    std::set<std::string> include_files;
+    for (const std::string& used : plan.existing_used)
+        if (const HeaderType* declared = current.header_of(used); declared && declared->header != out.change.header) include_files.insert(declared->header.substr(8));
+    for (const std::string& file : include_files) {
+        if (includes_header(text, file)) continue;
+        const std::string line = std::format("#include \"{}\"\n", file);
+        const auto once = text.find("#pragma once\n");
+        if (once != std::string::npos) text.insert(once + 13, line);
+        else text.insert(0, line);
+        out.includes.push_back(file);
+    }
+    for (const TypeDeclaration& declaration : plan.declarations) {
+        TRY_ASSIGN(auto composed, compose_type(text, declaration.name, declaration.text, false));
+        text = std::move(composed.text);
+        (declaration.definition ? out.defined : out.declared).push_back(declaration.name);
+    }
+    out.change.content = std::move(text);
+    out.change.name = join(out.defined, ", ");
+
+    // The compiler lays every new type out as the PDB says.
+    TRY_ASSIGN(const auto compiled, compile_header_types(project, setup, program.arch(), {{out.change.header, out.change.content}}));
+    std::vector<std::string> differences;
+    for (const std::string& name : out.defined) {
+        const TypeLayout* layout = compiled.catalog.find(name);
+        const TypeLayout* expected = pdb.find(name);
+        if (!layout || !expected) {
+            differences.push_back(std::format("{}: the compiler wrote no layout for it", name));
+            continue;
+        }
+        for (const std::string& d : compare_layouts(*layout, *expected)) differences.push_back(std::format("{}: {}", name, d));
+    }
+    if (!differences.empty())
+        return make_error(ErrorCode::invalid_argument, "the declarations do not reproduce the PDB's layouts:\n  {}\nthe header would have been:\n{}",
+                          join(differences, "\n  "), out.change.content);
+
+    // The verified sources that include the header keep their byte-exact functions.
+    TRY_ASSIGN(const auto staging, stage_headers(setup, {{header, out.change.content}}));
+    TRY_ASSIGN(out.change.sources, check_sources_with_header(project, program, setup, staging.with, header, out.change.header));
     return out;
 }
 
