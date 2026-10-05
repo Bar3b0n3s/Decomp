@@ -13,6 +13,7 @@
 
 #include "arch/x86/decoder.hpp"
 #include "formats/image.hpp"
+#include "formats/pe.hpp"
 
 #include <optional>
 #include <span>
@@ -56,8 +57,9 @@ std::string catch_clause(const BinaryImage& image, const CatchHandler& handler);
 
 struct ScopeEntry {
     i32 enclosing = -1;  // the enclosing __try's entry; -1 (_except_handler3) or -2 (_except_handler4) for none
-    u64 filter = 0;      // the filter expression's code; 0 for a __finally
+    u64 filter = 0;      // the filter expression's code; 0 for a __finally, or an x64 __except whose filter is a constant
     u64 handler = 0;     // the __except block, or the __finally block
+    bool finally = false;
 };
 
 struct ScopeTable {
@@ -79,10 +81,15 @@ bool registers_seh_frame(std::span<const x86::Instruction> code, u64 table);
 // table it pushes. Nothing on x64 (the unwind data names a function's handler there).
 struct FunctionEh {
     std::optional<CxxFuncInfo> cxx;
-    u64 stub = 0;  // the handler stub that loads the FuncInfo
+    u64 stub = 0;  // the handler stub that loads the FuncInfo (x86)
     std::optional<ScopeTable> seh;
     bool empty() const { return !cxx && !seh; }
 };
 FunctionEh function_eh(const BinaryImage& image, const x86::Decoder& decoder, std::span<const x86::Instruction> code);
+
+// x64: what the unwind data of the function at `start` says: __CxxFrameHandler3's FuncInfo (clang's;
+// __CxxFrameHandler4's tables, MSVC's since Visual Studio 2019, are compressed and not read) or
+// __C_specific_handler's scope table ({begin, end, filter or 1, __except block or 0 for a __finally}).
+FunctionEh function_eh_x64(const pe::Image& image, u64 start);
 
 } // namespace decomp

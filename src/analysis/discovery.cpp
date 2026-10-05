@@ -536,11 +536,11 @@ private:
         for (u64 ref : fn.body.data_refs)
             if (const ScopeTable* table = scope_table_at(ref); table && (fn.body.links_frame || pushed_before_call(fn.body, ref)))
                 for (const auto& e : table->entries) {
-                    if (e.filter) {
-                        loose.insert(e.handler);
-                        tight.insert(e.filter);
+                    if (e.finally) {
+                        tight.insert(e.handler);
                     } else {
-                        tight.insert(e.handler);  // a __finally block
+                        loose.insert(e.handler);
+                        if (e.filter) tight.insert(e.filter);
                     }
                 }
         if (loose.empty() && tight.empty()) {

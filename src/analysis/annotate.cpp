@@ -133,7 +133,7 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
 
     // Code only exceptions reach: labelled, with what it is.
     std::map<u64, std::vector<std::string>> eh_notes;
-    const FunctionEh eh = function_eh(program.image(), program.decoder(), ins);
+    const FunctionEh eh = program.arch() == Arch::x86 ? function_eh(program.image(), program.decoder(), ins) : function_eh_x64(program.image(), start);
     auto where = [&](u64 va) { return ext.contains(va) ? label_for(va) : describe_reference(program, va).display; };
     auto mark = [&](u64 va, std::string note) {
         if (!ext.contains(va)) return;
@@ -146,8 +146,9 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
         std::vector<std::string> clauses;
         for (const auto& h : eh.cxx->handlers)
             clauses.push_back(std::format("{} at {}", catch_clause(program.image(), h), where(h.code)));
-        const std::string stub = program.symbols().at(eh.stub) ? where(eh.stub) : std::format("__ehhandler${}", fn.name);
-        fn.exception_handling.push_back(std::format("C++ exception handling (handler stub {}): {} try block{}{}{}", stub,
+        std::string stub;
+        if (eh.stub) stub = std::format(" (handler stub {})", program.symbols().at(eh.stub) ? where(eh.stub) : "__ehhandler$" + fn.name);
+        fn.exception_handling.push_back(std::format("C++ exception handling{}: {} try block{}{}{}", stub,
                                                     eh.cxx->try_blocks, eh.cxx->try_blocks == 1 ? "" : "s", clauses.empty() ? "" : "; ",
                                                     join(clauses, ", ")));
     }
@@ -155,14 +156,14 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
         for (usize i = 0; i < eh.seh->entries.size(); ++i) {
             const ScopeEntry& e = eh.seh->entries[i];
             const std::string within = e.enclosing >= 0 ? std::format(" in __try {}", e.enclosing) : "";
-            if (e.filter) {
-                mark(e.filter, std::format("__except filter (__try {})", i));
-                mark(e.handler, std::format("__except block (__try {})", i));
-                fn.exception_handling.push_back(
-                    std::format("__try {}{}: __except at {}, filter at {}", i, within, where(e.handler), where(e.filter)));
-            } else {
+            if (e.finally) {
                 mark(e.handler, std::format("__finally block (__try {})", i));
                 fn.exception_handling.push_back(std::format("__try {}{}: __finally at {}", i, within, where(e.handler)));
+            } else {
+                if (e.filter) mark(e.filter, std::format("__except filter (__try {})", i));
+                mark(e.handler, std::format("__except block (__try {})", i));
+                fn.exception_handling.push_back(std::format("__try {}{}: __except at {}, filter {}", i, within, where(e.handler),
+                                                            e.filter ? "at " + where(e.filter) : std::string("EXCEPTION_EXECUTE_HANDLER")));
             }
         }
     }

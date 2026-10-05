@@ -250,10 +250,12 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
 - `annotate_function()` produces an `AnnotatedFunction`: `loc_<address>` labels, operands symbolized
   with demangled names, comments for strings, floats, imports, frame slots (`arg_N`/`var_N` derived
   from `esp`/`ebp`/`rsp`/`rbp` offsets), switch tables, loop headers and back edges, tail calls, plus
-  callers, callees and data references. On x86 an `; eh:` line per exception-handling construct the
-  function registers (its try block's catch clauses with the caught types, each `__try`'s `__except`
-  or `__finally` block), the blocks themselves labelled and commented, and the registration's
-  operands named as MSVC names them (`__ehhandler$f`, `__sehtable$f`). The annotated listing is what
+  callers, callees and data references. An `; eh:` line per exception-handling construct the
+  function registers (its try blocks' catch clauses with the caught types, each `__try`'s `__except`
+  or `__finally` block), the blocks themselves labelled and commented; on x86 the registration's
+  operands are named as MSVC names them (`__ehhandler$f`, `__sehtable$f`), and x64 reads the
+  function's unwind data (`__C_specific_handler` scope tables, `__CxxFrameHandler3` FuncInfos; not
+  the compressed `__CxxFrameHandler4` tables of Visual Studio 2019 and later). The annotated listing is what
   the agent and the human read; there is no decompiler output.
 
 #### Function discovery

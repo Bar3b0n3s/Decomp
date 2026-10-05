@@ -12,6 +12,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <format>
 
 using namespace decomp;
 
@@ -157,4 +158,24 @@ TEST_CASE("a scope table counts only when the code registers an exception frame"
     CHECK(registers_seh_frame(decode({0x64, 0xA1, 0x00, 0x00, 0x00, 0x00}), 0x402000));
     // The table pushed as an argument of something else: push offset table; nop
     CHECK_FALSE(registers_seh_frame(decode({0x68, 0x00, 0x20, 0x40, 0x00, 0x90}), 0x402000));
+}
+
+TEST_CASE("x64 listings read exception handling from the unwind data") {
+    const Program p = Program::open(test::fixture("x64/eh.exe")).value();
+    // clang's __CxxFrameHandler3 FuncInfo (image-relative addresses).
+    const auto caught = annotate_function(p, p.symbols().find("?eh_catch@@YAHH@Z")->va).value();
+    REQUIRE(caught.exception_handling.size() == 1);
+    CHECK(caught.exception_handling[0].starts_with("C++ exception handling: 1 try block; catch (Failure&) at loc_"));
+    // __C_specific_handler's scope table: the filter is a function of its own, the __except block is in seh_nested.
+    const u64 nested = p.symbols().find("seh_nested")->va;
+    const auto seh = function_eh_x64(p.image(), nested);
+    REQUIRE(seh.seh);
+    REQUIRE(seh.seh->entries.size() == 1);
+    CHECK_FALSE(seh.seh->entries[0].finally);
+    CHECK(seh.seh->entries[0].filter == p.symbols().find("?filt$0@0@seh_nested@@")->va);
+    const auto listing = annotate_function(p, nested).value();
+    REQUIRE(listing.exception_handling.size() == 1);
+    CHECK(listing.exception_handling[0] == std::format("__try 0: __except at loc_{:x}, filter at ?filt$0@0@seh_nested@@", seh.seh->entries[0].handler));
+    // The handler of a function without unwind data, and x86 images: nothing.
+    CHECK(function_eh_x64(p.image(), p.image().entry_point()).empty());
 }

@@ -168,6 +168,7 @@ std::optional<ScopeTable> read_scope_table(const BinaryImage& image, u64 va) {
             e.handler = read32(image, at + 8);
             if (e.enclosing != none && (e.enclosing < 0 || e.enclosing >= i)) break;
             if ((e.filter && !code_at(image, e.filter)) || !code_at(image, e.handler)) break;
+            e.finally = e.filter == 0;
             out.push_back(e);
         }
         return out;
@@ -187,6 +188,38 @@ std::optional<ScopeTable> read_scope_table(const BinaryImage& image, u64 va) {
     table.entries = read_entries(va + 16, -2);
     if (table.entries.empty()) return std::nullopt;
     return table;
+}
+
+FunctionEh function_eh_x64(const pe::Image& image, u64 start) {
+    FunctionEh out;
+    if (image.arch() != Arch::x64 || start < image.image_base()) return out;
+    const u64 rva = start - image.image_base();
+    const auto& functions = image.runtime_functions();
+    auto f = std::ranges::find(functions, rva, &pe::RuntimeFunction::begin_rva);
+    if (f == functions.end() || !f->handler_data_rva) return out;
+    const u64 data = image.image_base() + f->handler_data_rva;
+    const u32 first = read32(image, data);
+    if (first > 0x1000) {  // an RVA: __CxxFrameHandler3's FuncInfo
+        out.cxx = read_cxx_funcinfo(image, image.image_base() + first);
+        return out;
+    }
+    // __C_specific_handler: a count, then {BeginAddress, EndAddress, HandlerAddress, JumpTarget}.
+    if (first == 0 || first > 64 || !data_at(image, data + 4, 16 * u64{first})) return out;
+    ScopeTable table;
+    table.va = data;
+    for (u32 i = 0; i < first; ++i) {
+        const u64 r = data + 4 + 16 * u64{i};
+        const u32 begin = read32(image, r), end = read32(image, r + 4), handler = read32(image, r + 8), target = read32(image, r + 12);
+        if (begin >= end || begin < f->begin_rva || end > f->end_rva) return out;
+        ScopeEntry e;
+        e.finally = target == 0;
+        e.handler = image.image_base() + (e.finally ? handler : target);
+        e.filter = !e.finally && handler != 1 ? image.image_base() + handler : 0;  // 1: EXCEPTION_EXECUTE_HANDLER
+        if (!code_at(image, e.handler) || (e.filter && !code_at(image, e.filter))) return out;
+        table.entries.push_back(e);
+    }
+    out.seh = std::move(table);
+    return out;
 }
 
 } // namespace decomp
