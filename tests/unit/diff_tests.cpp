@@ -5,10 +5,12 @@
 #include "matching/diff.hpp"
 #include "llvm_fixture.hpp"
 #include "test_util.hpp"
+#include "viewmodel/diff_view.hpp"
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <tuple>
 
 using namespace decomp;
 using namespace decomp::matching;
@@ -354,4 +356,126 @@ TEST_CASE("trailing int3 bytes are padding: a candidate may carry more of them t
     const auto obj = coff::Object::load(dir.path() / "candidate" / "candidate.obj").value();
     const auto d = diff_function(program, *program.resolve("_stop"), obj).value();
     CHECK(d.byte_exact);
+}
+
+TEST_CASE("cl.exe's jump tables after the code are data, whatever labels them") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-intext").value();
+    auto write = [&](const char* name, std::string_view text) {
+        const auto path = dir.path() / name;
+        REQUIRE(fs::write_text(path, std::string("    .intel_syntax noprefix\n    .text\n") + std::string(text)));
+        return path;
+    };
+    // cl.exe puts a switch's tables right after the function's code and labels them with static $LN
+    // symbols, a name it also gives to places in the code. x86 jumps through the table; x64 loads an
+    // image-relative entry. A two-level switch's byte table follows its dword table.
+    const std::string x86 = R"(    .globl _entry
+_entry:
+    push 1
+    call _dispatch
+    add esp, 4
+    ret
+    .globl _dispatch
+_dispatch:
+    mov eax, dword ptr [esp+4]
+    cmp eax, 5
+    ja Ldefault
+    movzx eax, byte ptr [eax + "$LN13@dispatch"]
+    jmp dword ptr [4*eax + "$LN12@dispatch"]
+Lcase0:
+    mov eax, 10
+    ret
+Lcase1:
+    mov eax, 11
+    ret
+Ldefault:
+    xor eax, eax
+    ret
+    .p2align 2, 0x90
+"$LN12@dispatch":
+    .long Lcase0
+    .long Lcase1
+    .long Ldefault
+"$LN13@dispatch":
+    .byte 0, 1, 2, 2, 1, 0
+)";
+    const std::string x64 = R"(    .globl entry
+entry:
+    mov ecx, 1
+    mov edx, 2
+    jmp dispatch
+    .globl dispatch
+dispatch:
+    cmp ecx, 3
+    ja .Ldefault
+    movsxd rax, ecx
+    lea r8, [rip + __ImageBase]
+    mov eax, dword ptr [r8 + 4*rax + "$LN12@dispatch"@IMGREL]
+    add rax, r8
+    jmp rax
+.Lcase0:
+    cmp edx, 5
+    ja .Ldefault
+    movsxd rdx, edx
+    movzx eax, byte ptr [r8 + rdx + "$LN14@dispatch"@IMGREL]
+    mov eax, dword ptr [r8 + 4*rax + "$LN13@dispatch"@IMGREL]
+    add rax, r8
+    jmp rax
+.Lcase1:
+    mov eax, 11
+    ret
+.Lcase2:
+    mov eax, 12
+    ret
+.Ldefault:
+    xor eax, eax
+    ret
+    .p2align 2, 0x90
+"$LN12@dispatch":
+    .long .Lcase0@IMGREL
+    .long .Lcase1@IMGREL
+    .long .Lcase2@IMGREL
+    .long .Ldefault@IMGREL
+"$LN13@dispatch":
+    .long .Lcase1@IMGREL
+    .long .Lcase2@IMGREL
+    .long .Ldefault@IMGREL
+"$LN14@dispatch":
+    .byte 0, 1, 2, 2, 1, 0
+)";
+    for (const auto& [arch, text, name] : {std::tuple{Arch::x86, x86, std::string("_dispatch")}, std::tuple{Arch::x64, x64, std::string("dispatch")}}) {
+        CAPTURE(name);
+        const std::string a = arch == Arch::x86 ? "x86" : "x64";
+        const auto source = write(("dispatch_" + a + ".s").c_str(), text);
+        auto exe = test::build_program(arch, *tools, dir.path() / a, {source}, "dispatch", {"/safeseh:no"});
+        REQUIRE(exe);
+        auto program = Program::open(*exe).value();
+        const auto obj = coff::Object::load(dir.path() / a / ("dispatch_" + a + ".obj")).value();
+        const auto d = diff_function(program, *program.resolve(name), obj).value();
+        CHECK_MESSAGE(d.byte_exact, to_text(d));
+        // The candidate's code ends where the tables start.
+        const auto& last = d.candidate.instructions.back().ins;
+        CHECK(d.candidate.address + d.candidate.size == last.address + last.length);
+
+        // The index table is compared by content: here switch value 4 takes the first entry instead.
+        std::string changed = text;
+        changed.replace(changed.find("0, 1, 2, 2, 1, 0"), 16, "0, 1, 2, 2, 0, 0");
+        const auto other_source = write(("other_" + a + ".s").c_str(), changed);
+        REQUIRE(test::build_program(arch, *tools, dir.path() / ("other_" + a), {other_source}, "other", {"/safeseh:no"}));
+        const auto other = coff::Object::load(dir.path() / ("other_" + a) / ("other_" + a + ".obj")).value();
+        const auto od = diff_function(program, *program.resolve(name), other).value();
+        CHECK_FALSE(od.byte_exact);
+        const auto data = vm::data_diff(od, &program);
+        const auto index = std::ranges::find(data, RefKind::index_table, &vm::DataDiffEntry::kind);
+        REQUIRE(index != data.end());
+        CHECK_FALSE(index->equal);
+        CHECK(index->target == "switch_index (6 bytes)");
+        REQUIRE(index->entries.size() == 6);
+        CHECK(index->entries[3] == std::pair<std::string, std::string>{"2", "2"});
+        CHECK(index->entries[4] == std::pair<std::string, std::string>{"1", "0"});
+    }
 }

@@ -101,9 +101,9 @@ functions the object defines.
 - Trailing int3 bytes are left out, here and on the target side: the trap a compiler puts after a
   final call that cannot return (Visual Studio 2015 and later, one byte or several) and the linker's
   fill look the same in the linked image.
-- A jump table at the end of the range is split off as data: the first relocated reference from an
-  indirect jump into the function's own section, past the jump, marks the end of the code (see
-  [jump tables](#jump-tables-inside-text-x86)).
+- The tables at the end of the range are split off as data: the first table the code indexes in the
+  function's own section, past the instruction, marks the end of the code (see
+  [jump tables](#jump-tables-inside-text)).
 - Candidates are always compiled with `/Gy`: for MSVC-style toolchains the driver appends `/Gy` when
   the flags lack it or turn it off with `/Gy-`. `/Gy` changes how functions are packaged, not the code
   generated for them, so targets built without it still match. Each candidate function is therefore
@@ -124,7 +124,7 @@ type does not matter for instruction fields; the relocation's symbol decides wha
 | A string literal (`??_C@...`), named or through its COMDAT's section symbol | The string's bytes |
 | A constant (`__real@`, `__xmm@`, `__ymm@`), named or through its section symbol | The constant's bytes; the size follows from the name (4, 8, 16 or 32 bytes) |
 | Any other named symbol outside the function's section | That symbol plus the addend |
-| Anonymous data: a section symbol, or a label in the function's own section (MSVC's `$LN` table labels) | A jump table when the data holds relocations back into the function; otherwise a string when it holds a NUL-terminated string of at least 2 bytes (such as an older compiler's `$SG` literal in `.data`); otherwise the named symbol at that offset; otherwise `<section>+<offset>` |
+| Anonymous data: a section symbol, or a label in the function's own section (MSVC's `$LN` table labels) | A jump table when the data holds relocations back into the function (read up to the function's next table); otherwise, past the code in the function's range, a two-level switch's index table (its bytes up to the next table or the end of the range); otherwise a string when it holds a NUL-terminated string of at least 2 bytes (such as an older compiler's `$SG` literal in `.data`); otherwise the named symbol at that offset; otherwise `<section>+<offset>` |
 
 Relocation types matter for jump-table entries only: their size, and whether they are PC-relative
 (clang's x64 `REL32` entries, which are adjusted back to the label they point to). Thread-local
@@ -145,6 +145,7 @@ instruction is its prefix and mnemonic plus these operand templates. References 
 | `string` | The bytes up to the terminator | Identical bytes. When the target has no string symbol there, the string at the target address is read and compared. | An escaped C string, first 48 bytes |
 | `float32`, `float64`, `vector` | The constant's bytes | Identical bit patterns, read at the target address when the target has no constant symbol there | `1.5f`, `0.75`, `const:<hex>` |
 | `table` | The targets of every entry, as labels | Same length, and every entry's labels aligned | `switch_table` |
+| `index_table` | A two-level switch's byte table: on the target as many bytes as the switch's bounds allow, on the candidate the bytes up to its next table or the end of its range | The candidate's bytes begin with the target's | `switch_index` |
 | `unknown` | `unk_<va>` on the target, `<section>+<offset>` on the candidate | Never | The address in hex |
 
 **Linker names compare exactly; readable names by equivalence.** When the target's name is the
@@ -185,7 +186,8 @@ part of the comparison. Three table forms are recognized on the target:
 
 Entries are read until one points outside the function or into non-code, or until another symbol
 starts (at most 4096). Two-level MSVC switches add a byte-sized index table
-(`movzx reg, byte ptr [reg + index_table]`); recognizing that table as data is planned (Phase 2).
+(`movzx reg, byte ptr [reg + index_table]`), which is data too and compares by its bytes
+(`index_table`).
 
 **Bindings.** When the target address has no symbol (`unknown`) and the candidate references a named
 symbol at the aligned operand, the pair is recorded as a binding, for example "the candidate uses
@@ -353,20 +355,23 @@ MSVC materializes float and double constants as COMDATs named after their bit pa
 candidate's constant has, and compares bit patterns. A float-versus-double mix-up shows as a constant
 difference (`1.5f` against `1.5`).
 
-### Jump tables inside `.text` (x86)
+### Jump tables inside `.text`
 
-MSVC x86 places a switch's jump table, and for sparse switches a byte index table, directly after the
-function's code in `.text`. In the object they sit inside the function's COMDAT, with `DIR32`
-relocations pointing back into the function and a `$LN` label on the table. On the target, the entries
-are absolute addresses covered by `HIGHLOW` base relocations, when relocations are present. A table
-inside the function's range is excluded from decoding: disassembly shows it as data (`switch:` comments
-and `switch_table_<address>` operands), and the diff compares it as index lists (see
-[step 3](#3-canonicalization)). On the candidate side, the first relocated reference from an indirect
-jump into the function's own section marks the end of the code. The byte index table of a two-level
-switch is not recognized yet (planned, Phase 2). MSVC x64 tables hold 32-bit image-relative entries
-(`ADDR32NB`) indexed through `__ImageBase`, and clang x64 tables hold offsets from the table. The slice
-detects tables from the indirect-jump pattern; without a symbol size, recursive descent finds the
-table's end by reading entries. Phase 2 hardens this for PDB-less MSVC targets.
+MSVC places a switch's jump table, and for sparse switches a byte index table after it, directly after
+the function's code in `.text`. In the object they sit inside the function's COMDAT, with relocations
+pointing back into the function (`DIR32` on x86, image-relative `ADDR32NB` on x64) and a static `$LN`
+label on each table; MSVC also gives `$LN` names to places in the code, so they end no function. On
+the target, x86 entries are absolute addresses covered by `HIGHLOW` base relocations, when relocations
+are present, and x64 entries are RVAs indexed through `__ImageBase`. A table inside the function's range
+is excluded from decoding: disassembly shows it as data (`switch:` comments and
+`switch_table_<address>` operands), and the diff compares a jump table as index lists and an index
+table by its bytes (see [step 3](#3-canonicalization)). On the candidate side, the code indexes its
+tables through a relocated displacement into its own section, past the instruction: x86 jumps through
+the table (`jmp [table + eax*4]`), x64 loads an entry (`mov ecx, [rdx + rax*4 + table]`), and a
+two-level switch first loads a byte from its index table. The first such table marks the end of the
+code, and each table runs to the next one. clang x64 tables, in `.rdata`, hold offsets from the table.
+Without a symbol size, recursive descent finds a table's end from the switch's bounds check or by
+reading entries.
 
 ### `/OPT:ICF` folding
 

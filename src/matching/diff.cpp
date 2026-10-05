@@ -25,6 +25,7 @@ std::string_view to_string(RefKind kind) {
     case RefKind::float64: return "float64";
     case RefKind::vector: return "vector";
     case RefKind::table: return "table";
+    case RefKind::index_table: return "index_table";
     case RefKind::unknown: return "unknown";
     }
     return "?";
@@ -220,6 +221,21 @@ const JumpTable* table_at(const FunctionExtent& ext, u64 va) {
     return nullptr;
 }
 
+const JumpTable* index_table_at(const FunctionExtent& ext, u64 va) {
+    for (const auto& t : ext.jump_tables)
+        if (t.index_va && t.index_va == va) return &t;
+    return nullptr;
+}
+
+Ref index_table_ref(std::string key, u64 target_va) {
+    Ref r;
+    r.kind = RefKind::index_table;
+    r.key = std::move(key);
+    r.display = "switch_index";
+    r.target_va = target_va;
+    return r;
+}
+
 } // namespace
 
 namespace {
@@ -307,6 +323,9 @@ Result<Side> build_target_side(const Program& program, u64 va) {
                 r.display = "switch_table";
                 r.target_va = target;
                 si.refs[f] = r;
+            } else if (const JumpTable* it = index_table_at(ext, target)) {
+                const auto bytes = program.image().view(it->index_va, it->index_entries);
+                si.refs[f] = index_table_ref(bytes ? bytes_hex(bytes->data(), bytes->size()) : std::string(), target);
             } else if (ext.contains(target)) {
                 si.refs[f] = label_ref(index_of, target, va);
             } else {
@@ -340,9 +359,17 @@ struct CandidateContext {
     const coff::Section& section;
     u32 start = 0;
     u32 code_end = 0;
+    u32 end = 0;                    // of the function's range, which holds its tables after the code
+    std::vector<u32> tables;        // section offsets of those tables, in order
     std::map<u64, usize> index_of;  // section offset -> instruction index
     std::string function;           // its name, which MSVC's names for its EH companions carry
 };
+
+// Where the in-function table at `offset` ends: at the next one, or with the function's range.
+u32 table_end(const CandidateContext& ctx, u32 offset) {
+    auto next = std::ranges::upper_bound(ctx.tables, offset);
+    return next != ctx.tables.end() ? *next : ctx.end;
+}
 
 const coff::Relocation* reloc_at(const coff::Section& sec, u32 offset) {
     auto it = std::ranges::lower_bound(sec.relocations, offset, {}, &coff::Relocation::offset);
@@ -452,10 +479,11 @@ Ref candidate_reloc_ref(const CandidateContext& ctx, const coff::Relocation& rel
         return r;
     }
     // Anonymous data via a section symbol or label: a jump table if its entries point back into the function.
-    unsigned ps = pointer_size(obj.arch());
+    const bool own_table = tsec == &ctx.section && off >= ctx.code_end && off < ctx.end;
+    const u32 limit = own_table ? table_end(ctx, static_cast<u32>(off)) : tsec->size;
     std::vector<std::string> labels;
     u32 stride = 0;
-    for (u32 entry = static_cast<u32>(off); entry < tsec->size; entry += stride) {
+    for (u32 entry = static_cast<u32>(off); entry < limit; entry += stride) {
         const coff::Relocation* er = reloc_at(*tsec, entry);
         if (!er) break;
         unsigned size = obj.relocation_size(er->type);
@@ -473,13 +501,15 @@ Ref candidate_reloc_ref(const CandidateContext& ctx, const coff::Relocation& rel
         }
         labels.push_back(label_ref(ctx.index_of, static_cast<u64>(label), ctx.start).key);
     }
-    (void)ps;
     if (!labels.empty()) {
         r.kind = RefKind::table;
         r.key = join(labels, ",");
         r.display = "switch_table";
         return r;
     }
+    // In-function data without relocations: a two-level switch's byte table. Its length is not
+    // recorded; the comparison reads as many entries as the target's switch can index.
+    if (own_table) return index_table_ref(bytes_hex(tsec->data.data() + off, limit - static_cast<u32>(off)), 0);
     if (!tsec->is_bss())
         if (auto str = read_cstring_at(tsec->data, static_cast<usize>(off), 4096); str && str->size() >= 2) {
             r.kind = RefKind::string;
@@ -511,24 +541,34 @@ Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& f
     x86::Decoder decoder(obj.arch());
     auto list = decoder.decode_all(ByteSpan(sec->data).subspan(start, end - start), start);
 
-    // In-section data (MSVC x86 puts jump tables right after the code in the same COMDAT): the first
-    // relocated reference from an indirect jump into this section past the jump marks the end of code.
+    // In-section data: cl.exe puts a switch's tables right after the function's code, in its COMDAT,
+    // under $LN labels that end no function. The code indexes them: x86 jumps through the table
+    // (`jmp [table+eax*4]`), x64 loads an image-relative entry (`mov ecx, [rdx+rax*4+table]`), and a
+    // two-level switch first loads a byte from its index table. The first table ends the code.
     u32 code_end = end;
+    std::vector<u32> tables;
     for (const auto& ins : list) {
-        if (ins.flow != x86::Flow::indirect_jump) continue;
+        if (ins.address >= code_end) break;
         for (const auto& f : ins.fields) {
+            if (f.kind != x86::FieldKind::disp || f.rip_relative || f.operand < 0) continue;
+            const auto& mem = ins.operands[static_cast<usize>(f.operand)].mem;
+            if (mem.base.empty() && mem.index.empty() && ins.flow != x86::Flow::indirect_jump) continue;
             const coff::Relocation* rel = reloc_at(*sec, static_cast<u32>(ins.address + f.offset));
             if (!rel) continue;
             const coff::Symbol* s = obj.symbol_at_index(rel->symbol_index);
             if (!s || s->section_number != function.section_number) continue;
-            u64 off = s->value + static_cast<u64>(f.raw);
-            if (off > ins.address && off < code_end) code_end = static_cast<u32>(off);
+            const u64 off = s->value + static_cast<u64>(f.raw);
+            if (off <= ins.address || off >= end) continue;
+            tables.push_back(static_cast<u32>(off));
+            code_end = std::min(code_end, static_cast<u32>(off));
         }
     }
+    std::ranges::sort(tables);
+    tables.erase(std::unique(tables.begin(), tables.end()), tables.end());
     std::erase_if(list, [&](const x86::Instruction& i) { return i.address >= code_end; });
     drop_trailing_int3(list);
 
-    CandidateContext ctx{obj, *sec, start, code_end, {}, function.name};
+    CandidateContext ctx{obj, *sec, start, code_end, end, std::move(tables), {}, function.name};
     for (usize i = 0; i < list.size(); ++i) ctx.index_of[list[i].address] = i;
 
     Side side;
@@ -571,6 +611,10 @@ bool refs_equal(const Ref& t, const Ref& c, const Program& program, const IndexM
     const auto& image = program.image();
     if (t.kind == RefKind::label || c.kind == RefKind::label)
         return t.kind == c.kind && labels_equal(t.key, c.key, map);
+    // The target's index table is as long as its switch's bounds allow; the candidate's runs to its
+    // next table or the end of the function.
+    if (c.kind == RefKind::index_table || t.kind == RefKind::index_table)
+        return t.kind == c.kind && !t.key.empty() && c.key.starts_with(t.key);
     if (c.kind == RefKind::table || t.kind == RefKind::table) {
         if (t.kind != c.kind) return false;
         auto tl = split(t.key, ','), cl = split(c.key, ',');

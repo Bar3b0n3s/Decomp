@@ -14,12 +14,14 @@ namespace decomp::matching {
 
 // What an address-bearing instruction field refers to, in a form comparable across the linked target
 // image and an unlinked candidate object.
-enum class RefKind : u8 { symbol, label, string, wide_string, float32, float64, vector, table, unknown };
+// `table` is a jump table (its entries as labels); `index_table` a two-level switch's byte table, which
+// maps the switch value to an entry (its bytes).
+enum class RefKind : u8 { symbol, label, string, wide_string, float32, float64, vector, table, index_table, unknown };
 std::string_view to_string(RefKind kind);
 
 struct Ref {
     RefKind kind = RefKind::unknown;
-    std::string key;      // comparison key: symbol name, label index, string content, constant bits, table labels
+    std::string key;      // comparison key: symbol name, label index, string content, constant bits, table labels or bytes
     std::string alt;      // alternative name for equivalence (PDB name of a target symbol)
     i64 offset = 0;       // symbol + offset
     u64 target_va = 0;    // target side: the referenced address

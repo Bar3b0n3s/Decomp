@@ -44,7 +44,7 @@ std::optional<usize> label_index(std::string_view key) {
 
 bool is_data_kind(RefKind k) {
     return k == RefKind::string || k == RefKind::wide_string || k == RefKind::float32 || k == RefKind::float64 || k == RefKind::vector ||
-           k == RefKind::table;
+           k == RefKind::table || k == RefKind::index_table;
 }
 
 // A jump table key's entries ("L3,L7,off+2a") as the labels the listing shows.
@@ -82,6 +82,7 @@ std::string target_data_at(const Program& program, u64 va, RefKind kind) {
 
 std::string ref_text(const matching::Ref& ref) {
     if (ref.kind == RefKind::table) return std::format("switch_table ({} cases)", split(ref.key, ',').size());
+    if (ref.kind == RefKind::index_table) return std::format("switch_index ({} bytes)", ref.key.size() / 2);
     return ref.display;
 }
 
@@ -352,6 +353,17 @@ std::vector<DataDiffEntry> data_diff(const FunctionDiff& diff, const Program* pr
                     e.entries.emplace_back(k < tl.size() ? tl[k] : std::string(), k < cl.size() ? cl[k] : std::string());
                 if (tr) e.target = std::format("switch_table ({} cases)", tl.size());
                 if (cr) e.candidate = std::format("switch_table ({} cases)", cl.size());
+            }
+            if (e.kind == RefKind::index_table) {
+                // Each switch value's entry in the jump table.
+                const std::string tk = tr && tr->kind == RefKind::index_table ? tr->key : std::string();
+                const std::string ck = cr && cr->kind == RefKind::index_table ? cr->key : std::string();
+                auto entry = [](const std::string& key, usize k) {
+                    return 2 * k + 2 <= key.size() ? std::to_string(std::stoul(key.substr(2 * k, 2), nullptr, 16)) : std::string();
+                };
+                for (usize k = 0; k < std::max(tk.size(), ck.size()) / 2; ++k) e.entries.emplace_back(entry(tk, k), entry(ck, k));
+                if (tr) e.target = ref_text(*tr);
+                if (cr) e.candidate = ref_text(*cr);
             }
             if (!tr || !cr) {
                 e.equal = false;

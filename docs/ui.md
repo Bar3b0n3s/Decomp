@@ -272,9 +272,9 @@ a transcript of several megabytes scrolls smoothly. Links can open a session on 
   panel shows the same for the current row, so nothing is shown only on hover.
 - A header with the score, the exact and byte-exact flags, the counts per row kind, and how the source
   compiled (duration, cache hit).
-- Panels: hints and binding suggestions, each linked to its rows; the data diff (the strings, floats
-  and jump tables the function references, target against candidate); the current row in full; the
-  compiler output.
+- Panels: hints and binding suggestions, each linked to its rows; the data diff (the strings, floats,
+  jump tables and switch index tables the function references, target against candidate); the
+  current row in full; the compiler output.
 - An attempt slider that scrubs through every attempt for the function (Best and Latest jump there),
   with each attempt's session, number and time, and whether it was made by hand.
 
