@@ -187,3 +187,51 @@ target with a PDB, then with the agent at work. CI covers the same steps on the 
 
 Note the target, the number of units and how they compare with the PDB's modules, the functions
 matched into unit sources, and anything the agent named or defined.
+
+# Phase 4 acceptance
+
+The manual check of the [Phase 4 exit criteria](roadmap.md#phase-4-types) on a real target with a PDB,
+and on one built with `/GR` without a PDB. CI covers the same steps on the test fixtures.
+
+## What you need
+
+- A target built with a PDB, and its original compiler registered as a toolchain (MSVC 7.0 or later:
+  older compilers write type records Decomp does not read).
+- A project for it (`decomp init <binary> --toolchain <name> --flag ...`).
+- For the skeletons: a target built with `/GR` (run-time type information), with its PDB moved away.
+
+## Checklist
+
+### Layouts
+
+- [ ] `decomp types --pdb` lists the PDB's types; `decomp types import --all --dry-run` prints the
+      header it would write, and `decomp types import --all` writes `include/types.h` (or reports which
+      types do not come back from the compiler with the PDB's layout, and why).
+- [ ] `decomp types check` reports every declared type equal to the PDB's: size, field offsets and the
+      vtable. Note any type that differs and the reason it gives.
+- [ ] Edit a field's type in the header: `decomp types check` names the difference and exits with 1;
+      revert the edit (`decomp changes revert <n>` for an import).
+
+### Field names
+
+- [ ] `decomp disasm <member function>` shows `; types:    this = <Class>* (ecx)` (rcx on x64) and the
+      fields the code reaches in the comments (`this->...`), and virtual calls by their method's name.
+- [ ] Rename a field in the header: the listing names it the header's way.
+
+### get_type
+
+- [ ] In a session (`decomp agent <member function>`), the brief's `# Types` section shows the class's
+      layout, and a `get_type` call returns the same layout as `decomp types show <name>`.
+
+### Skeletons
+
+- [ ] With the PDB moved away, `decomp classes` lists the RTTI's classes, and `decomp types skeletons`
+      writes their skeletons; they compile with the original compiler (it checked their vtables and
+      base offsets against the RTTI before writing).
+- [ ] The Types view in `decomp-gui` lists the types, shows a layout, and finds the uses of a type's
+      fields.
+
+## Recording the result
+
+Note the target and compiler, how many types the PDB defines, how many imported and how many came back
+equal, the differences `decomp types check` reported, and how many classes the skeletons covered.

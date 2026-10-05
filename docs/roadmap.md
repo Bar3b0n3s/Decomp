@@ -230,8 +230,10 @@ The manual check on a real target is in [acceptance.md](acceptance.md#phase-3-ac
 **Scope**
 
 - Headers in `include/` become the source of truth for types.
-- Headers are compiled with the original compiler and `/Zi`, and the exact layouts are read back from
-  the resulting PDB (TPI stream).
+- Headers are compiled with the original compiler and debug information, and the exact layouts are
+  read back from the type records it writes. (Planned as `/Zi` and the resulting PDB's TPI stream;
+  `/Z7` puts the same CodeView records in the object's `.debug$T` section, which needs no PDB server
+  and no link, so the compile is one more cached compile like a candidate's.)
 - Field names in annotations: `[ecx+0Ch]` becomes `this->health`.
 - The `get_type` tool.
 - RTTI-derived class skeletons.
@@ -244,6 +246,30 @@ The manual check on a real target is in [acceptance.md](acceptance.md#phase-3-ac
 - Annotated listings show field names for known types.
 - `get_type` returns exact layouts.
 - Class skeletons generated from RTTI compile with the original toolchain.
+
+**Status:** the scope is implemented, and CI covers each exit criterion on the test fixtures.
+
+- Layouts: `decomp types check` compiles the project's headers with the project's toolchain and `/Z7`
+  and compares every declared type with the PDB: size, kind, bases and their offsets, vfptr and vbptr,
+  vtable entries and the slots of the virtual methods, field offsets, sizes, bits and types, and
+  enumerators. CI checks the fixtures' types (a struct; classes with virtual functions, multiple and
+  virtual inheritance) declared by hand (`tests/fixtures/include`) and imported from the PDB
+  (`decomp types import --all`), with clang-cl for x86 and x64 on Linux and with cl.exe against
+  link.exe's PDBs in the Windows round trip, which also imports the types of a program built for the
+  hard cases (`tests/fixtures/src/layouts.cpp`: packing, alignment, bitfields, anonymous unions and
+  structs, member pointers, pure and overloaded virtuals, other calling conventions).
+- Field names: annotated listings follow pointers of known types from `this` and the parameters
+  (`this->hp`, `arg_0->area() (virtual, slot 0)`), with the project's headers' names before the
+  PDB's; tests check the fixtures' listings for x86 and x64 and the type flow on synthetic code.
+- `get_type` returns the layout the compiler made of a type (the headers', else the PDB's), with the
+  differences between the two; session briefs show the layouts of the types a function's signature
+  names.
+- Skeletons: `decomp types skeletons` makes class skeletons from the RTTI (bases at the RTTI's
+  offsets, vfptrs, virtual methods by slot with the signatures decorated names give); CI compiles them
+  for the RTTI fixture without its PDB (clang-cl, x86 and x64) and for the RTTI cl.exe writes (cl.exe),
+  and their vtables and base offsets equal the RTTI's.
+
+The manual check on a real target with a PDB is in [acceptance.md](acceptance.md#phase-4-acceptance).
 
 ### Phase 5: Units, data and full relink
 
