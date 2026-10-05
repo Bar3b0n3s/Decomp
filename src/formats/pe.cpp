@@ -332,6 +332,18 @@ Result<void> Image::parse_pdata(u32 rva, u32 size) {
     std::map<u32, u32> parent;  // begin -> begin of the entry it continues
     for (const auto& f : runtime_functions_)
         if (auto p = parent_of(f); p && *p && *p != f.begin_rva) parent[f.begin_rva] = *p;
+    // Exception handlers: after the unwind codes (padded to an even count), the handler's RVA and its data.
+    for (auto& f : runtime_functions_) {
+        if (f.unwind_rva & 1) continue;
+        auto off = rva_to_offset(f.unwind_rva);
+        if (!off) continue;
+        const u8 flags = read_le<u8>(d, *off).value_or(0) >> 3;
+        const u8 codes = read_le<u8>(d, *off + 2).value_or(0);
+        if ((flags & 0x3) == 0 || (flags & 0x4) != 0) continue;  // UNW_FLAG_EHANDLER | UHANDLER, not CHAININFO
+        const u32 handler = *off + 4 + 2 * ((codes + 1u) & ~1u);
+        f.handler_rva = read_le<u32>(d, handler).value_or(0);
+        f.handler_data_rva = f.handler_rva ? f.unwind_rva + (handler - *off) + 4 : 0;
+    }
     for (auto& f : runtime_functions_) {
         u32 root = f.begin_rva;
         for (int hop = 0; hop < 32; ++hop) {

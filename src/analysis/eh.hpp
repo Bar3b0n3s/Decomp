@@ -1,6 +1,6 @@
 #pragma once
 
-// Exception-handling tables (docs/architecture.md#exception-handling): what MSVC and compatible
+// Exception-handling tables (docs/architecture.md#function-discovery): what MSVC and compatible
 // compilers record about the code that only the exception dispatcher runs.
 //
 // On x86 a function registers a handler at entry (in fs:[0]). With C++ exception handling (/GX, /EHs)

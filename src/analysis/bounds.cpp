@@ -1,5 +1,6 @@
 #include "analysis/bounds.hpp"
 
+#include "analysis/demangle.hpp"
 #include "analysis/discovery.hpp"
 #include "formats/map.hpp"
 #include "formats/pdb.hpp"
@@ -38,7 +39,7 @@ Result<std::vector<FunctionBounds>> map_function_bounds(const std::filesystem::p
         if (e.section == 0) continue;
         const u64 va = e.va + delta;
         if (!image.is_code(va)) continue;
-        if (m.has_function_flags && !e.function) continue;
+        if ((m.has_function_flags && !e.function) || is_code_label_symbol(e.name, image.arch())) continue;
         by_start.try_emplace(va, FunctionBounds{va, 0, e.name});
     }
     std::vector<FunctionBounds> out;

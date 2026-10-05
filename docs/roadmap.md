@@ -169,6 +169,16 @@ checklist needs an API key and a person on each platform.
   executable, measured against ground truth such as the build's map file or a hand-checked list.
 - For a set of reference binaries, the Rich header maps to the correct compiler version.
 
+**Status:** the scope is implemented. The corpus CI measures is Zydis with C++ and structured
+exception handling added (`tests/corpus`). Without their PDBs, discovery finds exact bounds for 99.7%
+(x86, 382 of 383) and 100% (x64) of the functions in cl.exe 19.51's PDBs, and for 100% (x86) and 98.8%
+(x64) of those in clang-cl's. clang counts x64 funclets as part of their function; cl.exe, and so
+discovery, does not. Against the link maps, 100% of the starts are found for both compilers and both
+architectures. CI fails below 98%. The Rich header of the cl.exe build names cl.exe's own version,
+and unit tests cover reference Rich headers from VC6 to Visual Studio 2022. The VC6 measurement
+itself needs a real VC6 executable and its map file; the steps are in
+[acceptance.md](acceptance.md#phase-2-acceptance).
+
 ### Phase 3: Project organization
 
 **Goal:** organize work and sources the way the original program was organized.

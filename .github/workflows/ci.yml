@@ -105,8 +105,8 @@ jobs:
           # Zydis built without a C library; functions found without the PDB against the PDB and the map.
           tests/corpus/build_corpus.sh build/corpus
           for arch in x86 x64; do
-            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.pdb --min-exact 95
-            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.map --min-exact 95
+            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.pdb --min-exact 98
+            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.map --min-exact 98
           done
 
   windows:
@@ -167,7 +167,7 @@ jobs:
         run: tests\integration\msvc_roundtrip.ps1 -Arch x86
       - name: Function bounds corpus (MSVC x86)
         shell: pwsh
-        run: tests\corpus\build_corpus.ps1 -Arch x86
+        run: tests\corpus\build_corpus.ps1 -Arch x86 -MinExact 98
 
       - name: MSVC round trip (x64)
         uses: ilammy/msvc-dev-cmd@v1
@@ -177,7 +177,7 @@ jobs:
         run: tests\integration\msvc_roundtrip.ps1 -Arch x64
       - name: Function bounds corpus (MSVC x64)
         shell: pwsh
-        run: tests\corpus\build_corpus.ps1 -Arch x64
+        run: tests\corpus\build_corpus.ps1 -Arch x64 -MinExact 98
 
       # The cl.exe-built corpus, to look into what the analysis gets wrong on it.
       - uses: actions/upload-artifact@v4

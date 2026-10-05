@@ -5,35 +5,54 @@
  Preferred load address is 0000000000400000
 
  Start         Length     Name                   Class
- 0001:00000000 000001f1H .text                   CODE
+ 0001:00000000 000003b6H .text                   CODE
+ 0002:00000000 00000070H .rdata                  DATA
  0003:00000000 00000004H .data                   DATA
  0003:00000004 00000000H .bss                    DATA
 
   Address         Publics by Value              Rva+Base               Lib:Object
 
  0001:00000030       _entry                     0000000000401030     idioms.obj
- 0001:0000006b       _entry_end                 000000000040106b     idioms.obj
- 0001:00000080       _switch_one_level          0000000000401080     idioms.obj
- 0001:000000c8       _switch_one_level_end      00000000004010c8     idioms.obj
- 0001:000000d0       _switch_two_level          00000000004010d0     idioms.obj
- 0001:00000122       _switch_two_level_end      0000000000401122     idioms.obj
- 0001:00000130       _switch_unchecked          0000000000401130     idioms.obj
- 0001:00000179       _switch_unchecked_end      0000000000401179     idioms.obj
- 0001:00000180       _exit_helper               0000000000401180     idioms.obj
- 0001:0000018a       _exit_helper_end           000000000040118a     idioms.obj
- 0001:00000190       _calls_exit_helper         0000000000401190     idioms.obj
- 0001:00000197       _calls_exit_helper_end     0000000000401197     idioms.obj
- 0001:000001a0       _dead_code_after_exit      00000000004011a0     idioms.obj
- 0001:000001ad       _dead_code_after_exit_end  00000000004011ad     idioms.obj
- 0001:000001b0       _tail_caller               00000000004011b0     idioms.obj
- 0001:000001bb       _tail_caller_end           00000000004011bb     idioms.obj
- 0001:000001c0       _tail_target               00000000004011c0     idioms.obj
- 0001:000001c4       _tail_target_end           00000000004011c4     idioms.obj
- 0001:000001d0       _callback                  00000000004011d0     idioms.obj
- 0001:000001d6       _callback_end              00000000004011d6     idioms.obj
- 0001:000001e0       _unreferenced              00000000004011e0     idioms.obj
- 0001:000001ed       _unreferenced_end          00000000004011ed     idioms.obj
- 0002:0000004c       __imp__ExitProcess@4       000000000040204c     kernel32:kernel32.dll
+ 0001:00000096       _entry_end                 0000000000401096     idioms.obj
+ 0001:000000a0       _switch_one_level          00000000004010a0     idioms.obj
+ 0001:000000e8       _switch_one_level_end      00000000004010e8     idioms.obj
+ 0001:000000f0       _switch_two_level          00000000004010f0     idioms.obj
+ 0001:00000142       _switch_two_level_end      0000000000401142     idioms.obj
+ 0001:00000150       _switch_unchecked          0000000000401150     idioms.obj
+ 0001:00000199       _switch_unchecked_end      0000000000401199     idioms.obj
+ 0001:000001a0       _exit_helper               00000000004011a0     idioms.obj
+ 0001:000001aa       _exit_helper_end           00000000004011aa     idioms.obj
+ 0001:000001b0       _calls_exit_helper         00000000004011b0     idioms.obj
+ 0001:000001b7       _calls_exit_helper_end     00000000004011b7     idioms.obj
+ 0001:000001c0       _dead_code_after_exit      00000000004011c0     idioms.obj
+ 0001:000001cd       _dead_code_after_exit_end  00000000004011cd     idioms.obj
+ 0001:000001d0       _tail_caller               00000000004011d0     idioms.obj
+ 0001:000001db       _tail_caller_end           00000000004011db     idioms.obj
+ 0001:000001e0       _tail_target               00000000004011e0     idioms.obj
+ 0001:000001e4       _tail_target_end           00000000004011e4     idioms.obj
+ 0001:000001f0       _callback                  00000000004011f0     idioms.obj
+ 0001:000001f6       _callback_end              00000000004011f6     idioms.obj
+ 0001:00000200       _unreferenced              0000000000401200     idioms.obj
+ 0001:0000020d       _unreferenced_end          000000000040120d     idioms.obj
+ 0001:00000220       _switch_biased             0000000000401220     idioms.obj
+ 0001:00000255       _switch_biased_end         0000000000401255     idioms.obj
+ 0001:00000260       _switch_masked             0000000000401260     idioms.obj
+ 0001:0000029e       _switch_masked_end         000000000040129e     idioms.obj
+ 0001:000002a0       _eh_catcher                00000000004012a0     idioms.obj
+ 0001:000002ea       _eh_catcher_end            00000000004012ea     idioms.obj
+ 0001:000002f0       _seh_user                  00000000004012f0     idioms.obj
+ 0001:0000036a       _seh_user_end              000000000040136a     idioms.obj
+ 0001:00000370       _release                   0000000000401370     idioms.obj
+ 0001:00000377       _release_end               0000000000401377     idioms.obj
+ 0001:00000380       ___CxxFrameHandler3        0000000000401380     idioms.obj
+ 0001:00000383       ___CxxFrameHandler3_end    0000000000401383     idioms.obj
+ 0001:00000390       _frame_handler             0000000000401390     idioms.obj
+ 0001:00000396       _frame_handler_end         0000000000401396     idioms.obj
+ 0001:000003a0       _eh_catcher_stub           00000000004013a0     idioms.obj
+ 0001:000003a9       _eh_catcher_stub_end       00000000004013a9     idioms.obj
+ 0001:000003ad       _eh_catcher_unwind         00000000004013ad     idioms.obj
+ 0001:000003b2       _eh_catcher_unwind_end     00000000004013b2     idioms.obj
+ 0002:000000bc       __imp__ExitProcess@4       00000000004020bc     kernel32:kernel32.dll
  0003:00000000       _callbacks                 0000000000403000     idioms.obj
 
  entry point at         0001:00000030

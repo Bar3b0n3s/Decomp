@@ -74,6 +74,10 @@ struct RuntimeFunction {
     // The unwind data continues another entry's (UNW_FLAG_CHAININFO): the begin RVA of the entry the
     // chain starts from, so this range is part of that function. 0 for a function's own entry.
     u32 chained_to = 0;
+    // UNW_FLAG_EHANDLER / UHANDLER: the language-specific handler (__C_specific_handler,
+    // __CxxFrameHandler3/4, __GSHandlerCheck...) and its data (a scope table, a FuncInfo's RVA...).
+    u32 handler_rva = 0;
+    u32 handler_data_rva = 0;
 };
 
 class Image final : public BinaryImage {

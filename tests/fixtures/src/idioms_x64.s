@@ -18,6 +18,8 @@ entry:
     call switch_rva_two_level
     mov ecx, 16
     call switch_rva_unchecked
+    mov ecx, 1
+    call switch_shared_base
     mov ecx, 5
     call chained
     mov ecx, 1
@@ -190,3 +192,58 @@ unreferenced:
 unreferenced_end:
     int3
     int3
+
+# Two switches in one function: MSVC loads __ImageBase into a register once, before the first, so no
+# lea is on the second's path.
+    .p2align 4, 0xcc
+    .globl switch_shared_base
+switch_shared_base:
+    lea r11, [rip + __ImageBase]
+    cmp ecx, 2
+    ja Lsb_second
+    movsxd rax, ecx
+    mov eax, dword ptr [r11 + 4*rax + Lsb_table1@IMGREL]
+    add rax, r11
+    jmp rax
+Lsb_a:
+    mov edx, 1
+    jmp Lsb_second
+Lsb_b:
+    mov edx, 2
+    jmp Lsb_second
+Lsb_c:
+    mov edx, 3
+Lsb_second:
+    cmp edx, 2
+    ja Lsb_default
+    movsxd rax, edx
+    mov ecx, dword ptr [r11 + 4*rax + Lsb_table2@IMGREL]
+    add rcx, r11
+    jmp rcx
+Lsb_x:
+    mov eax, 10
+    ret
+Lsb_y:
+    mov eax, 20
+    ret
+Lsb_default:
+    xor eax, eax
+    ret
+    .p2align 2, 0xcc
+Lsb_table1:
+    .long Lsb_a@IMGREL, Lsb_b@IMGREL, Lsb_c@IMGREL
+Lsb_table2:
+    .long Lsb_x@IMGREL, Lsb_y@IMGREL, Lsb_default@IMGREL
+    .globl switch_shared_base_end
+switch_shared_base_end:
+
+# Nothing refers to it, and it starts with a two-byte nop right after the int3 fill (MSVC aligns a
+# loop at the top that way): the nop is the function's.
+    .p2align 4, 0xcc
+    .globl endless
+endless:
+    xchg ax, ax
+Lendless:
+    jmp Lendless
+    .globl endless_end
+endless_end:

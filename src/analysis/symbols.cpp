@@ -199,7 +199,7 @@ usize SymbolDb::add_map(const map::MapFile& m, const BinaryImage& image) {
         else if (is_float_constant_symbol(e.name)) s.kind = SymbolKind::float_const;
         else if (e.name.starts_with("__imp_")) s.kind = SymbolKind::import;
         else if (!image.is_code(va)) s.kind = SymbolKind::data;
-        else if (m.has_function_flags && !e.function) s.kind = SymbolKind::label;
+        else if ((m.has_function_flags && !e.function) || is_code_label_symbol(e.name, image.arch())) s.kind = SymbolKind::label;
         else s.kind = SymbolKind::function;
         const Symbol* before = at(va);
         if (s.kind == SymbolKind::label && before && before->kind == SymbolKind::function) {

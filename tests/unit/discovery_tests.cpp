@@ -260,7 +260,7 @@ TEST_CASE("discovery on MSVC and VC6 code layouts: tables after the code, byte t
         CAPTURE(arch);
         const Program p = Program::open(test::fixture(std::string(arch) + "/idioms.exe")).value();
         const auto truth = idiom_truth(arch);
-        REQUIRE(truth.size() == (std::string_view(arch) == "x86" ? 11u : 9u));
+        REQUIRE(truth.size() == (std::string_view(arch) == "x86" ? 20u : 11u));
         const auto c = compare_bounds(truth, function_bounds(p.symbols(), p.image()), p.image(), p.decoder());
         for (const auto& m : c.mismatches) MESSAGE(to_string(m.kind), " ", m.name, " found end ", m.found_end, " truth end ", m.truth_end);
         CHECK(c.exact == truth.size());
@@ -283,6 +283,36 @@ TEST_CASE("discovery on MSVC and VC6 code layouts: tables after the code, byte t
     auto helper = std::ranges::find(found.functions, idiom(truth, "_exit_helper"), &DiscoveredFunction::start);
     REQUIRE(helper != found.functions.end());
     CHECK(helper->noreturn);
+}
+
+TEST_CASE("a function named like exit or abort never returns, whatever its code does") {
+    const Program p = Program::open(test::fixture("x86/idioms.exe")).value();
+    const auto truth = idiom_truth("x86");
+    const u64 release = idiom(truth, "_release");
+    auto noreturn = [&](const SymbolDb& known) {
+        const auto found = discover_functions(p.image(), p.decoder(), known);
+        auto f = std::ranges::find(found.functions, release, &DiscoveredFunction::start);
+        REQUIRE(f != found.functions.end());
+        return f->noreturn;
+    };
+    SymbolDb known = SymbolDb::from_pe(p.image());
+    CHECK_FALSE(noreturn(known));  // it returns
+    // A map (or a library match) names it after the runtime's abort: the name wins.
+    Symbol s;
+    s.va = release;
+    s.name = "_abort";
+    s.kind = SymbolKind::function;
+    s.source = SymbolSource::map;
+    known.add(s);
+    CHECK(noreturn(known));
+    // So does a __stdcall-decorated name from a library match; a name the analysis made up says nothing.
+    s.name = "__CxxThrowException@8";
+    for (const SymbolSource source : {SymbolSource::library, SymbolSource::analysis}) {
+        SymbolDb named = SymbolDb::from_pe(p.image());
+        s.source = source;
+        named.add(s);
+        CHECK(noreturn(named) == (source == SymbolSource::library));
+    }
 }
 
 TEST_CASE("cross references go through incremental-linking thunks and include pointers stored in data") {
@@ -363,6 +393,65 @@ TEST_CASE("switch tables: the bound from the check, tables after the code, byte 
         CHECK(w.index_va == w.table_va + 16);
         CHECK(three.end == idiom_end(truth, unchecked));
     }
+
+    const Program x86 = Program::open(test::fixture("x86/idioms.exe")).value();
+    const auto truth = idiom_truth("x86");
+    // No bounds check, and the first case (8) folded into the byte table's displacement, which points
+    // into the jump table: the byte table is the one right after the table whose largest value is the
+    // last entry.
+    const auto biased = x86.function_extent(idiom(truth, "_switch_biased")).value();
+    REQUIRE(biased.jump_tables.size() == 1);
+    CHECK_FALSE(biased.jump_tables[0].bounded);
+    CHECK(biased.jump_tables[0].targets.size() == 3);
+    CHECK(biased.jump_tables[0].index_va == biased.jump_tables[0].table_va + 12);
+    CHECK(biased.jump_tables[0].index_entries == 9);
+    CHECK(biased.end == idiom_end(truth, "_switch_biased"));
+    // A mask allows 32 values; the byte table (which starts with what reads as a null entry) has 10.
+    const auto masked = x86.function_extent(idiom(truth, "_switch_masked")).value();
+    REQUIRE(masked.jump_tables.size() == 1);
+    CHECK(masked.jump_tables[0].bounded);
+    CHECK(masked.jump_tables[0].targets.size() == 3);
+    CHECK(masked.jump_tables[0].index_entries == 10);
+    CHECK(masked.end == idiom_end(truth, "_switch_masked"));
+
+    // x64: the second switch's __ImageBase register was loaded before the first one.
+    const Program x64 = Program::open(test::fixture("x64/idioms.exe")).value();
+    const auto shared = x64.function_extent(idiom(idiom_truth("x64"), "switch_shared_base")).value();
+    REQUIRE(shared.jump_tables.size() == 2);
+    for (const JumpTable& t : shared.jump_tables) {
+        CHECK(t.encoding == TableEncoding::rva);
+        CHECK(t.bounded);
+        CHECK(t.targets.size() == 3);
+    }
+}
+
+TEST_CASE("MSVC's exception handling in the idiom fixture: catch blocks, scope tables, handler stubs") {
+    const Program p = Program::open(test::fixture("x86/idioms.exe")).value();
+    const auto truth = idiom_truth("x86");
+    // The catch block and where it resumes, and the __except, filter and __finally blocks (the last
+    // called one instruction in) are their function's.
+    for (const char* name : {"_eh_catcher", "_seh_user"}) {
+        CAPTURE(name);
+        const Symbol* s = p.symbols().at(idiom(truth, name));
+        REQUIRE(s);
+        CHECK(s->va + s->size == idiom_end(truth, name));
+    }
+    const auto found = discover_functions(p.image(), p.decoder(), SymbolDb::from_pe(p.image()));
+    for (const auto& f : found.functions) {
+        const bool inside_eh = (f.start > idiom(truth, "_eh_catcher") && f.start < idiom_end(truth, "_eh_catcher")) ||
+                               (f.start > idiom(truth, "_seh_user") && f.start < idiom_end(truth, "_seh_user"));
+        CHECK_FALSE(inside_eh);
+    }
+    // The handler stub begins with the two nops the parent's registration points at.
+    auto stub = std::ranges::find(found.functions, idiom(truth, "_eh_catcher_stub"), &DiscoveredFunction::start);
+    REQUIRE(stub != found.functions.end());
+    CHECK(stub->end == idiom_end(truth, "_eh_catcher_stub"));
+    // A function that starts with a two-byte nop after int3 fill (x64).
+    const Program x64 = Program::open(test::fixture("x64/idioms.exe")).value();
+    const auto x64_truth = idiom_truth("x64");
+    const Symbol* endless = x64.symbols().at(idiom(x64_truth, "endless"));
+    REQUIRE(endless);
+    CHECK(endless->va + endless->size == idiom_end(x64_truth, "endless"));
 }
 
 TEST_CASE("x64 unwind data split into a chained entry is one function") {

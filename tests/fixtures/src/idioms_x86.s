@@ -30,6 +30,19 @@ _entry:
     push 16
     call _switch_unchecked
     add esp, 4
+    push 16
+    call _switch_biased
+    add esp, 4
+    push 9
+    call _switch_masked
+    add esp, 4
+    push 1
+    call _eh_catcher
+    add esp, 4
+    .byte 0x68                          # push offset _callbacks (imm32, as MSVC encodes it)
+    .long _callbacks
+    call _seh_user
+    add esp, 4
     call _calls_exit_helper
     call _tail_caller
     call _dead_code_after_exit
@@ -204,6 +217,204 @@ _unreferenced:
     .globl _unreferenced_end
 _unreferenced_end:
     .byte 0xcc, 0xcc, 0xcc, 0xcc
+
+# A switch whose default cannot happen, on the values 8 to 16: no bounds check, and the first case
+# value folded into the byte table's displacement, which so points into the jump table.
+    .p2align 4, 0xcc
+    .globl _switch_biased
+_switch_biased:
+    mov eax, dword ptr [esp+4]
+    movzx eax, byte ptr [eax + Lbias_index - 8]
+    jmp dword ptr [4*eax + Lbias_table]
+Lbias_a:
+    mov eax, 1
+    ret
+Lbias_b:
+    mov eax, 2
+    ret
+    .p2align 2, 0xcc
+Lbias_table:
+    .long Lbias_a, Lbias_b, 0
+Lbias_index:
+    .byte 0, 2, 2, 2, 2, 2, 2, 2, 1
+    .globl _switch_biased_end
+_switch_biased_end:
+
+# A switch on a masked value whose default cannot happen: the mask allows 32 values, the byte table
+# (which starts with four zeros, as a null jump-table entry would) has the switch's 10.
+    .p2align 4, 0xcc
+    .globl _switch_masked
+_switch_masked:
+    mov eax, dword ptr [esp+4]
+    and eax, 0x1f
+    movzx eax, byte ptr [eax + Lmask_index]
+    jmp dword ptr [4*eax + Lmask_table]
+Lmask_a:
+    mov eax, 1
+    ret
+Lmask_b:
+    mov eax, 2
+    ret
+Lmask_c:
+    mov eax, 3
+    ret
+    .p2align 2, 0xcc
+Lmask_table:
+    .long Lmask_a, Lmask_b, Lmask_c
+Lmask_index:
+    .byte 0, 0, 0, 0, 1, 1, 2, 2, 0, 1
+    .globl _switch_masked_end
+_switch_masked_end:
+
+# C++ exception handling as MSVC lays it out: the function registers its handler stub; its catch block
+# is in the function and returns where to resume; the stub and the unwind code come after the other
+# functions (MSVC's .text$x).
+    .p2align 4, 0xcc
+    .globl _eh_catcher
+_eh_catcher:
+    push ebp
+    mov ebp, esp
+    push -1
+    .byte 0x68                          # push offset _eh_catcher_stub (imm32, as MSVC encodes it)
+    .long _eh_catcher_stub
+    mov eax, dword ptr fs:[0]
+    push eax
+    mov dword ptr fs:[0], esp
+    sub esp, 8
+    mov dword ptr [ebp-4], 0
+    push dword ptr [ebp+8]
+    call _release
+    add esp, 4
+    xor eax, eax
+Leh_resume:
+    mov ecx, dword ptr [ebp-12]
+    mov dword ptr fs:[0], ecx
+    mov esp, ebp
+    pop ebp
+    ret
+Leh_catch:
+    mov eax, offset Leh_caught
+    ret
+Leh_caught:
+    mov eax, -1
+    jmp Leh_resume
+    .globl _eh_catcher_end
+_eh_catcher_end:
+
+# Structured exception handling as cl.exe writes it with _except_handler3: the scope table lists an
+# __except block with its filter and a __finally block, all in the function, which calls the __finally
+# block itself one instruction in (past the reload the unwinder needs).
+    .p2align 4, 0xcc
+    .globl _seh_user
+_seh_user:
+    push ebp
+    mov ebp, esp
+    push -1
+    .byte 0x68                          # push offset Lseh_scope (imm32, as MSVC encodes it)
+    .long Lseh_scope
+    .byte 0x68                          # push offset _frame_handler (imm32, as MSVC encodes it)
+    .long _frame_handler
+    mov eax, dword ptr fs:[0]
+    push eax
+    mov dword ptr fs:[0], esp
+    sub esp, 12
+    push ebx
+    push esi
+    push edi
+    mov dword ptr [ebp-24], esp
+    mov dword ptr [ebp-4], 1
+    mov eax, dword ptr [ebp+8]
+    mov ecx, dword ptr [eax]
+    mov dword ptr [ebp-28], ecx
+    mov dword ptr [ebp-4], 0
+    call Lseh_finally_body
+    jmp Lseh_done
+Lseh_finally:
+    mov ecx, dword ptr [ebp-28]
+Lseh_finally_body:
+    inc ecx
+    mov dword ptr [ebp-28], ecx
+    ret
+Lseh_filter:
+    xor eax, eax
+    cmp dword ptr [ebp-28], 1
+    setg al
+    ret
+Lseh_except:
+    mov esp, dword ptr [ebp-24]
+    mov dword ptr [ebp-28], -2
+Lseh_done:
+    mov dword ptr [ebp-4], -1
+    mov eax, dword ptr [ebp-28]
+    mov ecx, dword ptr [ebp-16]
+    mov dword ptr fs:[0], ecx
+    pop edi
+    pop esi
+    pop ebx
+    mov esp, ebp
+    pop ebp
+    ret
+    .globl _seh_user_end
+_seh_user_end:
+
+    .p2align 4, 0xcc
+    .globl _release
+_release:
+    mov ecx, dword ptr [esp+4]
+    dec dword ptr [ecx]
+    ret
+    .globl _release_end
+_release_end:
+
+    .p2align 4, 0xcc
+    .globl ___CxxFrameHandler3
+___CxxFrameHandler3:
+    xor eax, eax
+    ret
+    .globl ___CxxFrameHandler3_end
+___CxxFrameHandler3_end:
+
+    .p2align 4, 0xcc
+    .globl _frame_handler
+_frame_handler:
+    mov eax, 1
+    ret
+    .globl _frame_handler_end
+_frame_handler_end:
+
+# The handler stub starts with two nops, as MSVC writes it; the unwind code jumps to the destructor.
+    .p2align 4, 0xcc
+    .globl _eh_catcher_stub
+_eh_catcher_stub:
+    nop
+    nop
+    mov eax, offset Leh_funcinfo
+    jmp ___CxxFrameHandler3
+    .globl _eh_catcher_stub_end
+_eh_catcher_stub_end:
+    .byte 0xcc, 0xcc, 0xcc, 0xcc
+    .globl _eh_catcher_unwind
+_eh_catcher_unwind:
+    lea ecx, [ebp-16]
+    jmp _release
+    .globl _eh_catcher_unwind_end
+_eh_catcher_unwind_end:
+    .byte 0xcc, 0xcc, 0xcc, 0xcc
+
+    .section .rdata,"dr"
+    .p2align 2
+Lseh_scope:
+    .long -1, Lseh_filter, Lseh_except
+    .long 0, 0, Lseh_finally
+Leh_funcinfo:
+    .long 0x19930522, 2, Leh_unwind_map, 1, Leh_try_map, 0, 0, 0, 1
+Leh_unwind_map:
+    .long -1, _eh_catcher_unwind
+    .long -1, 0
+Leh_try_map:
+    .long 0, 0, 1, 1, Leh_handlers
+Leh_handlers:
+    .long 0x40, 0, 0, Leh_catch
 
     .data
     .globl _callbacks

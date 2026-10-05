@@ -236,7 +236,8 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   qualified forms used for name equivalence.
 - Function discovery (`analysis/discovery.hpp`, see [Function discovery](#function-discovery)): the
   functions of a target without a usable PDB, with their bounds; `Program::open()` runs it, and
-  `decomp init` writes what it finds to `symbols.txt`.
+  `decomp init` writes what it finds to `symbols.txt`. `analysis/eh.hpp` reads the exception-handling
+  tables (C++ FuncInfo, SEH scope tables) that list code only exceptions reach.
 - RTTI and vftables (`analysis/rtti.hpp`, see [RTTI and vftables](#rtti-and-vftables)): the classes a
   `/GR` build names, their bases and vftables (`Program::rtti()`, `decomp classes`).
 - Library functions (`analysis/signatures.hpp`, see [Library functions](#library-functions)): the
@@ -265,24 +266,47 @@ that leave a function for code past int3 padding (a tail call), unless a conditi
 function reaches it or its code jumps back into the function (MSVC puts int3 inside functions too);
 from the code left between functions after padding; and from code addresses held in relocations,
 data (aligned values, when there are no relocations) and instructions. Weakly evidenced starts that
-the previous function runs into are dropped. Each pass traces again only the functions a change
+the previous function runs into are dropped. Nops right after int3 fill begin the next function (MSVC
+starts some functions with them); an int3 that straight-line code other than a call runs into is
+padding. After a call that cannot return, Visual Studio 2015 and later compilers (by the Rich header)
+put an int3 that is the function's last byte. Each pass traces again only the functions a change
 affects, until nothing changes. Incremental linking's thunk table (a few int3 bytes at the start of
 the code, then `jmp rel32` thunks) is not reported as functions: a call, jump, pointer or entry point
 that lands on a thunk stands for the function behind it.
 
+Code that only the exception dispatcher runs is part of the function that registers it, though no
+flow of the function reaches it (`analysis/eh.hpp`). An x86 function with C++ exception handling
+stores a handler stub (`__ehhandler$f`: `mov eax, offset FuncInfo; jmp __CxxFrameHandler`, after a
+cookie check in newer stubs); its FuncInfo (magic 0x19930520 to 0x19930522, VC6 on) lists the catch
+blocks of each try block and the code that destroys objects while unwinding. A function with
+structured exception handling pushes a scope table for `_except_handler3` (VC6 on) or
+`_except_handler4` (16 bytes of cookie offsets first) that lists each `__try`'s filter and its
+`__except` or `__finally` block. Discovery traces that code with the function: catch blocks, unwind
+code and `__except` blocks anywhere in its window; filters, `__finally` blocks (which the function
+also calls, MSVC one instruction in) and the places catch blocks resume (the address each returns in
+eax) only inside the function's code or right after it, since clang makes functions of its filters
+and finally blocks. MSVC puts the handler stub and the unwind code elsewhere (`.text$x`): they are
+functions of their own, as are x64 funclets, which have their own unwind data. A link map's labels
+inside functions (`$LN12@f`, `__catch$f$0`, clang's `$ehgcr_*` and x86 `?catch$`/`?dtor$` funclets)
+are labels, not functions.
+
 Switch tables (`analysis/jump_tables.hpp`, shared with `Program::function_extent()`) get their entry
 count from the bounds check (`cmp`/`ja`, `jae`), a mask (`and idx, M`) or a byte index table (MSVC's
 two-level dispatch, x86 and x64), with biases applied after the bound. Tables MSVC places in the
-code section after the function are data and part of the function's extent. A switch whose default
-cannot happen (`__assume(0)`) has no bounds check: its byte table is read up to padding, another
-table or the function's end, and its null entries are cases that cannot happen, as are clang's int3
-entries.
+code section after the function are data and part of the function's extent. A byte table ends at the
+first byte that indexes no entry (a mask can allow more values than the switch has). A switch whose
+default cannot happen (`__assume(0)`) has no bounds check, and its first case value is folded into
+the byte table's displacement: the byte table is the one right after the jump table whose largest
+value is the table's last entry. Its null entries are cases that cannot happen, as are clang's int3
+entries. On x64 MSVC loads `__ImageBase` into a register once for all of a function's switches; an
+RVA displacement says what the register holds when the `lea` is off the switch's path.
 
 `decomp bounds <binary> --truth <pdb|map>` measures the functions found without the PDB against the
 build's PDB (starts and ends) or map file (starts; an end counts when only padding follows it), lists
 the mismatches (`--show-code`: how a start was found and the code where the bounds differ) and, with
-`--min-exact`, fails below a percentage. CI measures a build of Zydis (`tests/corpus`) made with
-clang-cl on Linux and with cl.exe on Windows, for x86 and x64.
+`--min-exact`, fails below a percentage. CI measures a build of Zydis with C++ and structured
+exception handling added (`tests/corpus`) made with clang-cl on Linux and with cl.exe on Windows,
+for x86 and x64, and keeps the cl.exe build as an artifact.
 
 #### Library functions
 

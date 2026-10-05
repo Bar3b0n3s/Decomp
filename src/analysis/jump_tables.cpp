@@ -170,6 +170,35 @@ std::vector<u64> read_while_valid(const JumpTableContext& ctx, const JumpTable& 
     return out;
 }
 
+// The entries of the jump table, valid or null, before the first that is neither (at most 256: what
+// a byte can index). Nulls at the end are counted: a byte table that starts with zeros reads as one.
+usize indexable_entries(const JumpTableContext& ctx, const JumpTable& t) {
+    usize n = 0;
+    for (; n < 256; ++n) {
+        const u64 slot = t.table_va + n * t.entry_size;
+        if (n > 0 && ctx.table_starts && ctx.table_starts->contains(slot)) break;
+        if (null_entry(ctx, t, n)) continue;
+        auto target = entry_target(ctx, t, n);
+        if (!target || !valid_target(ctx, *target)) break;
+    }
+    return n;
+}
+
+// The bytes of a byte table at `va`: at most `max` of them, each below `entries` (the jump table
+// entries they can index), up to another table or the function's end.
+std::vector<u8> index_bytes(const JumpTableContext& ctx, u64 va, u64 max, usize entries) {
+    std::vector<u8> out;
+    for (u64 n = 0; n < max; ++n) {
+        const u64 at = va + n;
+        if (n > 0 && ctx.table_starts && ctx.table_starts->contains(at)) break;
+        if (at >= ctx.fn_limit && va >= ctx.fn_start && va < ctx.fn_limit) break;
+        const auto b = ctx.image->read<u8>(at);
+        if (!b || *b >= entries) break;
+        out.push_back(*b);
+    }
+    return out;
+}
+
 // A byte table read without a bound (the switch has no bounds check when its default cannot happen):
 // small values up to padding, another table or the function's end.
 usize unbounded_index_bytes(const JumpTableContext& ctx, u64 va) {
@@ -231,25 +260,34 @@ std::optional<IndexLoad> index_load(const JumpTableContext& ctx, std::span<const
 bool fill_entries(const JumpTableContext& ctx, JumpTable& t, std::span<const Instruction> before, usize from, const std::string& index,
                   std::optional<std::string> image_base_reg) {
     if (auto load = index_load(ctx, before, from, index, image_base_reg)) {
-        std::optional<u64> values = bound_of(before, load->position, load->index);
-        const bool bounded = values.has_value();
-        if (!values)
-            if (const usize n = unbounded_index_bytes(ctx, load->table_va)) values = n;
-        if (values && *values <= 256) {
-            std::vector<u8> bytes;
-            for (u64 i = 0; i < *values; ++i) {
-                auto b = ctx.image->read<u8>(load->table_va + i);
-                if (!b) return false;
-                bytes.push_back(*b);
+        const usize indexable = indexable_entries(ctx, t);
+        auto take = [&](u64 index_va, const std::vector<u8>& bytes, bool bounded) {
+            if (bytes.empty()) return false;
+            auto targets = read_counted(ctx, t, static_cast<usize>(*std::ranges::max_element(bytes)) + 1);
+            if (!targets) return false;
+            t.targets = std::move(*targets);
+            t.index_va = index_va;
+            t.index_entries = bytes.size();
+            t.bounded = bounded;
+            return true;
+        };
+        if (const auto values = bound_of(before, load->position, load->index)) {
+            // A bounds check or a mask: the byte table starts at the displacement. A mask can allow more
+            // values than the switch has cases (when its default cannot happen): the table then ends at
+            // a byte that indexes no entry.
+            if (*values <= 256 && take(load->table_va, index_bytes(ctx, load->table_va, *values, indexable), true)) return true;
+        } else {
+            // No bounds check: the displacement has the switch's first case value folded in. MSVC puts the
+            // byte table right after the jump table: with E entries it starts at the table + E entries, at
+            // or after the displacement, and its largest value is E - 1.
+            for (usize e = indexable; e >= 1; --e) {
+                const u64 index_va = t.table_va + e * t.entry_size;
+                if (index_va < load->table_va || index_va - load->table_va > 255) continue;
+                const auto bytes = index_bytes(ctx, index_va, 256, e);
+                if (!bytes.empty() && *std::ranges::max_element(bytes) == e - 1 && take(index_va, bytes, false)) return true;
             }
-            const usize entries = static_cast<usize>(*std::ranges::max_element(bytes)) + 1;
-            if (auto targets = read_counted(ctx, t, entries)) {
-                t.targets = std::move(*targets);
-                t.index_va = load->table_va;
-                t.index_entries = bytes.size();
-                t.bounded = bounded;
-                return true;
-            }
+            if (const usize n = unbounded_index_bytes(ctx, load->table_va))
+                if (take(load->table_va, index_bytes(ctx, load->table_va, n, 256), false)) return true;
         }
     }
     if (auto values = bound_of(before, from, index)) {
@@ -305,6 +343,10 @@ std::optional<JumpTable> read_register_table(const JumpTableContext& ctx, std::s
             family(ins.operands[0].reg) == family(mem->mem.base) && ins.memory_target)
             base_value = ins.memory_target;
     }
+    // MSVC keeps __ImageBase in a register for all of a function's switches: the lea that set it can be
+    // off this path. An RVA displacement says what the register holds; the entries are checked anyway.
+    if (!base_value && mem->mem.has_disp && mem->mem.disp > 0 && ctx.image->contains(ctx.image->image_base() + static_cast<u64>(mem->mem.disp)))
+        base_value = ctx.image->image_base();
     if (!base_value) return std::nullopt;
     JumpTable t;
     t.jump_va = jump.address;

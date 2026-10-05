@@ -40,6 +40,16 @@ bool noreturn_import(std::string_view name) {
     return names.contains(name);
 }
 
+// A function that never returns, by its name: an import's, or a linked function's name from a map, a
+// library or the user (`_exit`, `__CxxThrowException@8`, `?terminate@@YAXXZ`).
+bool noreturn_name(std::string_view name) {
+    if (noreturn_import(name)) return true;
+    if (name.starts_with('_')) name.remove_prefix(1);  // x86 C decoration
+    if (const auto at = name.rfind('@'); at != std::string_view::npos && at > 0 && name.find('?') == std::string_view::npos)
+        name = name.substr(0, at);  // __stdcall's @N
+    return noreturn_import(name);
+}
+
 // Instructions compiled code does not contain: data decoded as code tends to produce them.
 bool suspicious(const x86::Instruction& ins) {
     static const std::set<std::string_view> mnemonics = {
@@ -112,6 +122,9 @@ public:
             if (noreturn_import(imp.name)) noreturn_slots_.insert(imp.iat_va);
         }
         find_incremental_linking_tables();
+        if (const auto build = image.build_info())
+            if (const pe::BuildTool* main = build->main_compiler(); main && main->product && main->product->release == pe::VsRelease::vs2015_or_later)
+                trap_after_noreturn_call_ = true;
     }
 
     DiscoveryResult run() {
@@ -298,6 +311,7 @@ private:
         const u64 entry = image_.entry_point();
         for (const auto& [va, s] : known_) {
             if (s.kind != SymbolKind::function || !range_of(va)) continue;
+            if (s.source != SymbolSource::analysis && noreturn_name(s.name)) named_noreturn_.insert(va);
             FunctionEvidence evidence = FunctionEvidence::symbol;
             if (va == entry) evidence = FunctionEvidence::entry;
             else if (s.source == SymbolSource::export_table) evidence = FunctionEvidence::export_table;
@@ -382,9 +396,11 @@ private:
                         body.calls.push_back(i->target);
                         if (noreturn_.contains(i->target)) stop = ends_after_noreturn_call(a + i->length, start, limit);
                     }
+                    if (stop) take_trap_after(a + i->length, limit, body);
                     break;
                 case x86::Flow::indirect_call:
                     if (i->has_memory && noreturn_slots_.contains(i->target)) stop = ends_after_noreturn_call(a + i->length, start, limit);
+                    if (stop) take_trap_after(a + i->length, limit, body);
                     break;
                 case x86::Flow::cond_jump:
                     if (i->has_branch) {
@@ -455,6 +471,12 @@ private:
         return body;
     }
 
+    // Visual Studio 2015 and later compilers put an int3 after a call that cannot return, as the function's
+    // last byte; clang and older compilers end the function at the call.
+    void take_trap_after(u64 next, u64 limit, Body& body) const {
+        if (trap_after_noreturn_call_ && next < limit && image_.read<u8>(next).value_or(0) == 0xCC) body.end = std::max(body.end, next + 1);
+    }
+
     // After a call that cannot return, the function ends unless the compiler emitted code after it anyway
     // (it does when the callee is not declared noreturn): padding, another function or the window's end
     // follow when it did not.
@@ -487,13 +509,15 @@ private:
 
     // x86 exception handling: the code a function's tables list is the function's, though its flow does
     // not reach it. Catch blocks, unwind code and __except blocks are taken anywhere in the function's
-    // window (clang puts them after its code and padding); filters and __finally blocks only inside the
-    // function's code or right after it (clang makes functions of those), and so are the addresses
-    // the function holds of its own code (where a catch block resumes).
+    // window (clang puts them after its code and padding); filters, __finally blocks and the places
+    // catch blocks resume (the address each returns in eax) only inside the function's code or right
+    // after it (clang makes functions of its filters and finally blocks). The function calls its
+    // __finally blocks on the way out (MSVC one instruction in, past a reload the unwinder needs).
     void attach_eh(u64 start, Fn& fn) {
-        std::set<u64> loose, tight;
+        std::set<u64> loose, tight, catches;
         for (u64 ref : fn.body.code_refs)
             if (const CxxFuncInfo* info = funcinfo_of_stub(ref)) {
+                catches.insert(info->catch_blocks.begin(), info->catch_blocks.end());
                 loose.insert(info->catch_blocks.begin(), info->catch_blocks.end());
                 loose.insert(info->unwind_actions.begin(), info->unwind_actions.end());
             }
@@ -503,8 +527,8 @@ private:
                     if (e.filter) {
                         loose.insert(e.handler);
                         tight.insert(e.filter);
-                    } else if (std::ranges::contains(fn.body.calls, e.handler)) {
-                        tight.insert(e.handler);  // a __finally block, which the function calls on its way out
+                    } else {
+                        tight.insert(e.handler);  // a __finally block
                     }
                 }
         if (loose.empty() && tight.empty()) {
@@ -527,18 +551,17 @@ private:
         std::vector<u64> roots;
         for (u64 e : loose)
             if (e > start && e < limit) roots.push_back(e);
+        for (u64 c : catches)
+            if (c > start && c < limit)
+                for (u64 resume : trace(c, limit).code_refs) tight.insert(resume);
         Body body = trace(start, limit, roots);
         for (int round = 0; round < 8; ++round) {
             bool more = false;
-            auto take = [&](u64 e) {
+            for (u64 e : tight)
                 if (e > start && e <= body.end && e < limit && !std::ranges::contains(roots, e)) {
                     roots.push_back(e);
                     more = true;
                 }
-            };
-            for (u64 e : tight) take(e);
-            for (u64 ref : body.code_refs)
-                if (ref < body.end) take(ref);
             if (!more) break;
             body = trace(start, limit, roots);
         }
@@ -574,7 +597,9 @@ private:
         std::vector<std::pair<u64, u64>> found;
         for (const auto& [start, fn] : fns_)
             for (u64 t : fn.body.calls)
-                if (!is_start(t) && range_of(t) && !rejected_.contains(t) && !internal_.contains(t)) found.emplace_back(t, start);
+                if (!is_start(t) && range_of(t) && !rejected_.contains(t) && !internal_.contains(t) &&
+                    !std::ranges::binary_search(fn.body.instructions, t))  // its own code: a __finally block, `call $+5`
+                    found.emplace_back(t, start);
         for (auto [t, from] : found) add(t, FunctionEvidence::call, 0, std::format("called from {:#x}", from));
         return !found.empty();
     }
@@ -601,6 +626,10 @@ private:
         // Functions that may not return, then the greatest fixpoint over tail calls.
         std::unordered_map<u64, bool> nr;
         for (const auto& [start, fn] : fns_) {
+            if (named_noreturn_.contains(start)) {
+                nr[start] = true;  // its code may return (exit's does, by way of ExitProcess): its name says it does not
+                continue;
+            }
             const Body& b = fn.body;
             bool candidate = !b.returns && !b.unknown_exit && !(b.falls_off && !b.last_is_call) && !b.invalid;
             for (u64 t : b.tail_targets)
@@ -610,7 +639,7 @@ private:
         for (bool changed = true; changed;) {
             changed = false;
             for (const auto& [start, fn] : fns_) {
-                if (!nr[start]) continue;
+                if (!nr[start] || named_noreturn_.contains(start)) continue;
                 for (u64 t : fn.body.tail_targets)
                     if (!nr[t]) {
                         nr[start] = false;
@@ -741,13 +770,25 @@ private:
         return added;
     }
 
+    // Where the code after `at` starts: past the padding, except that nops right after int3 fill begin the
+    // next function (MSVC starts some with them: the `__ehhandler$` stubs, a loop aligned at the top).
+    u64 code_after_padding(u64 at, u64 limit) const {
+        u64 p = at;
+        while (p < limit && image_.read<u8>(p).value_or(0) == 0xCC) ++p;
+        if (p > at && p < limit) {
+            const u8 b = image_.read<u8>(p).value_or(0);
+            const bool nop = b == 0x90 || (b == 0x66 && image_.read<u8>(p + 1).value_or(0) == 0x90);
+            if (nop && p + padding_length(image_, decoder_, p, limit) < limit) return p;
+        }
+        return at + padding_length(image_, decoder_, at, limit);
+    }
+
     bool scan_gap(u64 at, u64 next) {
         bool added = false;
-        u64 p = at + padding_length(image_, decoder_, at, next);
+        u64 p = code_after_padding(at, next);
         while (p < next) {
             if (const auto* run = ilt_run_at(p)) {
-                p = std::min(run->second, next);
-                p += padding_length(image_, decoder_, p, next);
+                p = code_after_padding(std::min(run->second, next), next);
                 continue;
             }
             if (auto body = plausible(p)) {
@@ -759,7 +800,7 @@ private:
                 dirty_.erase(p);
                 added = true;
                 const u64 e = std::max(fn.body.end, p + 1);
-                p = e + padding_length(image_, decoder_, e, next);
+                p = code_after_padding(e, next);
                 continue;
             }
             // Resume after the next padding byte.
@@ -769,7 +810,7 @@ private:
                 if (before == 0xCC || before == 0x90) break;
                 ++q;
             }
-            p = q + padding_length(image_, decoder_, q, next);
+            p = code_after_padding(q, next);
         }
         return added;
     }
@@ -836,12 +877,14 @@ private:
     std::set<u64> noreturn_;
     std::set<u64> imported_slots_;
     std::set<u64> noreturn_slots_;
+    std::set<u64> named_noreturn_;  // functions whose names say they never return
     std::set<u64> rejected_;
     std::set<u64> candidates_;
     std::set<u64> data_refs_;  // code addresses in data and relocations
     bool candidates_built_ = false;
     std::set<u64> table_starts_;  // every switch table (and byte table) found so far
     bool new_table_starts_ = false;
+    bool trap_after_noreturn_call_ = false;  // the image's compiler puts an int3 after a call that cannot return
     std::set<u64> internal_;  // code a function's exception-handling tables list: never a function start
     std::unordered_map<u64, std::optional<CxxFuncInfo>> funcinfo_cache_;  // by handler stub
     std::unordered_map<u64, std::optional<ScopeTable>> scope_cache_;
