@@ -6,6 +6,8 @@
 #include "analysis/bounds.hpp"
 #include "analysis/eh.hpp"
 #include "analysis/program.hpp"
+#include "formats/coff.hpp"
+#include "matching/diff.hpp"
 #include "formats/map.hpp"
 #include "test_util.hpp"
 
@@ -178,4 +180,29 @@ TEST_CASE("x64 listings read exception handling from the unwind data") {
     CHECK(listing.exception_handling[0] == std::format("__try 0: __except at loc_{:x}, filter at ?filt$0@0@seh_nested@@", seh.seh->entries[0].handler));
     // The handler of a function without unwind data, and x86 images: nothing.
     CHECK(function_eh_x64(p.image(), p.image().entry_point()).empty());
+}
+
+TEST_CASE("the diff pairs a function's exception-handling stub with the candidate's, named or not") {
+    const auto obj = coff::Object::load(test::fixture("x86/eh.obj")).value();
+    const Program p = Program::open(test::fixture("x86/eh.exe")).value();
+    for (const char* name : {"?eh_catch@@YAHH@Z", "?eh_guarded@@YAHH@Z", "?eh_nested@@YAHH@Z"}) {
+        CAPTURE(name);
+        const auto d = matching::diff_function(p, p.symbols().find(name)->va, obj).value();
+        CHECK(d.byte_exact);
+    }
+    // Without the PDB nothing names the stub (clang's ___ehhandler$?eh_guarded@@YAHH@Z): its row still
+    // pairs; what differs are the unnamed callee and global.
+    OpenOptions options;
+    options.use_pdb = false;
+    const Program bare = Program::open(test::fixture("x86/eh.exe"), options).value();
+    const auto d = matching::diff_function(bare, p.symbols().find("?eh_guarded@@YAHH@Z")->va, obj, "?eh_guarded@@YAHH@Z").value();
+    bool stub_row = false;
+    for (const auto& row : d.rows) {
+        if (row.target && row.candidate &&
+            d.candidate.instructions[*row.candidate].text.find("ehhandler$") != std::string::npos) {
+            stub_row = true;
+            CHECK(row.kind == matching::RowKind::equal);
+        }
+    }
+    CHECK(stub_row);
 }

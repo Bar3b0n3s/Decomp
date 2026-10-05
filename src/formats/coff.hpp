@@ -74,6 +74,13 @@ struct Symbol {
     bool is_section_symbol() const;  // static symbol naming a section at offset 0 (with a section aux record)
 };
 
+// A name compilers give to a place inside a function, not to a function: MSVC's line labels ($LN12@f)
+// and catch blocks (__catch$?f@@YAXXZ$0, which it marks static functions), clang's catch continuations
+// ($ehgcr_3_10) and, on x86, its catch and cleanup funclets (?catch$3@?0??f@@YAXXZ@4HA, ?dtor$2@...),
+// which are part of their function there. (x64 funclets have unwind data of their own and are
+// functions.) Link maps list them too.
+bool is_code_label_name(std::string_view name, Arch arch);
+
 class Object {
 public:
     static Result<Object> load(const std::filesystem::path& path);

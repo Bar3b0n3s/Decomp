@@ -2,6 +2,7 @@
 
 #include "analysis/annotate.hpp"
 #include "analysis/demangle.hpp"
+#include "analysis/eh.hpp"
 #include "core/strings.hpp"
 
 #include <algorithm>
@@ -221,9 +222,46 @@ const JumpTable* table_at(const FunctionExtent& ext, u64 va) {
 
 } // namespace
 
+namespace {
+
+// Trailing int3 bytes are padding as far as the linked image goes: the trap compilers put after a final
+// call that cannot return (Visual Studio 2015 and later; one byte or several) and the linker's fill
+// look the same, so the comparison leaves them out on both sides.
+void drop_trailing_int3(std::vector<x86::Instruction>& list) {
+    while (list.size() > 1 && list.back().length == 1 && list.back().bytes[0] == 0xCC) list.pop_back();
+}
+
+// x86 exception-handling companions of the function being compared: the handler stub it registers and
+// its scope table. MSVC names them after the function (__ehhandler$f, __sehtable$f); the target often
+// has only their addresses, so both sides name them as the function's own, whatever it is called.
+constexpr std::string_view kOwnEhHandler = "__ehhandler$<this function>";
+constexpr std::string_view kOwnScopeTable = "__sehtable$<this function>";
+
+Ref own_companion(std::string_view key, std::string display) {
+    Ref r;
+    r.kind = RefKind::symbol;
+    r.key = std::string(key);
+    r.display = std::move(display);
+    return r;
+}
+
+// A candidate's reference to the companions MSVC names after `function` (clang decorates the stub's
+// name as a C symbol on x86: ___ehhandler$f).
+Ref own_companions(Ref r, const std::string& function) {
+    if (r.kind != RefKind::symbol || r.offset != 0) return r;
+    std::string_view key = r.key;
+    if (key.starts_with("___ehhandler$")) key.remove_prefix(1);
+    if (key.starts_with("__ehhandler$") && key.substr(12) == function) return own_companion(kOwnEhHandler, r.display);
+    if (key.starts_with("__sehtable$") && key.substr(11) == function) return own_companion(kOwnScopeTable, r.display);
+    return r;
+}
+
+} // namespace
+
 Result<Side> build_target_side(const Program& program, u64 va) {
     TRY_ASSIGN(auto ext, program.function_extent(va));
     TRY_ASSIGN(auto list, program.function_instructions(ext));
+    drop_trailing_int3(list);
     Side side;
     const Symbol* sym = program.symbols().at(va);
     side.name = sym ? sym->name : std::format("sub_{:x}", va);
@@ -233,6 +271,7 @@ Result<Side> build_target_side(const Program& program, u64 va) {
     std::map<u64, usize> index_of;
     for (usize i = 0; i < list.size(); ++i) index_of[list[i].address] = i;
     const auto rva_fields = image_relative_fields(program.image(), list);
+    const FunctionEh eh = program.arch() == Arch::x86 ? function_eh(program.image(), program.decoder(), list) : FunctionEh{};
 
     for (auto& ins : list) {
         SideInstruction si;
@@ -251,6 +290,14 @@ Result<Side> build_target_side(const Program& program, u64 va) {
             const bool rva_field = !rva_table && rva_fields.contains({ins.address, f});
             if (rva_field) target = program.image().image_base() + static_cast<u64>(field.raw);
             if (!rva_table && !rva_field && !is_address_field(program, ins, field)) continue;
+            if (eh.cxx && target == eh.stub) {
+                si.refs[f] = own_companion(kOwnEhHandler, "__ehhandler$" + side.name);
+                continue;
+            }
+            if (eh.seh && target == eh.seh->va) {
+                si.refs[f] = own_companion(kOwnScopeTable, "__sehtable$" + side.name);
+                continue;
+            }
             if (const JumpTable* t = table_at(ext, target)) {
                 Ref r;
                 r.kind = RefKind::table;
@@ -294,6 +341,7 @@ struct CandidateContext {
     u32 start = 0;
     u32 code_end = 0;
     std::map<u64, usize> index_of;  // section offset -> instruction index
+    std::string function;           // its name, which MSVC's names for its EH companions carry
 };
 
 const coff::Relocation* reloc_at(const coff::Section& sec, u32 offset) {
@@ -478,8 +526,9 @@ Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& f
         }
     }
     std::erase_if(list, [&](const x86::Instruction& i) { return i.address >= code_end; });
+    drop_trailing_int3(list);
 
-    CandidateContext ctx{obj, *sec, start, code_end, {}};
+    CandidateContext ctx{obj, *sec, start, code_end, {}, function.name};
     for (usize i = 0; i < list.size(); ++i) ctx.index_of[list[i].address] = i;
 
     Side side;
@@ -492,7 +541,7 @@ Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& f
         for (usize f = 0; f < ins.fields.size(); ++f) {
             const auto& field = ins.fields[f];
             if (const coff::Relocation* rel = reloc_at(*sec, static_cast<u32>(ins.address + field.offset))) {
-                si.refs[f] = candidate_reloc_ref(ctx, *rel, field.raw);
+                si.refs[f] = own_companions(candidate_reloc_ref(ctx, *rel, field.raw), ctx.function);
             } else if (field.kind == x86::FieldKind::rel) {
                 si.refs[f] = label_ref(ctx.index_of, field.absolute, start);
             }

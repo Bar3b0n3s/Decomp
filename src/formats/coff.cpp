@@ -174,10 +174,15 @@ std::vector<const Symbol*> Object::section_symbols(i32 section_number) const {
     return out;
 }
 
+bool is_code_label_name(std::string_view name, Arch arch) {
+    if (name.starts_with('$') || name.starts_with("__catch$")) return true;
+    return arch == Arch::x86 && (name.starts_with("?catch$") || name.starts_with("?dtor$") || name.starts_with("?cleanup$"));
+}
+
 std::vector<const Symbol*> Object::function_symbols() const {
     std::vector<const Symbol*> out;
     for (const auto& s : symbols_) {
-        if (!s.is_defined() || s.is_section_symbol() || s.storage_class == storage::label) continue;
+        if (!s.is_defined() || s.is_section_symbol() || s.storage_class == storage::label || is_code_label_name(s.name, arch())) continue;
         auto sec = section(s.section_number);
         if (!sec || !sec->is_code()) continue;
         if (s.is_function() || s.is_external()) out.push_back(&s);
@@ -190,7 +195,9 @@ u32 Object::symbol_size(const Symbol& sym) const {
     if (!sec) return 0;
     u32 end = sec->size;
     for (const auto* other : section_symbols(sym.section_number)) {
-        if (other->value > sym.value && other->value < end && other->storage_class != storage::label) end = other->value;
+        if (other->value > sym.value && other->value < end && other->storage_class != storage::label &&
+            !is_code_label_name(other->name, arch()))
+            end = other->value;
     }
     return end > sym.value ? end - sym.value : 0;
 }

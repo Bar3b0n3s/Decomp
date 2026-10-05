@@ -2,10 +2,10 @@
 // functions again with it (project/analyze.hpp).
 
 #include "analysis/bounds.hpp"
-#include "analysis/demangle.hpp"
 #include "analysis/program.hpp"
 #include "core/file_lock.hpp"
 #include "core/fs.hpp"
+#include "formats/coff.hpp"
 #include "formats/map.hpp"
 #include "project/analyze.hpp"
 #include "project/project.hpp"
@@ -154,15 +154,15 @@ TEST_CASE("map symbols: names, object files, statics and kinds, at the image's b
 }
 
 TEST_CASE("the labels compilers put inside functions are not functions") {
-    CHECK(is_code_label_symbol("$LN12@f", Arch::x86));
-    CHECK(is_code_label_symbol("$ehgcr_3_10", Arch::x64));
-    CHECK(is_code_label_symbol("__catch$?eh_catch@@YAHH@Z$0", Arch::x64));  // inside a catch funclet
-    CHECK(is_code_label_symbol("?catch$3@?0??eh_catch@@YAHH@Z@4HA", Arch::x86));  // clang's x86 funclets
-    CHECK(is_code_label_symbol("?dtor$2@?0??eh_guarded@@YAHH@Z@4HA", Arch::x86));
-    CHECK_FALSE(is_code_label_symbol("?catch$0@?0??eh_catch@@YAHH@Z@4HA", Arch::x64));  // unwind data of its own
-    CHECK_FALSE(is_code_label_symbol("__ehhandler$?eh_catch@@YAHH@Z", Arch::x86));
-    CHECK_FALSE(is_code_label_symbol("__unwindfunclet$?eh_guarded@@YAHH@Z$0", Arch::x86));
-    CHECK_FALSE(is_code_label_symbol("_main", Arch::x86));
+    CHECK(coff::is_code_label_name("$LN12@f", Arch::x86));
+    CHECK(coff::is_code_label_name("$ehgcr_3_10", Arch::x64));
+    CHECK(coff::is_code_label_name("__catch$?eh_catch@@YAHH@Z$0", Arch::x64));  // inside a catch funclet
+    CHECK(coff::is_code_label_name("?catch$3@?0??eh_catch@@YAHH@Z@4HA", Arch::x86));  // clang's x86 funclets
+    CHECK(coff::is_code_label_name("?dtor$2@?0??eh_guarded@@YAHH@Z@4HA", Arch::x86));
+    CHECK_FALSE(coff::is_code_label_name("?catch$0@?0??eh_catch@@YAHH@Z@4HA", Arch::x64));  // unwind data of its own
+    CHECK_FALSE(coff::is_code_label_name("__ehhandler$?eh_catch@@YAHH@Z", Arch::x86));
+    CHECK_FALSE(coff::is_code_label_name("__unwindfunclet$?eh_guarded@@YAHH@Z$0", Arch::x86));
+    CHECK_FALSE(coff::is_code_label_name("_main", Arch::x86));
 }
 
 TEST_CASE("a program opened with its map: the map's names, and exact bounds from its starts") {

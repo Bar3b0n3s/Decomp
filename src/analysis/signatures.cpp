@@ -21,7 +21,9 @@ u32 function_size(const coff::Object& obj, const coff::Symbol& sym) {
     if (!sec) return 0;
     u32 end = static_cast<u32>(sec->data.size());
     for (const coff::Symbol* other : obj.section_symbols(sym.section_number))
-        if (other->value > sym.value && other->value < end && (other->is_function() || other->is_external())) end = other->value;
+        if (other->value > sym.value && other->value < end && (other->is_function() || other->is_external()) &&
+            !coff::is_code_label_name(other->name, obj.arch()))
+            end = other->value;
     return end > sym.value ? end - sym.value : 0;
 }
 

@@ -95,7 +95,12 @@ functions the object defines.
 
 - The range runs from the symbol to the next defined symbol of its section (labels excepted) or to the
   section end. With `/Gy` (function-level linking, implied by `/O1` and `/O2`), each function is a
-  COMDAT section of its own, and the range is the rest of that section.
+  COMDAT section of its own, and the range is the rest of that section. Names compilers give to places
+  inside a function count as labels: MSVC's catch blocks (`__catch$f$0`, which it marks as static
+  functions), `$`-prefixed labels, and clang's x86 catch and cleanup funclets.
+- Trailing int3 bytes are left out, here and on the target side: the trap a compiler puts after a
+  final call that cannot return (Visual Studio 2015 and later, one byte or several) and the linker's
+  fill look the same in the linked image.
 - A jump table at the end of the range is split off as data: the first relocated reference from an
   indirect jump into the function's own section, past the jump, marks the end of the code (see
   [jump tables](#jump-tables-inside-text-x86)).
@@ -410,12 +415,12 @@ On x86, functions with C++ exception handling register a frame in the prolog: `p
 `push offset __ehhandler$<fn>`, then a load of `fs:[0]`, a push, and a store to `fs:[0]`. The
 `__ehhandler$<fn>` routine is a compiler-generated companion that passes a `__ehfuncinfo$<fn>` table
 to `__CxxFrameHandler`. Structured exception handling (`__try`) uses a scope table and
-`__except_handler3` or `__except_handler4`. A companion of the function being matched can only exist
-in the candidate object under its own name, while the target has only an address. The slice has no
-special handling: such a reference compares like any other symbol, so it is equal when the target has
-a symbol with an equivalent name (from a PDB, for example) and otherwise a binding suggestion. Binding
-companions structurally, and comparing the companion bodies and the `FuncInfo`/scope tables as part of
-data matching, are planned (Phase 5). An EH prolog present on only one side will produce the planned
+`__except_handler3` or `__except_handler4`. A companion of the function being matched exists in the
+candidate object under a name made from the function's (`__ehhandler$f`, `__sehtable$f`; clang's x86
+stub is `___ehhandler$f`), while the target often has only an address. The diff finds the target
+function's own stub and scope table from its registration (`analysis/eh.hpp`) and pairs them with
+the candidate's, whatever either function is called. Comparing the companion bodies and the
+`FuncInfo`/scope tables as part of data matching is planned (Phase 5). An EH prolog present on only one side will produce the planned
 `eh_frame` hint: exception-handling flags, objects with destructors, or `try` blocks. x64 has no prolog
 registration (handling is table-based, through `.pdata`/`.xdata`).
 

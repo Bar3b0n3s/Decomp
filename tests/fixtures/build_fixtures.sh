@@ -76,6 +76,7 @@ build_eh() {
         objs+=("$obj")
     done
     lld-link "${LDFLAGS[@]}" "/alternatename:??_7type_info@@6B@=${prefix}corpus_type_info_vftable" "/out:$arch/eh.exe" "/pdb:$arch/eh.pdb" "${objs[@]}"
+    mv "$arch/eh_eh.obj" "$arch/eh.obj"  # kept: the candidate for the diff tests
     rm -f "${objs[@]}" "$arch/eh.lib"
 }
 

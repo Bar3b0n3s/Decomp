@@ -324,3 +324,34 @@ TEST_CASE("wide string literals compare in full; constants in images without .re
     REQUIRE(magic.diff);
     CHECK(magic.diff->byte_exact);
 }
+
+TEST_CASE("trailing int3 bytes are padding: a candidate may carry more of them than the target") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-trap").value();
+    auto write = [&](const char* name, std::string_view text) {
+        const auto path = dir.path() / name;
+        REQUIRE(fs::write_text(path, std::string("    .intel_syntax noprefix\n    .text\n") + std::string(text)));
+        return path;
+    };
+    // The target ends `stop` at its call that cannot return; the candidate's compiler put six int3
+    // bytes after it (cl.exe does, at times), which the linker's fill would hide anyway.
+    const auto target = write("target.s", "    .globl _entry\n_entry:\n    push 1\n    call _stop\n    ret\n"
+                                          "    .globl _stop\n_stop:\n    push dword ptr [esp+4]\n    call _die\n"
+                                          "    .globl _die\n_die:\n    jmp _die\n");
+    const auto candidate = write("candidate.s", "    .globl _stop\n_stop:\n    push dword ptr [esp+4]\n    call _die\n"
+                                                "    int3\n    int3\n    int3\n    int3\n    int3\n    int3\n");
+    const auto rest = write("rest.s", "    .globl _entry\n_entry:\n    push 1\n    call _stop\n    ret\n"
+                                      "    .globl _die\n_die:\n    jmp _die\n");
+    // Hand-written objects carry no @feat.00, which /safeseh wants.
+    auto exe = test::build_program(Arch::x86, *tools, dir.path() / "target", {target}, "trap", {"/safeseh:no"});
+    REQUIRE(exe);
+    REQUIRE(test::build_program(Arch::x86, *tools, dir.path() / "candidate", {candidate, rest}, "candidate", {"/safeseh:no"}));
+    auto program = Program::open(*exe).value();
+    const auto obj = coff::Object::load(dir.path() / "candidate" / "candidate.obj").value();
+    const auto d = diff_function(program, *program.resolve("_stop"), obj).value();
+    CHECK(d.byte_exact);
+}

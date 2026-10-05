@@ -118,9 +118,4 @@ bool is_float_constant_symbol(std::string_view name) {
     return name.starts_with("__real@") || name.starts_with("__xmm@") || name.starts_with("__ymm@");
 }
 
-bool is_code_label_symbol(std::string_view name, Arch arch) {
-    if (name.starts_with('$') || name.starts_with("__catch$")) return true;
-    return arch == Arch::x86 && (name.starts_with("?catch$") || name.starts_with("?dtor$") || name.starts_with("?cleanup$"));
-}
-
 } // namespace decomp

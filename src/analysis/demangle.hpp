@@ -1,7 +1,5 @@
 #pragma once
 
-#include "formats/image.hpp"
-
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,11 +27,5 @@ bool names_equivalent(std::string_view a, std::string_view b);
 // MSVC string literal symbol ("??_C@...") / floating-point constant symbol ("__real@...", "__xmm@...").
 bool is_string_literal_symbol(std::string_view name);
 bool is_float_constant_symbol(std::string_view name);
-
-// A name compilers give to a place inside a function, not to a function: MSVC's line labels ($LN12@f)
-// and catch blocks (__catch$?f@@YAXXZ$0), clang's catch continuations ($ehgcr_3_10) and, on x86, its
-// catch and cleanup funclets (?catch$3@?0??f@@YAXXZ@4HA, ?dtor$2@...), which are part of their function
-// there. (x64 funclets have unwind data of their own and are functions.)
-bool is_code_label_symbol(std::string_view name, Arch arch);
 
 } // namespace decomp
