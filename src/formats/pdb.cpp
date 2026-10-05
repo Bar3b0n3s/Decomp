@@ -51,14 +51,24 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
     using Kind = PDB::CodeView::DBI::SymbolRecordKind;
 
     const auto modules = module_stream.GetModules();
+    // The file info substream: a module count, two 16-bit arrays, then offsets and names (empty in
+    // some PDBs).
+    const PDB::SourceFileStream source_files =
+        dbi.GetHeader().sourceInfoSize >= 4 ? dbi.CreateSourceFileStream(raw) : PDB::SourceFileStream();
     u32 module_index = 0;
     for (const auto& module : modules) {
-        reader.modules_.push_back({array_to_string(module.GetName()), array_to_string(module.GetObjectName())});
+        Module m{array_to_string(module.GetName()), array_to_string(module.GetObjectName()), {}, -1};
+        if (module_index < source_files.GetModuleCount())
+            for (const u32 offset : source_files.GetModuleFilenameOffsets(module_index)) m.source_files.emplace_back(source_files.GetFilename(offset));
+        reader.modules_.push_back(std::move(m));
         if (module.HasSymbolStream()) {
             const auto symbols = module.CreateSymbolStream(raw);
             symbols.ForEachSymbol([&](const PDB::CodeView::DBI::Record* record) {
                 auto kind = record->header.kind;
-                if (kind == Kind::S_GPROC32 || kind == Kind::S_LPROC32 || kind == Kind::S_GPROC32_ID ||
+                if (kind == Kind::S_COMPILE3) {
+                    reader.modules_.back().language =
+                        static_cast<int>(PDB_AS_UNDERLYING(record->data.S_COMPILE3.flags) & 0xFFu);
+                } else if (kind == Kind::S_GPROC32 || kind == Kind::S_LPROC32 || kind == Kind::S_GPROC32_ID ||
                     kind == Kind::S_LPROC32_ID) {
                     // All four records share the same layout.
                     const auto& p = record->data.S_GPROC32;

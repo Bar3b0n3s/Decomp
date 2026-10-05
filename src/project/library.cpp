@@ -3,6 +3,7 @@
 #include "analysis/program.hpp"
 #include "analysis/signatures.hpp"
 #include "project/project.hpp"
+#include "project/units.hpp"
 
 #include <set>
 
@@ -24,6 +25,11 @@ Result<LibraryMatchReport> match_libraries(Project& project, std::span<const std
 
     std::map<u64, Symbol> symbols;
     for (const Symbol& s : project.symbols()) symbols.emplace(s.va, s);
+    // A unit the analysis guessed gives way to the library member the code matches.
+    TRY_ASSIGN(const auto units, load_units(project));
+    std::set<std::string> guessed;
+    for (const Unit& u : units)
+        if (u.origin == UnitOrigin::analysis) guessed.insert(u.name);
     const auto infos = project.function_infos();
     auto has_work = [&](u64 va) {
         auto it = infos->find(va);
@@ -59,7 +65,7 @@ Result<LibraryMatchReport> match_libraries(Project& project, std::span<const std
             if (s.size != size) ++report.resized;
             s.size = size;
         }
-        if (s.object.empty()) s.object = m.chosen->library + ":" + m.chosen->member;
+        if (s.object.empty() || guessed.contains(s.object)) s.object = normalize_unit_name(m.chosen->library + ":" + m.chosen->member);
         // Starts the analysis alone had found inside the library function were never functions.
         for (auto inner = symbols.upper_bound(m.va); inner != symbols.end() && inner->first < m.va + size; ++inner)
             if (inner->second.kind == SymbolKind::function && inner->second.source == SymbolSource::analysis && !has_work(inner->first))
@@ -72,6 +78,8 @@ Result<LibraryMatchReport> match_libraries(Project& project, std::span<const std
         if (!remove.contains(va)) db.add(std::move(s));
     TRY(project.save_symbols(db));
     TRY(project.modify_functions(library_functions, [](u64, FunctionInfo& info) { info.status = FunctionStatus::library; }));
+    // Units the analysis made are derived again, around the library members.
+    if (std::ranges::all_of(units, [](const Unit& u) { return u.origin == UnitOrigin::analysis; })) TRY(derive_project_units(project, false));
     return report;
 }
 

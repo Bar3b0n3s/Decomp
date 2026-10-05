@@ -38,6 +38,8 @@ struct AnalyzeSummary {
     usize renamed = 0;      // functions whose name changed
     usize map_symbols = 0;  // symbols the map added or named
     usize moved = 0;        // work directories and matched sources renamed with their function
+    usize units = 0;        // units derived again (0 when the project keeps the ones it had)
+    std::string units_from; // the record they came from: pdb, map or analysis
 };
 
 Result<AnalyzeSummary> analyze(Project& project, const AnalyzeOptions& options = {});

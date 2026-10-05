@@ -4,6 +4,7 @@
 #include "core/fs.hpp"
 #include "core/log.hpp"
 #include "project/project.hpp"
+#include "project/units.hpp"
 
 #include <map>
 
@@ -87,6 +88,14 @@ Result<AnalyzeSummary> analyze(Project& project, const AnalyzeOptions& options) 
     }
     summary.removed = old_functions.size();
     TRY(project.save_symbols(fresh.symbols()));
+    // Units the analysis made are derived again: a map may name them now. Units from a PDB, a map or the
+    // user stay (`decomp units derive --force` replaces them).
+    TRY_ASSIGN(auto units, load_units(project));
+    if (std::ranges::all_of(units, [](const Unit& u) { return u.origin == UnitOrigin::analysis; })) {
+        TRY_ASSIGN(auto derived, derive_project_units(project, false));
+        summary.units = derived.second.units;
+        summary.units_from = std::string(to_string(derived.first.from));
+    }
     log::debug("analysis: {} functions (was {}): {} added, {} removed, {} resized, {} renamed", summary.functions,
               summary.functions_before, summary.added, summary.removed, summary.resized, summary.renamed);
     return summary;
@@ -94,7 +103,8 @@ Result<AnalyzeSummary> analyze(Project& project, const AnalyzeOptions& options) 
 
 Json to_json(const AnalyzeSummary& s) {
     return {{"functions_before", s.functions_before}, {"functions", s.functions}, {"added", s.added}, {"removed", s.removed},
-            {"resized", s.resized}, {"renamed", s.renamed}, {"map_symbols", s.map_symbols}, {"moved", s.moved}};
+            {"resized", s.resized}, {"renamed", s.renamed}, {"map_symbols", s.map_symbols}, {"moved", s.moved},
+            {"units", s.units}, {"units_from", s.units_from}};
 }
 
 } // namespace decomp::project

@@ -136,6 +136,10 @@ public:
     Result<void> modify_functions(std::span<const u64> vas, const std::function<void(u64, FunctionInfo&)>& change);
     // Renames, creates, resizes or removes a symbol; recorded in .decomp/symbols.log.jsonl.
     Result<SymbolChange> set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin);
+    // Sets the object file (the unit; obj= in symbols.txt) of each listed symbol that exists, an empty
+    // name clearing it, starting from the latest symbols.txt. Returns how many changed. Not logged: units
+    // are derived from the build's records (project/units.hpp).
+    Result<usize> assign_objects(const std::map<u64, std::string>& objects);
     // The symbols as symbols.txt holds them.
     std::vector<Symbol> symbols() const;
     // Reloads symbols.txt when another process changed it. Returns true when it did.

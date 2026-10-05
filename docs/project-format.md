@@ -1,8 +1,8 @@
 # Project format
 
 A Decomp project is a directory that holds everything about decompiling one target binary. The parts
-meant for git are its configuration (`decomp.json`), its symbol database (`symbols.txt`), shared
-headers (`include/`) and verified sources (`src/functions/`). Working data stays local under a
+meant for git are its configuration (`decomp.json`), its symbol database (`symbols.txt`), its
+translation units (`units.txt`), shared headers (`include/`) and verified sources (`src/functions/`). Working data stays local under a
 gitignored `.decomp/` directory: per-function attempt history and notes, run logs and transcripts,
 build directories and the compile cache. Compilers are machine-specific, so they live in a
 **user-level toolchain registry** outside the project, and projects refer to them by name. Decomp
@@ -21,6 +21,7 @@ yet.
 <project>/
     decomp.json                 configuration                                     (committed)
     symbols.txt                 symbols: addresses, names, kinds, sizes, status   (committed)
+    units.txt                   translation units in link order                   (committed)
     include/                    shared headers                                    (committed)
     src/functions/              verified sources, one .cpp per function           (committed)
     .gitignore                  written by init: /.decomp/                        (committed)
@@ -42,8 +43,8 @@ The target binary and its PDB usually live outside the project and are reference
 often not redistributable, and `target.sha1` lets every checkout confirm that it has the right file.
 
 `decomp init <binary>` creates the project in the current directory, or in `--dir <dir>` (created if
-needed). It writes `decomp.json`, `symbols.txt` and `.gitignore`, creates the empty `include/` and
-`src/functions/` directories, and refuses to run where a `decomp.json` already exists. Its other
+needed). It writes `decomp.json`, `symbols.txt`, `units.txt` and `.gitignore`, creates the empty
+`include/` and `src/functions/` directories, and refuses to run where a `decomp.json` already exists. Its other
 options are `--toolchain <name>`, `--flag <flag>` (repeatable), `--pdb <file>` and `--map <file>` (the
 build's link map, see [Link maps](#link-maps)). Every other command
 finds the project by searching upward from the current directory for `decomp.json`, or upward from
@@ -166,7 +167,7 @@ Addresses have at least eight hex digits, so x64 addresses are longer:
 | `pdb=` | The undecorated name from the PDB's procedure or data record, when it differs from the name |
 | `static` | Internal linkage (`S_LPROC32` procedures and module-local data) |
 | `source=` | Where the name came from, in increasing order of trust: `analysis`, `library` (a static library's function the code matches, see `decomp lib match`), `import`, `export`, `map`, `pdb_public`, `pdb`, `agent`, `user`. A line without `source=` is read as `user`. |
-| `obj=` | The object file the symbol was linked from, as the link map names it (`main.obj`, `LIBC:printf.obj` for a library member), or the library and member a library match found (`LIBC.LIB:printf.obj`) |
+| `obj=` | The symbol's [unit](#unitstxt): the object file it was linked from, as a link map names it (`main.obj`, `LIBC:printf.obj` for a library member). It comes from the PDB's section contributions, the link map, a library match or the analysis. Edit it to move a symbol to another unit. |
 | `status=` | For functions: a [function status](#function-status); omitted for `unstarted` |
 | `best=` | For functions: the best match percentage reached by agent sessions, one decimal |
 | `attempts=` | For functions: the number of compile attempts made by agent sessions |
@@ -190,6 +191,54 @@ Notes:
   is, when an agent session starts and when it ends. Comments added by hand are not kept. Other names
   at the same address (aliases, for example from identical-COMDAT folding) are kept in memory for name
   lookups but not written ([matching.md](matching.md#opticf-folding)).
+
+## `units.txt`
+
+The program's translation units: the object files it was linked from, in link order, one per line
+after a header comment. Each symbol's `obj=` in `symbols.txt` names its unit. `init` derives them;
+`decomp units derive` derives them again (`--force` when the project has units from a PDB, a map or
+the user), and `decomp units` lists them with the progress and spend of their functions (`--json`
+for the details). The file `init` writes for the x86 test fixture:
+
+```
+# decomp units, in link order: <name> [kind=] [source=] [origin=]
+basic.obj source=src/basic.cpp origin=pdb
+other.obj source=src/other.cpp origin=pdb
+kernel32:kernel32.dll kind=import origin=pdb
+Import:kernel32.dll kind=import origin=pdb
+"* Linker *" kind=linker origin=pdb
+```
+
+| Field | Meaning |
+|---|---|
+| name | The object as a link map names it: `player.obj`, `LIBCMT:printf.obj` for a member of `LIBCMT.lib` (a library match's `LIBCMT.LIB:printf.obj` is written so too), `kernel32:KERNEL32.dll` for an import library's member, `Import:KERNEL32.dll`, `* Linker *`. Quoted like a symbol name when it contains a space. |
+| `kind=` | `code` (the default; the program's own code), `library` (a static library's member), `import` (import stubs and descriptors) or `linker` (what the linker made) |
+| `source=` | A code unit's source file, relative to the project: the file the PDB's line information names for the module (`src/basic.cpp`), else the object's stem with `.c` when its functions all have C names and `.cpp` otherwise. Directories of the original path are added where two units would share a file name. |
+| `origin=` | Where the unit came from, in increasing order of trust: `analysis`, `map`, `pdb`, `user`. A line without `origin=` was written by hand (`user`). |
+
+Where the units come from, best first:
+
+- **The PDB.** One unit per module, in module order, which is the link order; each function and data
+  symbol belongs to the module whose section contribution holds its address. The units are exactly
+  the PDB's module list.
+- **A link map.** The object files the map names for its symbols (`init --map`, `decomp map import`),
+  ordered by their first address. A function the map does not name belongs to the unit of the
+  functions around it, or of the function before it when they differ.
+- **The analysis**, with neither. Functions a library match named keep their library member, linker
+  and import thunks go to `* Linker *` and the import units, and the rest is cut into units of
+  consecutive functions: where no call, data both use or data placed close together ties the two
+  sides, once the unit has four functions, and where the source file the functions' strings name
+  (`__FILE__` in asserts and log messages) changes. A unit that names its source file takes its name
+  (`player.obj`, `src/player.cpp`); the others are called after their first function
+  (`unit_00401000.obj`). This is a starting point to correct by hand: on the Zydis corpus, which has
+  no such strings, a third of the true boundaries are found and a fifth of the cuts are true ones
+  (`decomp bounds <binary> --truth <pdb> --units` measures it).
+
+`decomp analyze`, `decomp map import` and `decomp lib match` derive the units again while the analysis
+alone made them, so a map or a library match replaces the guesses. Units from a PDB, a map or the user
+stay; `decomp units derive --force` replaces all but the user's. To split, merge or rename units, edit
+`units.txt` (a line without `origin=` stays through derivations) and the `obj=` of the symbols that
+move.
 
 ## `include/`
 
@@ -552,7 +601,7 @@ reads as extra command-line options (planned), so make sure they are not set whe
 
 ## Git-friendliness
 
-- **What to commit:** `decomp.json`, `symbols.txt`, `include/` and `src/functions/`. `init` writes a
+- **What to commit:** `decomp.json`, `symbols.txt`, `units.txt`, `include/` and `src/functions/`. `init` writes a
   `.gitignore` that excludes `.decomp/`. Keep the target binary out of the repository unless you are
   allowed to redistribute it.
 - **Deterministic output:** JSON with sorted keys and two-space indentation; `symbols.txt` sorted by

@@ -102,11 +102,11 @@ jobs:
 
       - name: Function bounds corpus (clang-cl)
         run: |
-          # Zydis built without a C library; functions found without the PDB against the PDB and the map.
+          # Zydis built without a C library; functions (and units) found without the PDB against the PDB and the map.
           tests/corpus/build_corpus.sh build/corpus
           for arch in x86 x64; do
-            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.pdb --min-exact 98
-            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.map --min-exact 98
+            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.pdb --min-exact 98 --units
+            ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.map --min-exact 98 --units
           done
 
   windows:

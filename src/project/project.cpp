@@ -6,6 +6,8 @@
 #include "core/hash.hpp"
 #include "core/log.hpp"
 #include "core/strings.hpp"
+#include "project/text_format.hpp"
+#include "project/units.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -109,14 +111,11 @@ std::string safe_function_name(const Symbol& fn) {
     return std::format("{}_{:x}", out, fn.va);
 }
 
-namespace {
-
 std::string quote_if_needed(const std::string& v) {
     if (v.find_first_of(" \t\"=") == std::string::npos && !v.empty()) return v;
     return escape_c_string(v);
 }
 
-// Splits a line into whitespace-separated tokens; double-quoted tokens may contain spaces and C escapes.
 std::vector<std::string> tokenize(std::string_view line) {
     std::vector<std::string> out;
     usize i = 0;
@@ -145,8 +144,6 @@ std::vector<std::string> tokenize(std::string_view line) {
     }
     return out;
 }
-
-} // namespace
 
 std::string format_symbol_line(const Symbol& s, const FunctionInfo* info) {
     std::string line = std::format("{:#010x} {} {}", s.va, to_string(s.kind), quote_if_needed(s.name));
@@ -452,6 +449,21 @@ Result<SymbolChange> Project::set_symbol(const SymbolEdit& edit, const ChangeOri
     return change;
 }
 
+Result<usize> Project::assign_objects(const std::map<u64, std::string>& objects) {
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
+    TRY(reload_locked(*state_));
+    usize changed = 0;
+    for (const auto& [va, object] : objects) {
+        auto it = state_->symbols.find(va);
+        if (it == state_->symbols.end() || it->second.object == object) continue;
+        it->second.object = object;
+        ++changed;
+    }
+    if (changed) TRY(write_symbols_locked(*state_));
+    return changed;
+}
+
 std::vector<Symbol> Project::symbols() const {
     std::lock_guard lock(state_->mutex);
     std::vector<Symbol> out;
@@ -633,7 +645,11 @@ Result<Project> Project::init(const std::filesystem::path& root, const std::file
     TRY(p.save_config());
     TRY(p.save_symbols(program.symbols()));
     TRY(fs::write_text(root / ".gitignore", "/.decomp/\n"));
-    return Project::load(root);
+    TRY_ASSIGN(auto loaded, Project::load(root));
+    // The translation units, from the same records (or the analysis).
+    TRY_ASSIGN(auto units, derive_units(program));
+    TRY(apply_units(loaded, units.layout));
+    return loaded;
 }
 
 } // namespace decomp::project

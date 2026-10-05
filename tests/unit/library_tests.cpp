@@ -124,7 +124,7 @@ TEST_CASE("decomp lib match names the project's library functions and marks them
     CHECK(s->name == "_lib_add");
     CHECK(s->source == SymbolSource::library);
     CHECK(s->size == truth.symbols().at(add)->size);
-    CHECK(s->object == "minilib.lib:minilib_counter.obj");
+    CHECK(s->object == "minilib:minilib_counter.obj");  // named as link maps name a library member
     CHECK(p.function_info(add).status == project::FunctionStatus::library);
     // The program's own function is left alone.
     const u64 entry = *truth.resolve("_entry");

@@ -36,6 +36,8 @@ struct PublicSymbol {
 struct Module {
     std::string name;         // object file path as recorded by the linker
     std::string object_name;  // library or object name
+    std::vector<std::string> source_files;  // the files its line information names: its source, then headers
+    int language = -1;  // CV_CFL_* of its S_COMPILE3 record: 0 C, 1 C++, 3 MASM, 7 the linker; -1 unknown
 };
 
 struct Contribution {

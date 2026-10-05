@@ -151,8 +151,9 @@ Readers for binary formats, all built on `ByteReader` and returning `Result`:
   associativity from the section-definition auxiliary records; symbols and their auxiliary records;
   relocations; the string table.
 - `pdb::Reader` over raw_pdb: procedures (`S_GPROC32`/`S_LPROC32`) with code size and module, data
-  symbols, public symbols (`S_PUB32`) for decorated names, modules, section contributions (input for
-  translation-unit recovery in Phase 3), and a GUID/age check against the image. raw_pdb reads the
+  symbols, public symbols (`S_PUB32`) for decorated names, modules with their source files and language
+  (`S_COMPILE3`), section contributions (which place each module's code and data: the translation
+  units, see `analysis/units.hpp`), and a GUID/age check against the image. raw_pdb reads the
   PDB 7.0 format used since Visual Studio .NET 2002 and by lld-link. VC6-era PDB 2.0 files (`NB10`)
   use an older container that it does not read, so such targets rely on exports, map files (Phase 2),
   user symbols and analysis.
@@ -242,6 +243,14 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   `/GR` build names, their bases and vftables (`Program::rtti()`, `decomp classes`).
 - Library functions (`analysis/signatures.hpp`, see [Library functions](#library-functions)): the
   functions of static libraries as masked byte signatures, matched against the target.
+- Translation units (`analysis/units.hpp`): the object files the program was linked from, in link
+  order, and the unit of each function and global. `units_from_pdb()` takes them from the PDB's modules
+  and section contributions, `units_from_objects()` from the object files a link map (or a library
+  match) gave the symbols, and `units_by_analysis()` guesses them from the code: thunks go to the
+  linker's and the import units, and consecutive functions are cut into units where no call, shared
+  data or nearby data ties the two sides (and the unit has four functions), or where the source file
+  their strings name (`__FILE__`) changes. `compare_units()` measures a layout against the truth
+  (`decomp bounds --units`).
 - `Program::function_extent()`: the symbol size when known; otherwise recursive descent from the
   entry, bounded by the section and the next known function, stopping at `ret`, `int3` and jumps that
   leave the function. Indirect jumps through tables (`jmp [r*4+table]` on x86; the clang and MSVC x64
@@ -441,6 +450,10 @@ The built-in agent ([agent.md](agent.md) has the full design):
 - `Project`: loads and saves `decomp.json`, resolves paths, and finds the project from the current
   directory (`fs::find_upwards`) or `-C/--project`; `Project::init()` creates one.
 - Symbol file I/O (`symbols.txt`, sorted, one symbol per line), applied on top of the derived symbols.
+- Translation units (`project/units.hpp`): `units.txt` in link order, each symbol's unit as its
+  `obj=`, derived at `init` (and again after `analyze`, `map import` and `lib match` while only the
+  analysis made them), `derive_project_units()` for `decomp units derive`, and per-unit progress
+  (`compute_unit_progress()`, `decomp units`).
 - Function status and history (`.decomp/functions/<fn>/`) and the per-function counters behind
   `decomp status` (`project/progress.hpp`), and the match setup a session needs
   (`project/setup.hpp`).

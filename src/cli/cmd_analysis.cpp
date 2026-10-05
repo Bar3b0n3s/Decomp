@@ -2,9 +2,11 @@
 #include "analysis/bounds.hpp"
 #include "analysis/demangle.hpp"
 #include "analysis/discovery.hpp"
+#include "analysis/units.hpp"
 #include "cli/common.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "formats/map.hpp"
 #include "matching/suggest.hpp"
 #include "project/project.hpp"
 
@@ -137,12 +139,19 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
         auto errors = std::make_shared<usize>(20);
         auto min_exact = std::make_shared<double>(0.0);
         auto show_code = std::make_shared<bool>(false);
+        auto units = std::make_shared<bool>(false);
+        auto unit_listing = std::make_shared<bool>(false);
+        auto min_unit_exact = std::make_shared<double>(0.0);
         cmd->add_option("binary", *binary, "PE image, analyzed as if it had no PDB (default: the project's functions)");
         cmd->add_option("--truth", *truth, "The build's PDB (procedures with sizes) or link map (starts)")->required();
         cmd->add_option("--errors", *errors, "Mismatches to list (default 20)");
         cmd->add_option("--min-exact", *min_exact, "Exit with code 2 when fewer than this percentage of bounds are exact");
         cmd->add_flag("--show-code", *show_code, "With each listed mismatch, the code where the bounds differ and how a start was found");
-        cmd->callback([&g, binary, truth, errors, min_exact, show_code] {
+        cmd->add_flag("--units", *units, "Also measure the translation units the analysis finds against the truth's modules or objects");
+        cmd->add_flag("--unit-listing", *unit_listing, "With --units: every function with its unit in the truth and the one found");
+        cmd->add_option("--min-unit-exact", *min_unit_exact,
+                        "With --units: exit with code 2 when fewer than this percentage of the functions are in units found exactly");
+        cmd->callback([&g, binary, truth, errors, min_exact, show_code, units, unit_listing, min_unit_exact] {
             throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
                 std::optional<Program> program;
                 if (!binary->empty()) {
@@ -163,8 +172,49 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
                 if (!expected) return std::unexpected(expected.error());
                 const auto found = function_bounds(program->symbols(), program->image());
                 const auto c = compare_bounds(*expected, found, program->image(), program->decoder());
+                std::optional<UnitComparison> uc;
+                if (*units) {
+                    UnitLayout truth_units;
+                    if (ext == ".pdb") {
+                        TRY_ASSIGN(auto reader, pdb::Reader::load(truth_path));
+                        truth_units = units_from_pdb(reader, program->image(), program->symbols());
+                    } else {
+                        TRY_ASSIGN(auto m, map::load(truth_path));
+                        SymbolDb named;
+                        for (const auto& e : m.entries) {
+                            Symbol sym;
+                            sym.va = e.va;
+                            sym.name = e.name;
+                            sym.kind = program->image().is_code(e.va) ? SymbolKind::function : SymbolKind::data;
+                            sym.source = SymbolSource::map;
+                            sym.object = e.object;
+                            named.add(std::move(sym));
+                        }
+                        // The truth's units hold the functions the analysis found, placed by the map's objects.
+                        truth_units = units_from_objects(named, program->image());
+                        for (const Symbol* f : program->symbols().functions())
+                            if (truth_units.unit_of(f->va).empty())
+                                if (const Symbol* before = named.containing(f->va); before && !before->object.empty())
+                                    truth_units.members[f->va] = normalize_unit_name(before->object);
+                    }
+                    const UnitLayout found_units = units_by_analysis(*program);
+                    uc = compare_units(truth_units, found_units, program->symbols());
+                    if (*unit_listing && !g.json) {
+                        std::string_view last_truth, last_found;
+                        for (const Symbol* f : program->symbols().functions()) {
+                            const std::string_view t = truth_units.unit_of(f->va), u = found_units.unit_of(f->va);
+                            if (t.empty()) continue;
+                            std::println("{}{} {:#010x} {:<24} {:<24} {}", t != last_truth ? '|' : ' ', u != last_found ? '|' : ' ', f->va, t, u,
+                                         f->name);
+                            last_truth = t;
+                            last_found = u;
+                        }
+                    }
+                }
                 if (g.json) {
-                    print_json(to_json(c, *errors));
+                    Json j = to_json(c, *errors);
+                    if (uc) j["units"] = to_json(*uc);
+                    print_json(j);
                 } else {
                     std::println("{} functions in the truth ({}), {} found", c.truth, c.truth_has_ends ? "starts and ends" : "starts only", c.found);
                     std::println("  exact      {:6} ({:.1f}%)", c.exact, c.exact_rate() * 100.0);
@@ -214,7 +264,15 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
                         }
                     }
                 }
-                return c.exact_rate() * 100.0 + 1e-9 < *min_exact ? 2 : 0;
+                if (uc && !g.json) {
+                    std::println("{} units hold the truth's functions, {} found", uc->truth_units, uc->found_units);
+                    std::println("  exact units {:6} ({:.1f}% of {} functions)", uc->exact_units, uc->exact_rate() * 100.0, uc->functions);
+                    std::println("  boundaries  {:6} in the truth, {} found: precision {:.1f}%, recall {:.1f}%", uc->truth_boundaries,
+                                 uc->found_boundaries, uc->boundary_precision() * 100.0, uc->boundary_recall() * 100.0);
+                }
+                if (c.exact_rate() * 100.0 + 1e-9 < *min_exact) return 2;
+                if (uc && uc->exact_rate() * 100.0 + 1e-9 < *min_unit_exact) return 2;
+                return 0;
             }));
         });
     }

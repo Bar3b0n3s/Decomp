@@ -8,6 +8,7 @@
 #include "project/library.hpp"
 #include "project/progress.hpp"
 #include "project/project.hpp"
+#include "project/units.hpp"
 
 #include <format>
 #include <map>
@@ -70,6 +71,7 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
             std::println("functions: {} (was {}): {} added, {} removed, {} resized, {} renamed", s.functions, s.functions_before, s.added,
                          s.removed, s.resized, s.renamed);
             if (s.moved) std::println("moved {} work directories and matched sources with their renamed functions", s.moved);
+            if (s.units) std::println("units: {} from the {}", s.units, s.units_from);
             return 0;
         };
         auto* cmd = app.add_subcommand("analyze", "Find the project's functions again, keeping named functions and recorded work");
@@ -162,6 +164,60 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
                 }
                 if (g.json) print_json(arr);
                 else if (imports) std::println("{} import objects", imports);
+                return 0;
+            }));
+        });
+    }
+    {
+        auto* cmd = app.add_subcommand("units", "Translation units: kind, source, functions and bytes matched, spend");
+        auto* derive = cmd->add_subcommand("derive", "Derive the units from the PDB's modules, the link map's object files or the analysis");
+        auto force = std::make_shared<bool>(false);
+        derive->add_flag("--force", *force, "Derive them again although the project has units (units added by hand stay)");
+        derive->callback([&g, force] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                TRY_ASSIGN(auto run_lock, p.try_lock_active_run());
+                if (!run_lock) return make_error(ErrorCode::invalid_argument, "a run is active in this project; stop it before deriving units");
+                TRY_ASSIGN(auto r, project::derive_project_units(p, *force));
+                const auto& [derived, applied] = r;
+                if (g.json) {
+                    print_json({{"from", std::string(to_string(derived.from))},
+                                {"units", applied.units},
+                                {"functions", applied.functions},
+                                {"unassigned", applied.unassigned}});
+                    return 0;
+                }
+                std::println("{} units from the {}: {} functions in a unit, {} in none", applied.units,
+                             derived.from == UnitOrigin::pdb ? "PDB" : derived.from == UnitOrigin::map ? "link map" : "analysis",
+                             applied.functions, applied.unassigned);
+                return 0;
+            }));
+        });
+        cmd->callback([&g, cmd] {
+            if (!cmd->get_subcommands().empty()) return;
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                TRY_ASSIGN(auto units, project::load_units(p));
+                TRY_ASSIGN(auto program, p.open_program());
+                const auto progress = project::compute_unit_progress(units, program.symbols(), *p.function_infos());
+                if (g.json) {
+                    Json arr = Json::array();
+                    for (const auto& u : progress) arr.push_back(project::to_json(u));
+                    print_json(arr);
+                    return 0;
+                }
+                if (units.empty()) {
+                    std::println("no units yet: `decomp units derive` finds them");
+                    return 0;
+                }
+                std::println("{:<28} {:<8} {:>11} {:>17} {:>7} {:>9}  {}", "unit", "kind", "functions", "bytes", "matched", "spend", "source");
+                for (const auto& u : progress) {
+                    if (u.unit.name.empty() && !u.functions) continue;
+                    std::println("{:<28} {:<8} {:>11} {:>17} {:>6.1f}% {:>9}  {}", u.unit.name.empty() ? "(no unit)" : u.unit.name,
+                                 u.unit.name.empty() ? "" : to_string(u.unit.kind), std::format("{}/{}", u.matched, u.functions),
+                                 std::format("{}/{}", u.matched_bytes, u.bytes), u.percent_bytes(), std::format("${:.2f}", u.cost_usd),
+                                 u.unit.source);
+                }
                 return 0;
             }));
         });
