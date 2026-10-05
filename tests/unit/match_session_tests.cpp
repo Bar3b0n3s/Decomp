@@ -37,7 +37,7 @@ __declspec(noinline) int add(int a, int b) { return a + b + g_counter; }
 
 TEST_CASE("tool schemas are strict-compatible") {
     auto schemas = MatchSession::tool_schemas();
-    CHECK(schemas.size() == 8);
+    CHECK(schemas.size() == 9);
     for (auto it = schemas.begin(); it != schemas.end(); ++it) {
         CAPTURE(it.key());
         const auto& s = *it;
@@ -67,6 +67,15 @@ TEST_CASE("the brief's types: the layouts the function's signature names, from t
         CHECK(brief.find("# Types") != std::string::npos);
         CHECK(brief.find("from the target's PDB; no project header declares it yet") != std::string::npos);
         CHECK(brief.find("struct Player  // 8 bytes\n  +0x00  int hp\n  +0x04  float speed\n") != std::string::npos);
+        // get_type has the same layout; an unknown name gets the names like it.
+        const auto player = session.call("get_type", Json{{"name", "Player"}});
+        CHECK_FALSE(player.is_error);
+        CHECK(player.text == "// the target's PDB; no project header declares it yet (define_type can)\nstruct Player  // 8 bytes\n  +0x00  int hp\n"
+                             "  +0x04  float speed\n");
+        const auto unknown = session.call("get_type", Json{{"name", "play"}});
+        CHECK(unknown.is_error);
+        CHECK(unknown.text.find("Similar: Player") != std::string::npos);
+        CHECK(session.call("get_type", Json{{"name", ""}}).is_error);
     }
     // Declared in a header, it comes from there: the source of truth.
     REQUIRE(fs::write_text(proj.root() / "include" / "game.h", "#pragma once\nstruct Player { int hp; float speed; void Hit(int); };\nenum Mode { Easy, Hard };\n"));
@@ -76,6 +85,11 @@ TEST_CASE("the brief's types: the layouts the function's signature names, from t
         CHECK(brief.find("The project's headers declare: struct Player (8 bytes), enum Mode (4 bytes).") != std::string::npos);
         CHECK(brief.find("// include/game.h\nstruct Player  // 8 bytes") != std::string::npos);
         CHECK(brief.find("no project header declares it yet") == std::string::npos);
+        // The header's layout, and that the PDB agrees; an enum only the header has.
+        const auto player = session.call("get_type", Json{{"name", "Player"}});
+        CHECK(player.text.starts_with("// include/game.h (the project's header)\nstruct Player  // 8 bytes\n"));
+        CHECK(player.text.ends_with("// the same in the target's PDB\n"));
+        CHECK(session.call("get_type", Json{{"name", "Mode"}}).text.find("enum Mode : int  // 4 bytes\n  Easy = 0\n  Hard = 1\n") != std::string::npos);
     }
     // Headers that do not compile say so.
     REQUIRE(fs::write_text(proj.root() / "include" / "game.h", "struct Player { int hp\n"));

@@ -46,6 +46,7 @@ You work on exactly one target function per conversation. Tools:
 - disassemble: annotated disassembly of another function (callees, callers) to learn signatures, structure layouts and conventions.
 - read_memory: read data from the target image (strings, tables, constants, initial values of globals).
 - lookup_symbol: find symbols by name or address.
+- get_type: the exact layout of a struct, class, union or enum as the compiler lays it out: size, bases, vtable slots, each field's offset, size and type (from the project's headers, else the target's PDB).
 - record_note: save a short note for future attempts on this function (what you learned, what did not work).
 - set_symbol: name a function or global the code shows you the purpose of (a callee, a table, a counter), or correct a symbol's kind or size. Later sessions see the name; the supervisor may have to approve it.
 - define_type: put a struct, class, union, enum or typedef into a shared project header (include/types.h unless you name another), so this and later functions can #include it. It is checked against every verified source that includes the header; the supervisor may have to approve it.
@@ -53,7 +54,7 @@ You work on exactly one target function per conversation. Tools:
 
 How to work:
 1. Read the brief: annotated disassembly, referenced symbols with their declarations, callers, and notes from earlier attempts.
-2. Work out the signature, calling convention and the types the function touches. Use disassemble on callers or callees when the brief is not enough.
+2. Work out the signature, calling convention and the types the function touches. Use disassemble on callers or callees when the brief is not enough, and get_type for a type's exact layout. Listing comments such as `this->hp` or `arg_0->area() (virtual, slot 0)` name what an operand reaches through a pointer of known type; the `; types:` line says what the pointers are at entry.
 3. Write a first complete candidate and call compile_and_diff early. Fix the largest structural differences first (control flow, missing or extra code), then operand-level differences.
 4. The candidate must be a complete, self-contained translation unit: declare every external function, global variable and type it uses (extern declarations, struct definitions with the right layout). Declarations must produce the same decorated names shown in the brief: `?add@@YAHHH@Z` is `int __cdecl add(int, int)`; `extern "C"` names like `_entry` need `extern "C"`; arrays mangle like pointers (`?g_table@@3PAHA` can be `int g_table[8]`). No inline assembly. Only include headers the brief lists as available. Define the target function (and static helpers only if the target inlines them). When the brief has a "# Translation unit" section, your source is composed into that unit's source instead of compiled alone: follow what the section says.
 
@@ -113,6 +114,7 @@ Json MatchSession::tool_schemas() {
                     {"description", "How to interpret the memory"}}},
     });
     t["lookup_symbol"] = object_schema({{"query", string_prop("Name, part of a name, or address")}});
+    t["get_type"] = object_schema({{"name", string_prop("The type's name, as the brief or a listing writes it (e.g. \"Player\", \"game::Shape\")")}});
     t["record_note"] = object_schema({{"text", string_prop("Short note for future attempts on this function")}});
     t["set_symbol"] = object_schema({
         {"address", string_prop("The symbol's address or current name (e.g. \"0x401100\", \"sub_401100\", \"data_403010\")")},
@@ -150,6 +152,10 @@ std::string MatchSession::tool_description(std::string_view name) {
     if (name == "lookup_symbol")
         return "Find symbols by exact name, partial name or address; returns addresses, kinds, sizes and readable "
                "signatures. Use it to get the exact declaration of something the function references.";
+    if (name == "get_type")
+        return "The exact layout of a struct, class, union or enum: its size, bases, vtable slots and virtual methods, and "
+               "every field's offset, size and type, as the compiler lays it out. From the project's headers when they declare "
+               "the type (the source of truth), else from the target's PDB. Use it to declare a type with the right layout.";
     if (name == "record_note")
         return "Save a short note for future attempts on this function (what you learned, what did not work). Notes "
                "persist across sessions.";
@@ -172,6 +178,7 @@ ToolOutput MatchSession::call(std::string_view tool, const Json& input) {
     if (tool == "disassemble") return disassemble(input);
     if (tool == "read_memory") return read_memory(input);
     if (tool == "lookup_symbol") return lookup_symbol(input);
+    if (tool == "get_type") return get_type(input);
     if (tool == "record_note") return record_note(input);
     if (tool == "set_symbol") return set_symbol(input);
     if (tool == "define_type") return define_type(input);
@@ -506,6 +513,48 @@ ToolOutput MatchSession::set_symbol(const Json& input) {
     return ToolOutput::ok(std::format("Done ({}): {}. Recorded in symbols.txt; later sessions see it, while this session's brief and "
                                       "listings keep the names they started with.",
                                       approval, summary));
+}
+
+ToolOutput MatchSession::get_type(const Json& input) {
+    const std::string name(trim(json_string_or(input, "name", "")));
+    if (name.empty()) return ToolOutput::error("Give the type's name.");
+    std::string error;
+    const auto headers = header_types(&error);
+    const TypeCatalog& pdb = program_.pdb_types().catalog;
+    const project::HeaderType* declared = headers ? headers->header_of(name) : nullptr;
+    const TypeLayout* header = declared ? headers->catalog.find(name) : nullptr;
+    const TypeLayout* target = pdb.find(name);
+    // A type the headers use from elsewhere (a system header's) has a layout too.
+    const TypeLayout* used = !header && !target && headers ? headers->catalog.find(name) : nullptr;
+    const TypeLayout* layout = header ? header : target ? target : used;
+    if (!layout) {
+        std::vector<std::string> similar;
+        const std::string needle = to_lower(name);
+        for (const TypeCatalog* catalog : {headers ? &headers->catalog : nullptr, &pdb}) {
+            if (!catalog) continue;
+            for (const TypeLayout& t : catalog->types())
+                if (similar.size() < 10 && to_lower(t.name).find(needle) != std::string::npos && std::ranges::find(similar, t.name) == similar.end())
+                    similar.push_back(t.name);
+        }
+        std::string text = std::format("No type {} in the project's headers or the target's PDB.", name);
+        if (!similar.empty()) text += " Similar: " + join(similar, ", ") + ".";
+        if (!error.empty()) {
+            const auto lines = split_lines(error);
+            text += " (The project's headers do not compile, so their types are unknown: " + (lines.empty() ? error : lines.front()) + ")";
+        }
+        return ToolOutput::error(text);
+    }
+    std::string text;
+    if (header) text = std::format("// {} (the project's header)\n", declared->header);
+    else if (target) text = "// the target's PDB; no project header declares it yet (define_type can)\n";
+    else text = "// used by the project's headers (declared outside include/)\n";
+    text += to_text(*layout);
+    if (header && target) {
+        const auto differences = compare_layouts(*header, *target);
+        if (differences.empty()) text += "// the same in the target's PDB\n";
+        else text += "// differs from the target's PDB:\n//   " + join(differences, "\n//   ") + "\n";
+    }
+    return ToolOutput::ok(text);
 }
 
 ToolOutput MatchSession::define_type(const Json& input) {

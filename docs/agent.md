@@ -25,7 +25,7 @@ changing defaults.
 | `Client` | `agent/client.hpp` | Builds requests, applies retries and backoff, assembles messages from the stream (`MessageAccumulator` in `agent/messages.hpp`), captures response headers |
 | `Conversation` | `agent/conversation.hpp` | The append-only history. It serializes the frozen prefix once and produces each request body. |
 | `ToolRegistry` | `agent/tools.hpp` | Tool definitions, the input validator, and dispatch to handlers |
-| `MatchSession` | `agent/match_session.hpp` | Per-function state: target function, toolchain setup, attempts, best attempt and source. Implements the eight tools and builds the brief and the status line. The frozen system prompt lives next to it. |
+| `MatchSession` | `agent/match_session.hpp` | Per-function state: target function, toolchain setup, attempts, best attempt and source. Implements the nine tools and builds the brief and the status line. The frozen system prompt lives next to it. |
 | `run_loop` | `agent/loop.hpp` | The tool-use loop. Returns a `LoopOutcome` whose status is `finished`, `end_turn_without_finish`, `refused`, `budget_exhausted`, `run_budget_exhausted`, `max_turns`, `aborted`, `stopped` or `error`. |
 | `LoopControl` | `agent/loop.hpp` | Thread-safe commands for a running loop: pause, resume, stop and abort (with a reason), guidance that can be retracted until it is sent, and live limits |
 | `run_function` | `agent/runner.hpp` | Runs one session: wires the session, tools, conversation and loop together, publishes events, writes the transcript and updates the project |
@@ -75,7 +75,7 @@ uses it to check the key.
 | `thinking` | `{type: "adaptive", display: "summarized"}` | Thinking cannot be disabled on this model. Summaries (and the short progress notes between tool calls) go to the transcript for supervision. The raw reasoning is never returned. |
 | `output_config.effort` | `"high"` | This model's API default is `medium`, so Decomp sets the effort explicitly. Effort is fixed for a session (see [caching](#prompt-caching)). |
 | `tool_choice` | `{type: "auto"}` | Forced tool choice (`any`/`tool`) is rejected with a 400 by this model. The prompt steers the model toward tools, and the loop nudges it when a turn ends without a call. |
-| `tools` | The [eight tools](#tools), sorted by name, each with `strict: true` and `eager_input_streaming: true` | `strict` keeps inputs schema-valid. Eager streaming sends large inputs, such as a full translation unit, as they are generated. |
+| `tools` | The [nine tools](#tools), sorted by name, each with `strict: true` and `eager_input_streaming: true` | `strict` keeps inputs schema-valid. Eager streaming sends large inputs, such as a full translation unit, as they are generated. |
 | `system` | One text block (the frozen system prompt) with `cache_control: {type: "ephemeral"}` | An explicit cache breakpoint at the end of the shared prefix |
 | `cache_control` (top level) | `{type: "ephemeral"}` | Automatic caching of the growing conversation |
 | `fallbacks` | `"default"` | Server-side refusal fallbacks ([below](#refusals-and-fallbacks)) |
@@ -652,6 +652,45 @@ is one line: address, kind, size, readable name and decorated name, for example
 `0x403000 data     size 4     int g_counter  [?g_counter@@3HA]`. An empty query is an `is_error`
 result.
 
+### `get_type`
+
+```json
+{
+  "description": "The exact layout of a struct, class, union or enum: its size, bases, vtable slots and virtual methods, and every field's offset, size and type, as the compiler lays it out. From the project's headers when they declare the type (the source of truth), else from the target's PDB. Use it to declare a type with the right layout.",
+  "eager_input_streaming": true,
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "description": "The type's name, as the brief or a listing writes it (e.g. \"Player\", \"game::Shape\")",
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  },
+  "name": "get_type",
+  "strict": true
+}
+```
+
+The layout is the one the compiler made of the type ([project-format.md](project-format.md#include)):
+the project's headers compiled and read back when one of them declares the type, else the target's
+PDB, else a type the headers use from elsewhere (a system header's). The first line says which; when
+both the headers and the PDB have the type, the last lines say whether they agree and list each
+difference. For the fixture's Player:
+
+```
+// the target's PDB; no project header declares it yet (define_type can)
+struct Player  // 8 bytes
+  +0x00  int hp
+  +0x04  float speed
+```
+
+An unknown name is an `is_error` result that lists up to ten names containing it ("Similar: Player.").
+
 ### `record_note`
 
 ```json
@@ -854,7 +893,6 @@ header at once, since the project's `include/` is among their include directorie
 
 | Tool | Phase | Purpose |
 |---|---|---|
-| `get_type` | 4 | Return a type's exact layout (sizes and offsets read back from a PDB) |
 | `search_matched_examples` | Later | Find matched functions in the project with a similar shape, to reuse idioms |
 
 New tools take effect at session boundaries, because a tool list is part of the frozen prefix.
@@ -869,10 +907,12 @@ then, the first `request` record of every transcript contains the full text. It 
    functions of a compiled x86/x64 program as C/C++ that the original compiler and flags turn into
    byte-identical code. This is preservation and interoperability work, and the user is entitled to
    study the binary.
-2. *Tools and scope.* One target function per conversation, and what each of the eight tools is for.
+2. *Tools and scope.* One target function per conversation, and what each of the nine tools is for.
    `set_symbol` and `define_type` record facts the code establishes, with the evidence as the reason;
    they never change the function being matched, and a declined one is not an error in the work.
-3. *Method.* Read the brief; work out the signature, calling convention and types (disassembling
+3. *Method.* Read the brief; work out the signature, calling convention and types (get_type for a
+   type's exact layout; listing comments such as `this->hp` name what an operand reaches through a
+   pointer of known type, and the `; types:` line says what the pointers are at entry; disassembling
    callers or callees when needed); write a first complete candidate and compile it early; fix
    structural differences before operand-level ones.
 4. *Output rules.* A complete, self-contained translation unit that declares everything it uses, with

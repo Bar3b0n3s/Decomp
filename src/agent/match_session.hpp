@@ -61,6 +61,7 @@ public:
     ToolOutput disassemble(const Json& input);
     ToolOutput read_memory(const Json& input);
     ToolOutput lookup_symbol(const Json& input);
+    ToolOutput get_type(const Json& input);
     ToolOutput record_note(const Json& input);
     ToolOutput set_symbol(const Json& input);
     // Asks the approval gate (when there is one): nullopt when the action may go ahead (`approval` says
