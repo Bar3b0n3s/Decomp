@@ -285,8 +285,10 @@ structured exception handling pushes a scope table for `_except_handler3` (VC6 o
 code and `__except` blocks anywhere in its window; filters, `__finally` blocks (which the function
 also calls, MSVC one instruction in) and the places catch blocks resume (the address each returns in
 eax) only inside the function's code or right after it, since clang makes functions of its filters
-and finally blocks. MSVC puts the handler stub and the unwind code elsewhere (`.text$x`): they are
-functions of their own, as are x64 funclets, which have their own unwind data. A link map's labels
+and finally blocks. In an image whose Rich header names an MSVC compiler, unwind code is not
+attached either: MSVC gives it a symbol of its own (`__unwindfunclet$f$0`) and puts it, with the
+handler stub, after the other functions (`.text$x`), and both are functions of their own, as are x64
+funclets, which have their own unwind data. A link map's labels
 inside functions (`$LN12@f`, `__catch$f$0`, clang's `$ehgcr_*` and x86 `?catch$`/`?dtor$` funclets)
 are labels, not functions.
 

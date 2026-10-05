@@ -123,8 +123,10 @@ public:
         }
         find_incremental_linking_tables();
         if (const auto build = image.build_info())
-            if (const pe::BuildTool* main = build->main_compiler(); main && main->product && main->product->release == pe::VsRelease::vs2015_or_later)
-                trap_after_noreturn_call_ = true;
+            if (const pe::BuildTool* main = build->main_compiler(); main && main->product) {
+                msvc_code_ = true;
+                trap_after_noreturn_call_ = main->product->release == pe::VsRelease::vs2015_or_later;
+            }
     }
 
     DiscoveryResult run() {
@@ -513,13 +515,14 @@ private:
     // catch blocks resume (the address each returns in eax) only inside the function's code or right
     // after it (clang makes functions of its filters and finally blocks). The function calls its
     // __finally blocks on the way out (MSVC one instruction in, past a reload the unwinder needs).
+    // MSVC's unwind code is a function of its own (`__unwindfunclet$f$0`), wherever it is placed.
     void attach_eh(u64 start, Fn& fn) {
         std::set<u64> loose, tight, catches;
         for (u64 ref : fn.body.code_refs)
             if (const CxxFuncInfo* info = funcinfo_of_stub(ref)) {
                 catches.insert(info->catch_blocks.begin(), info->catch_blocks.end());
                 loose.insert(info->catch_blocks.begin(), info->catch_blocks.end());
-                loose.insert(info->unwind_actions.begin(), info->unwind_actions.end());
+                if (!msvc_code_) loose.insert(info->unwind_actions.begin(), info->unwind_actions.end());
             }
         for (u64 ref : fn.body.data_refs)
             if (const ScopeTable* table = scope_table_at(ref))
@@ -884,7 +887,8 @@ private:
     bool candidates_built_ = false;
     std::set<u64> table_starts_;  // every switch table (and byte table) found so far
     bool new_table_starts_ = false;
-    bool trap_after_noreturn_call_ = false;  // the image's compiler puts an int3 after a call that cannot return
+    bool msvc_code_ = false;                 // the Rich header names the compiler of the image's code: MSVC
+    bool trap_after_noreturn_call_ = false;  // that compiler puts an int3 after a call that cannot return
     std::set<u64> internal_;  // code a function's exception-handling tables list: never a function start
     std::unordered_map<u64, std::optional<CxxFuncInfo>> funcinfo_cache_;  // by handler stub
     std::unordered_map<u64, std::optional<ScopeTable>> scope_cache_;
