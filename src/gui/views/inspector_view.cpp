@@ -376,6 +376,7 @@ private:
         xref_table(ctx, "Callers", "##callers", x.callers, true);
         xref_table(ctx, "Callees", "##callees", x.callees, false);
         xref_table(ctx, "Data references", "##data", x.data, false);
+        xref_table(ctx, "Stored in data", "##pointers", x.pointers, true);
     }
 
     static void xref_table(ViewContext& ctx, const char* title, const char* id, const std::vector<vm::XrefRow>& rows, bool callers) {

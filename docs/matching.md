@@ -261,10 +261,11 @@ are referred to by their target index (`target #4`).
 | A branch target differs | "Branch at target #i lands on code that differs between the versions (around loc_30)." or "... goes to a different place (A vs B): the control flow around it differs." |
 | A target address has no symbol where the candidate has one | "Target #i references 0x403000, which has no symbol; the candidate uses `?g_counter@@3HA` there. If that is the same object, name the address `?g_counter@@3HA`." |
 | Any other address operand differs | "String literal (Constant, Callee or Reference) differs at target #i: target A vs candidate B." |
+| One side reads an import's IAT slot and the other calls its name directly | "Target #i calls `_Foo@4` through the import table (`call [__imp_...]`), the candidate through the linker's import thunk: declare it `__declspec(dllimport)`." (or "... declare it without `__declspec(dllimport)`.") |
 
 Reference hints stop after about a dozen. Additional detectors are planned: `signature` (names that
 are equivalent but decorated differently, which points to parameter types or the calling convention),
-and `gs_cookie`, `chkstk`, `dllimport` and `eh_frame` (see [MSVC specifics](#msvc-specifics)).
+and `gs_cookie`, `chkstk` and `eh_frame` (see [MSVC specifics](#msvc-specifics)).
 
 ### 8. Output formats
 
@@ -396,8 +397,12 @@ the call goes to a linker-generated stub, `jmp [__imp__Foo@4]`.
   bytes, then two or more `jmp rel32` thunks into code) and does not report its thunks as functions:
   a call, jump, function pointer or entry point that lands on a thunk stands for the function the
   thunk jumps to.
-- Imports compare by their `__imp_` names. A `dllimport` hint for an IAT call on one side and a stub
-  call on the other is planned (Phase 2).
+- Imports compare by their `__imp_` names. How an import is reached says how it was declared: code
+  that reads its IAT slot (`call [__imp__Foo@4]`, or `mov esi, [__imp__Foo@4]` then `call esi`) was
+  compiled against a `__declspec(dllimport)` declaration; a direct call to `_Foo@4` goes through the
+  linker's import thunk and comes from a plain declaration. The annotated listing and the agent's brief
+  say which one each import needs, and when the target and the candidate differ the diff gives the
+  `dllimport` hint.
 
 ### SEH and C++ EH prologs
 
@@ -628,8 +633,8 @@ tool result (`compile: ok (cached)`), so the transcripts show which attempts act
 | Address fields | Base relocations, relative branches, RIP-relative operands, stripped-`.reloc` heuristic (compared as values where the candidate has no relocation), MSVC x64 image-base-relative operands | — |
 | Symbol sources | PDB 7.0 (publics, procedures, data), exports, imports, x64 `.pdata`, `symbols.txt` | MSVC `.map`, RTTI names, library signatures (Phase 2) |
 | Data compared | Narrow and wide strings, floats and SSE constants, jump tables | Global initializers, EH and unwind tables, string and float pools, section placement (Phase 5) |
-| Thunks | ILT and import thunks followed; names moved off ILT entries | `dllimport` hint (Phase 2) |
+| Thunks | ILT and import thunks followed; names moved off ILT entries; the `dllimport` hint | |
 | Jump tables | x86 absolute, clang x64 relative and MSVC x64 RVA tables, compared as index lists | Two-level (byte index) tables; robust in-`.text` bounds for PDB-less MSVC targets (Phase 2) |
-| Hints | Register-only, stack-only, encoding, inverted branch, reordering, instruction count, branch target, binding, and reference (string, constant, callee) hints | `signature`, `gs_cookie`, `chkstk`, `dllimport`, `eh_frame` |
+| Hints | Register-only, stack-only, encoding, inverted branch, reordering, instruction count, branch target, binding, reference (string, constant, callee) and `dllimport` hints | `signature`, `gs_cookie`, `chkstk`, `eh_frame` |
 | Toolchains | Registry with auto-detected clang-cl, `toolchain add`/`list`/`test`, compile cache, MSVC and GCC-style diagnostics; clang-cl round trip (Linux CI), `cl.exe` round trip (Windows CI, being brought up) | Version banner, project overrides, `CL`/`_CL_` removal, Wine wrapper on Linux; flag search and compiler identification (Phase 6) |
 | Verification scope | Single functions | Whole translation units and relinking with a SHA-1 check of the result (Phase 5) |

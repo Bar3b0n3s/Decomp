@@ -191,6 +191,62 @@ TEST_CASE("calls through linker thunks compare as calls to the destination") {
     }
 }
 
+TEST_CASE("dllimport: how an import is called says how it was declared") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-dllimport").value();
+    auto source = [&](const char* name, const char* declaration) {
+        const auto path = dir.path() / name;
+        REQUIRE(fs::write_text(path, std::string("extern \"C\" int _fltused = 0;\n") + declaration +
+                                         " void __stdcall ExitProcess(unsigned int code);\n"
+                                         "__declspec(noinline) void quit(unsigned int code) { ExitProcess(code + 1); ExitProcess(code); }\n"
+                                         "extern \"C\" void entry() { quit(3); }\n"));
+        return path;
+    };
+    const auto table_source = source("table.cpp", "extern \"C\" __declspec(dllimport)");
+    const auto thunk_source = source("thunk.cpp", "extern \"C\"");
+    for (Arch arch : {Arch::x86, Arch::x64}) {
+        CAPTURE(to_string(arch));
+        const auto out = dir.path() / std::string(to_string(arch));
+        auto table_exe = test::build_program(arch, *tools, out / "table", {table_source}, "table");
+        auto thunk_exe = test::build_program(arch, *tools, out / "thunk", {thunk_source}, "thunk");
+        REQUIRE(table_exe);
+        REQUIRE(thunk_exe);
+        const Program table = Program::open(*table_exe).value();
+        const Program thunk = Program::open(*thunk_exe).value();
+        auto import_call_of = [](const Program& p) {
+            const auto fn = annotate_function(p, *p.resolve("quit")).value();
+            auto it = std::ranges::find_if(fn.callees, [](const Reference& r) { return r.display.find("ExitProcess") != std::string::npos; });
+            REQUIRE(it != fn.callees.end());
+            return it->import_call;
+        };
+        CHECK(import_call_of(table) == "dllimport");
+        CHECK(import_call_of(thunk) == "thunk");
+
+        // The cross-references to the import slot include the calls through the thunk.
+        const u64 quit = *thunk.resolve("quit");
+        const Symbol* slot = nullptr;
+        for (const auto& [va, s] : thunk.symbols())
+            if (s.kind == SymbolKind::import && s.name.find("ExitProcess") != std::string::npos) slot = &s;
+        REQUIRE(slot);
+        const auto refs = thunk.xrefs_to(slot->va);
+        CHECK(std::ranges::any_of(refs, [&](const Xref& x) { return x.function == quit && x.via != 0; }));
+
+        // Each declaration against the other's code: the hint says which one the target needs.
+        const auto table_obj = coff::Object::load(out / "table" / "table.obj").value();
+        const auto thunk_obj = coff::Object::load(out / "thunk" / "thunk.obj").value();
+        const auto wants_dllimport = diff_function(table, *table.resolve("quit"), thunk_obj).value();
+        CHECK_FALSE(wants_dllimport.byte_exact);
+        CHECK(has_hint(wants_dllimport, "declare it `__declspec(dllimport)`"));
+        const auto wants_plain = diff_function(thunk, quit, table_obj).value();
+        CHECK(has_hint(wants_plain, "declare it without `__declspec(dllimport)`"));
+        CHECK(diff_function(table, *table.resolve("quit"), table_obj).value().byte_exact);
+    }
+}
+
 TEST_CASE("linker names must match exactly; readable names only when nothing better is known") {
     using matching::symbol_names_match;
     CHECK(symbol_names_match("?add@@YAHHH@Z", "add", "?add@@YAHHH@Z"));

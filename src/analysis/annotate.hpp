@@ -24,6 +24,10 @@ struct Reference {
     std::string display;  // readable
     std::string kind;     // function/data/string/float/import/unknown
     std::string detail;   // string contents, float value, import dll!name
+    // An imported function: "dllimport" when the code reads its import-table slot (`call [__imp_X]`,
+    // which a `__declspec(dllimport)` declaration produces), "thunk" when it calls the linker's import
+    // thunk (`call X`, from a plain declaration). Empty otherwise.
+    std::string import_call;
 };
 
 struct AnnotatedFunction {

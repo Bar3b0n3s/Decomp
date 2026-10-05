@@ -102,14 +102,18 @@ FunctionXrefs function_xrefs(const Program& program, u64 va) {
         out.callers.push_back(std::move(row));
     };
     for (const Xref& x : program.xrefs_to(va)) {
-        if (!is_branch(x.kind)) continue;
-        // An incremental-linking thunk jumps here: its callers are this function's callers.
-        if (x.kind == XrefKind::jump && program.thunk_destination(x.from) == va && x.from != va) {
-            for (const Xref& via : program.xrefs_to(x.from))
-                if (is_branch(via.kind)) add_caller(via, x.from);
+        if (x.kind == XrefKind::pointer) {
+            XrefRow row;
+            row.at = x.from;
+            row.target = x.via ? x.via : va;
+            row.kind = x.kind;
+            row.name = program.describe_address(x.from);
+            out.pointers.push_back(std::move(row));
             continue;
         }
-        add_caller(x, va);
+        if (!is_branch(x.kind)) continue;
+        // Through an incremental-linking thunk: the row shows the thunk as what was called.
+        add_caller(x, x.via ? x.via : va);
     }
     for (const Xref& x : program.xrefs_from(va)) {
         XrefRow row;
@@ -134,6 +138,7 @@ FunctionXrefs function_xrefs(const Program& program, u64 va) {
     std::ranges::sort(out.callers, by_address);
     std::ranges::sort(out.callees, by_address);
     std::ranges::sort(out.data, by_address);
+    std::ranges::sort(out.pointers, by_address);
     return out;
 }
 

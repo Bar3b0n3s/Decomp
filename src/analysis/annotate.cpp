@@ -160,6 +160,8 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
                 if (ext.contains(f.absolute)) return label_for(f.absolute);
                 auto ref = describe_reference(program, f.absolute);
                 if (in.flow == x86::Flow::call || in.flow == x86::Flow::jump || in.flow == x86::Flow::cond_jump) {
+                    if (auto dest = program.thunk_destination(f.absolute))
+                        if (const Symbol* slot = program.symbols().at(*dest); slot && slot->kind == SymbolKind::import) ref.import_call = "thunk";
                     callees.emplace(f.absolute, ref);
                     if (in.flow != x86::Flow::call) notes.push_back("tail call");
                 }
@@ -173,8 +175,15 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
             if (is_table) {
                 return std::format("switch_table_{:x}", f.absolute);
             }
-            if (ref.kind == "function" && in.flow == x86::Flow::indirect_call) callees.emplace(f.absolute, ref);
-            else data_refs.emplace(f.absolute, ref);
+            // An import's slot is read to call it (`call [__imp_X]`, or `mov esi, [__imp_X]` then `call esi`).
+            if (ref.kind == "import") {
+                ref.import_call = "dllimport";
+                callees.emplace(f.absolute, ref);
+            } else if (ref.kind == "function" && in.flow == x86::Flow::indirect_call) {
+                callees.emplace(f.absolute, ref);
+            } else {
+                data_refs.emplace(f.absolute, ref);
+            }
             if (!ref.detail.empty() && ref.kind != "function") notes.push_back(ref.detail);
             return ref.display;
         };
@@ -269,7 +278,8 @@ Json to_json(const AnnotatedFunction& fn) {
     auto refs = [](const std::vector<Reference>& list) {
         Json arr = Json::array();
         for (const auto& r : list)
-            arr.push_back({{"va", r.va}, {"name", r.name}, {"display", r.display}, {"kind", r.kind}, {"detail", r.detail}});
+            arr.push_back({{"va", r.va}, {"name", r.name}, {"display", r.display}, {"kind", r.kind}, {"detail", r.detail},
+                           {"import_call", r.import_call}});
         return arr;
     };
     j["callees"] = refs(fn.callees);

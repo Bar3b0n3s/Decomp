@@ -454,8 +454,15 @@ std::string MatchSession::brief() const {
 
     out += "\n# Referenced symbols\n";
     if (fn->callees.empty() && fn->data_refs.empty()) out += "(none)\n";
+    // How an import is reached tells how it was declared.
+    auto import_note = [](const Reference& r) -> std::string {
+        if (r.import_call == "dllimport") return " (through the import table: declare it __declspec(dllimport))";
+        if (r.import_call == "thunk") return " (through the linker's import thunk: declare it without __declspec(dllimport))";
+        return {};
+    };
     for (const auto& c : fn->callees)
-        out += std::format("- calls {}: {}{}\n", c.display, c.detail.empty() ? c.name : c.detail, c.name != c.display ? "  [" + c.name + "]" : "");
+        out += std::format("- calls {}: {}{}{}\n", c.display, c.detail.empty() ? c.name : c.detail, c.name != c.display ? "  [" + c.name + "]" : "",
+                           import_note(c));
     for (const auto& d : fn->data_refs) {
         std::string extra;
         if (d.kind == "data") {
@@ -464,7 +471,8 @@ std::string MatchSession::brief() const {
                     extra = std::format(", initial bytes: {}", hex_bytes(reinterpret_cast<const u8*>(bytes->data()), bytes->size()));
             }
         }
-        out += std::format("- {} {}: {}{}{}\n", d.kind, d.display, display_name(d.name), d.detail.empty() || d.kind == "data" ? "" : " = " + d.detail, extra);
+        out += std::format("- {} {}: {}{}{}{}\n", d.kind, d.display, display_name(d.name), d.detail.empty() || d.kind == "data" ? "" : " = " + d.detail, extra,
+                           import_note(d));
     }
     if (!fn->callers.empty()) out += std::format("\n# Callers\n{}\n", join(fn->callers, ", "));
 

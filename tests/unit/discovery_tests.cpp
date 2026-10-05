@@ -279,6 +279,32 @@ TEST_CASE("discovery on MSVC and VC6 code layouts: tables after the code, byte t
     CHECK(helper->noreturn);
 }
 
+TEST_CASE("cross references go through incremental-linking thunks and include pointers stored in data") {
+    const Program p = Program::open(test::fixture("x86/idioms.exe")).value();
+    const auto truth = idiom_truth("x86");
+    const u64 entry = idiom(truth, "_entry"), one = idiom(truth, "_switch_one_level"), callback = idiom(truth, "_callback");
+    // The calls go to thunks; the index has them against the functions behind the thunks too.
+    CHECK(p.callers_of(one) == std::vector<u64>{entry});
+    const auto refs = p.xrefs_to(one);
+    auto call = std::ranges::find_if(refs, [](const Xref& x) { return x.kind == XrefKind::call; });
+    REQUIRE(call != refs.end());
+    CHECK(call->function == entry);
+    REQUIRE(call->via != 0);
+    CHECK(p.image().read<u8>(call->via) == u8{0xE9});
+    CHECK(std::ranges::any_of(p.xrefs_to(call->via), [&](const Xref& x) { return x.from == call->from && x.via == 0; }));
+    // The callback is reached only through a pointer in the data, to its thunk.
+    const auto m = map::load(test::fixture("x86/idioms.map")).value();
+    auto table = std::ranges::find(m.entries, std::string("_callbacks"), &map::Entry::name);
+    REQUIRE(table != m.entries.end());
+    const auto data = p.xrefs_to(callback);
+    auto pointer = std::ranges::find_if(data, [](const Xref& x) { return x.kind == XrefKind::pointer; });
+    REQUIRE(pointer != data.end());
+    CHECK(pointer->from == table->va);
+    CHECK(pointer->function == 0);
+    CHECK(pointer->via != 0);
+    CHECK(std::ranges::contains(p.data_pointers(), std::pair{table->va, pointer->via}));
+}
+
 TEST_CASE("switch tables: the bound from the check, tables after the code, byte index tables, RVA entries") {
     struct Case {
         const char* arch;

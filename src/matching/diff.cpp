@@ -744,6 +744,49 @@ void add_hints(FunctionDiff& d) {
                         "expression differs.");
     }
 
+    // An import reached through the import table on one side and through the linker's thunk on the other:
+    // the declaration has __declspec(dllimport) on one side only.
+    {
+        struct ImportCalls {
+            std::vector<std::pair<std::string, usize>> table, direct;  // (name without __imp_, instruction)
+        };
+        // Reading a slot (`call [__imp_X]`, or `mov esi, [__imp_X]` then `call esi`) is a call through the
+        // table; a direct call or jump to the import's name goes through the thunk.
+        auto import_calls = [](const Side& s) {
+            ImportCalls out;
+            for (usize i = 0; i < s.instructions.size(); ++i) {
+                const auto& si = s.instructions[i];
+                const bool direct = si.ins.flow == x86::Flow::call || si.ins.flow == x86::Flow::jump;
+                for (const auto& ref : si.refs) {
+                    if (!ref || ref->kind != RefKind::symbol) continue;
+                    std::string_view key = ref->key;
+                    const bool slot = key.starts_with("__imp_");
+                    if (slot) key.remove_prefix(6);
+                    if (direct) out.direct.emplace_back(std::string(key), i);
+                    else if (slot) out.table.emplace_back(std::string(key), i);
+                    break;
+                }
+            }
+            return out;
+        };
+        auto has = [](const std::vector<std::pair<std::string, usize>>& list, std::string_view name) {
+            return std::ranges::any_of(list, [&](const auto& e) { return names_equivalent(e.first, name); });
+        };
+        const ImportCalls t = import_calls(d.target), c = import_calls(d.candidate);
+        for (const auto& [name, i] : t.table)
+            if (has(c.direct, name) && !has(c.table, name)) {
+                h.push_back(std::format("Target #{} calls `{}` through the import table (`call [__imp_...]`), the candidate through "
+                                        "the linker's import thunk: declare it `__declspec(dllimport)`.", i, name));
+                break;
+            }
+        for (const auto& [name, i] : t.direct)
+            if (has(c.table, name) && !has(c.direct, name) && !has(t.table, name)) {
+                h.push_back(std::format("Target #{} calls `{}` through the linker's import thunk, the candidate through the import "
+                                        "table: declare it without `__declspec(dllimport)`.", i, name));
+                break;
+            }
+    }
+
     long delta = static_cast<long>(d.candidate.instructions.size()) - static_cast<long>(d.target.instructions.size());
     if (delta != 0)
         h.push_back(std::format("Candidate has {} {} instruction(s) than the target.", std::abs(delta), delta > 0 ? "more" : "fewer"));

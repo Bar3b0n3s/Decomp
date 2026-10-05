@@ -23,6 +23,7 @@ std::string_view to_string(XrefKind kind) {
     case XrefKind::read: return "read";
     case XrefKind::address: return "address";
     case XrefKind::write: return "write";
+    case XrefKind::pointer: return "pointer";
     }
     return "?";
 }
@@ -388,14 +389,61 @@ std::vector<Xref> Program::xrefs_from(u64 function_va) const {
 }
 
 void Program::build_xrefs() const {
+    std::unordered_map<u64, std::optional<u64>> thunks;  // target -> what is behind it, when a thunk
+    auto add = [&](const Xref& x) {
+        xrefs_[x.to].push_back(x);
+        if (x.kind == XrefKind::read || x.kind == XrefKind::write || !image_->is_code(x.to)) return;
+        auto it = thunks.find(x.to);
+        if (it == thunks.end()) it = thunks.emplace(x.to, linker_thunk_target(x.to)).first;
+        if (!it->second || *it->second == x.to) return;
+        Xref through = x;
+        through.via = x.to;
+        through.to = *it->second;
+        xrefs_[through.to].push_back(through);
+    };
     for (const auto* fn : symbols_.functions()) {
         if (fn->size == 0 || !image_->is_code(fn->va)) continue;
         auto ext = function_extent(fn->va);
         if (!ext) continue;
         auto list = function_instructions(*ext);
         if (!list) continue;
-        for (auto& x : xrefs_in(*ext, *list)) xrefs_[x.to].push_back(x);
+        for (const auto& x : xrefs_in(*ext, *list)) add(x);
     }
+    for (const auto& [where, value] : data_pointers()) add(Xref{.from = where, .function = 0, .kind = XrefKind::pointer, .to = value, .via = 0});
+}
+
+std::vector<std::pair<u64, u64>> Program::data_pointers() const {
+    std::vector<std::pair<u64, u64>> out;
+    const unsigned size = pointer_size(image_->arch());
+    auto read_pointer = [&](u64 va) -> std::optional<u64> {
+        if (size == 8) return image_->read<u64>(va);
+        return image_->read<u32>(va).transform([](u32 v) { return u64{v}; });
+    };
+    if (image_->has_relocations()) {
+        for (const auto& r : image_->base_relocations()) {
+            const u64 where = image_->image_base() + r.rva;
+            if (image_->is_code(where)) continue;  // in instructions and switch tables: the functions say
+            if (auto value = read_pointer(where); value && image_->contains(*value)) out.emplace_back(where, *value);
+        }
+        return out;
+    }
+    for (const auto& s : image_->image_sections()) {
+        if (s.executable || s.file_size == 0) continue;
+        for (u64 va = s.va; va + size <= s.va + s.file_size; va += size)
+            if (auto value = read_pointer(va); value && *value >= image_->image_base() && image_->contains(*value)) out.emplace_back(va, *value);
+    }
+    return out;
+}
+
+std::optional<u64> Program::linker_thunk_target(u64 va) const {
+    auto ins = decode_at(va);
+    if (!ins) return std::nullopt;
+    if (ins->flow == x86::Flow::indirect_jump && ins->memory_target) {
+        if (const Symbol* slot = symbols_.at(*ins->memory_target); slot && slot->kind == SymbolKind::import) return *ins->memory_target;
+        return std::nullopt;
+    }
+    if (const Symbol* s = symbols_.at(va); s && s->kind == SymbolKind::function) return std::nullopt;
+    return thunk_destination(va);
 }
 
 std::vector<Xref> Program::xrefs_to(u64 target) const {

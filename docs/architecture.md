@@ -215,10 +215,12 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   thunks. `with_symbols()` makes a new *symbol generation* that shares the image and decoder; workers
   hold a `shared_ptr<const Program>`, so a symbol edit during a run builds a new generation that later
   sessions pick up while running sessions keep theirs. It resolves names and addresses (`resolve()`),
-  finds function extents and instructions, scans cross-references on first use (`xrefs_to()`,
-  `callers_of()`; `xrefs_from()` lists what one function references: calls, jumps out, reads, writes
-  and addresses), and follows linker thunks
-  (`thunk_destination()`).
+  finds function extents and instructions, builds a cross-reference index on first use (`xrefs_to()`,
+  `callers_of()`): what every function references (`xrefs_from()`: calls, jumps out, reads, writes and
+  addresses), the pointers stored in data (`data_pointers()`: base relocations outside the code, or
+  aligned values that hold an image address when there are none), and, for references that land on a
+  linker thunk, the same reference to the function or import behind it (`Xref::via` names the thunk).
+  It follows linker thunks (`thunk_destination()`).
 - `scan_strings()` (`analysis/strings.hpp`): ASCII and UTF-16LE strings in the non-executable sections,
   cut at symbol boundaries; `string_refs()` finds the functions that use one.
 - `SymbolDb`: `std::map<va, Symbol>` with `Symbol{name (decorated), display (demangled), pdb_name,

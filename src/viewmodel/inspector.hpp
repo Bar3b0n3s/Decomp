@@ -65,6 +65,7 @@ struct FunctionXrefs {
     std::vector<XrefRow> callers;  // calls and jumps into the function (also through linker thunks)
     std::vector<XrefRow> callees;  // calls and jumps out of it
     std::vector<XrefRow> data;     // reads, writes and addresses it takes
+    std::vector<XrefRow> pointers; // data that holds its address (vtables, callback tables)
 };
 // Program::xrefs_to() builds the program's cross-reference index on first use (seconds on a large
 // binary), so call this from a background job. Each list is in address order of `at`.

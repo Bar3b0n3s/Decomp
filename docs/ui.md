@@ -321,7 +321,8 @@ a transcript of several megabytes scrolls smoothly. Links can open a session on 
   - Disassembly: the annotated listing with block separators, loop depth bars and loop headers,
     labels, comments and optional bytes. Operands that reference something are links: a label scrolls
     to it, a function opens in the Inspector, data in the Binary explorer;
-  - Cross-references: callers, callees and data references;
+  - Cross-references: callers (also those that call through an incremental-linking thunk), callees,
+    data references, and the data that stores the function's address (vtables, callback tables);
   - Attempts: the score of every attempt and the best so far (a chart), and every attempt with its
     time, match, session, author (agent or user) and summary;
   - Notes;
@@ -390,9 +391,9 @@ until the new one is ready.
 
 - `pe::Image` and the PDB state, `SymbolDb` and analysis: the string scan (`scan_strings`) and its
   references (`string_refs`), the overlays (`vm::build_hex_overlays`) and the references to an address
-  (`Program::xrefs_to`, a scan over the functions with known sizes), each a background job per program
-  generation. Phase 2 adds a full cross-reference index, a complete compiler table and RTTI class
-  names.
+  (`Program::xrefs_to`: the functions' references, pointers stored in data and references through
+  linker thunks), each a background job per program generation; the Rich header's tools and versions
+  (`pe::identify_build`). Phase 2 adds RTTI class names.
 
 ### Symbols and provenance
 

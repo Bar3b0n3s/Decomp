@@ -33,14 +33,16 @@ struct FunctionExtent {
 // call/jump: a branch that leaves the function (an indirect call through memory is a call too);
 // read/write: a memory operand the instruction reads or stores to; address: an address-valued
 // immediate (`push offset`, `mov reg, offset`).
-enum class XrefKind : u8 { call, jump, read, address, write };
+// `pointer`: an address stored in data (a vtable slot, a callback table, a string table).
+enum class XrefKind : u8 { call, jump, read, address, write, pointer };
 std::string_view to_string(XrefKind kind);
 
 struct Xref {
-    u64 from = 0;      // instruction address
-    u64 function = 0;  // start of the function containing `from` (0 if unknown)
+    u64 from = 0;      // instruction address, or the data address of a pointer
+    u64 function = 0;  // start of the function containing `from` (0 if unknown, and for pointers in data)
     XrefKind kind = XrefKind::read;
     u64 to = 0;        // the referenced address
+    u64 via = 0;       // the linker thunk (incremental linking, import) the reference reached `to` through
 };
 
 // Displacements that are RVAs because their base or index register holds the image base. MSVC x64
@@ -106,8 +108,13 @@ public:
     Result<std::vector<x86::Instruction>> function_instructions(u64 start) const;
     Result<std::vector<x86::Instruction>> function_instructions(const FunctionExtent& extent) const;
 
-    // Cross references to `target` (built on first use by scanning every sized function).
+    // Cross references to `target`, built on first use: what every sized function references (see
+    // xrefs_from()), the pointers stored in data (at base relocations outside the code; without
+    // relocations, at aligned values that hold an address in the image), and for references that land
+    // on a linker thunk, the same reference to the function or import behind it (with `via` set).
     std::vector<Xref> xrefs_to(u64 target) const;
+    // The pointers stored in data, as (where, value): see xrefs_to().
+    std::vector<std::pair<u64, u64>> data_pointers() const;
     // Functions that call `target`.
     std::vector<u64> callers_of(u64 target) const;
     // What the function at `function_va` references, by the rules of xrefs_to(): branches that leave
@@ -130,6 +137,10 @@ private:
     void fold_linker_thunks();
     std::optional<x86::Instruction> decode_at(u64 va) const;
     void build_xrefs() const;
+    // The function or import slot behind a linker thunk at `va`: an import thunk (`jmp [IAT slot]`), or
+    // an unnamed incremental-linking thunk (see thunk_destination()). nullopt for anything else,
+    // including a function of its own whose body is a jump.
+    std::optional<u64> linker_thunk_target(u64 va) const;
     // A switch table dispatched by `jmp`; `before` holds the instructions that run before it, in order.
     std::optional<JumpTable> jump_table(std::span<const x86::Instruction> before, const x86::Instruction& jmp, u64 fn_start, u64 fn_limit) const;
 
