@@ -76,7 +76,7 @@ project "decomp_tests"
     kind "ConsoleApp"
     decomp_settings()
     files { "tests/**.hpp", "tests/**.cpp" }
-    removefiles { "tests/fixtures/**", "tests/gui/**" }
+    removefiles { "tests/fixtures/**", "tests/gui/**", "tests/corpus/**" }
     includedirs { "tests" }
     defines { "DECOMP_SOURCE_DIR=\"" .. path.getabsolute(".") .. "\"" }
     link_decomp()
