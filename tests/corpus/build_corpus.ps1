@@ -15,18 +15,21 @@ if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force "$out\obj" | Out-Null
 
 $sources = @(Get-ChildItem "$zydis\src\*.c") + @(Get-ChildItem "$zydis\dependencies\zycore\src\*.c") +
-    @(Get-Item "$PSScriptRoot\main.c") + @(Get-Item "$PSScriptRoot\rt.c")
+    @(Get-Item "$PSScriptRoot\main.c", "$PSScriptRoot\rt.c", "$PSScriptRoot\eh.cpp", "$PSScriptRoot\seh.c", "$PSScriptRoot\eh_rt.c")
 # /Gs999999: no stack probes (there is no __chkstk without a C library).
 $cflags = @("/nologo", "/c", "/O2", "/Gy", "/GS-", "/GR-", "/Zl", "/Z7", "/Gs999999",
     "/DZYAN_NO_LIBC", "/DZYDIS_STATIC_BUILD", "/DZYCORE_STATIC_BUILD",
     "/I$zydis\include", "/I$zydis\src", "/I$zydis\dependencies\zycore\include")
 $n = 0
 foreach ($src in $sources) {
-    & cl.exe @cflags $src.FullName "/Fo$out\obj\$($src.BaseName)_$n.obj"
+    $eh = if ($src.Extension -eq ".cpp") { "/EHsc" } else { "/EHs-c-" }
+    & cl.exe @cflags $eh $src.FullName "/Fo$out\obj\$($src.BaseName)_$n.obj"
     if ($LASTEXITCODE -ne 0) { throw "cl.exe failed on $($src.Name)" }
     $n++
 }
-& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug /opt:noref "/out:$out\corpus.exe" `
+$prefix = if ($Arch -eq "x86") { "_" } else { "" }
+& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug /opt:noref `
+    "/alternatename:??_7type_info@@6B@=${prefix}corpus_type_info_vftable" "/out:$out\corpus.exe" `
     "/pdb:$out\corpus.pdb" "/map:$out\corpus.map" (Get-ChildItem "$out\obj\*.obj" | ForEach-Object FullName)
 if ($LASTEXITCODE -ne 0) { throw "link.exe failed" }
 

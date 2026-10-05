@@ -178,3 +178,13 @@ jobs:
       - name: Function bounds corpus (MSVC x64)
         shell: pwsh
         run: tests\corpus\build_corpus.ps1 -Arch x64
+
+      # The cl.exe-built corpus, to look into what the analysis gets wrong on it.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: msvc-corpus
+          path: |
+            build/corpus-msvc-x86/corpus.*
+            build/corpus-msvc-x64/corpus.*
+          if-no-files-found: ignore
