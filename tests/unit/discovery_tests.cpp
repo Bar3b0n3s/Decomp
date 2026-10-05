@@ -247,6 +247,12 @@ u64 idiom(const std::vector<FunctionBounds>& truth, std::string_view name) {
     return it->start;
 }
 
+u64 idiom_end(const std::vector<FunctionBounds>& truth, std::string_view name) {
+    auto it = std::ranges::find(truth, name, &FunctionBounds::name);
+    REQUIRE(it != truth.end());
+    return it->end;
+}
+
 } // namespace
 
 TEST_CASE("discovery on MSVC and VC6 code layouts: tables after the code, byte tables, calls that do not return, tail calls") {
@@ -254,7 +260,7 @@ TEST_CASE("discovery on MSVC and VC6 code layouts: tables after the code, byte t
         CAPTURE(arch);
         const Program p = Program::open(test::fixture(std::string(arch) + "/idioms.exe")).value();
         const auto truth = idiom_truth(arch);
-        REQUIRE(truth.size() == (std::string_view(arch) == "x86" ? 10u : 8u));
+        REQUIRE(truth.size() == (std::string_view(arch) == "x86" ? 11u : 9u));
         const auto c = compare_bounds(truth, function_bounds(p.symbols(), p.image()), p.image(), p.decoder());
         for (const auto& m : c.mismatches) MESSAGE(to_string(m.kind), " ", m.name, " found end ", m.found_end, " truth end ", m.truth_end);
         CHECK(c.exact == truth.size());
@@ -343,6 +349,19 @@ TEST_CASE("switch tables: the bound from the check, tables after the code, byte 
         // The instructions skip the tables.
         const auto list = p.function_instructions(two).value();
         CHECK(std::ranges::none_of(list, [&](const x86::Instruction& ins) { return ins.address >= u.table_va; }));
+
+        // No bounds check (the default cannot happen): the byte table is read up to the padding after
+        // it, and the null entry is a case that cannot happen.
+        const char* unchecked = std::string_view(k.arch) == "x86" ? "_switch_unchecked" : "switch_rva_unchecked";
+        const auto three = p.function_extent(idiom(truth, unchecked)).value();
+        REQUIRE(three.jump_tables.size() == 1);
+        const JumpTable& w = three.jump_tables[0];
+        CHECK_FALSE(w.bounded);
+        REQUIRE(w.targets.size() == 4);
+        CHECK(w.targets[3] == 0);
+        CHECK(w.index_entries == 17);
+        CHECK(w.index_va == w.table_va + 16);
+        CHECK(three.end == idiom_end(truth, unchecked));
     }
 }
 

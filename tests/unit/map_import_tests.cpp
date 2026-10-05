@@ -155,7 +155,7 @@ TEST_CASE("map symbols: names, object files, statics and kinds, at the image's b
 TEST_CASE("a program opened with its map: the map's names, and exact bounds from its starts") {
     auto dir = fs::TempDir::create("decomp-map").value();
     const IdiomMap m = write_idiom_map(dir.path());
-    REQUIRE(m.functions.size() == 10);
+    REQUIRE(m.functions.size() == 11);
     const Program p = Program::open(test::fixture("x86/idioms.exe"), OpenOptions{.map = m.path}).value();
     for (const auto& f : m.functions) {
         CAPTURE(f.name);

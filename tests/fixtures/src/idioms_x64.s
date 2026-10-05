@@ -16,6 +16,8 @@ entry:
     call switch_rva
     mov ecx, 3
     call switch_rva_two_level
+    mov ecx, 16
+    call switch_rva_unchecked
     mov ecx, 5
     call chained
     mov ecx, 1
@@ -95,6 +97,35 @@ Ltwo_index:
     .byte 0, 1, 2, 1, 0, 3, 3, 2, 1, 0
     .globl switch_rva_two_level_end
 switch_rva_two_level_end:
+
+# A switch whose default cannot happen (`__assume(0)`): no bounds check, a null entry for the cases that
+# cannot happen, the byte table right after the RVA table.
+    .p2align 4, 0xcc
+    .globl switch_rva_unchecked
+switch_rva_unchecked:
+    lea eax, [rcx-8]
+    movsxd rax, eax
+    lea rdx, [rip + __ImageBase]
+    movzx eax, byte ptr [rdx + rax + Lunc_index@IMGREL]
+    mov ecx, dword ptr [rdx + 4*rax + Lunc_table@IMGREL]
+    add rcx, rdx
+    jmp rcx
+Lunc_a:
+    mov eax, 1
+    ret
+Lunc_b:
+    mov eax, 2
+    ret
+Lunc_c:
+    mov eax, 3
+    ret
+    .p2align 2, 0xcc
+Lunc_table:
+    .long Lunc_a@IMGREL, Lunc_b@IMGREL, Lunc_c@IMGREL, 0
+Lunc_index:
+    .byte 0, 3, 3, 3, 3, 3, 3, 3, 1, 3, 3, 3, 3, 3, 3, 3, 2
+    .globl switch_rva_unchecked_end
+switch_rva_unchecked_end:
 
 # Unwind data in two entries: the second is chained to the first. One function.
     .p2align 4, 0xcc

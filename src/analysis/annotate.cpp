@@ -119,7 +119,8 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
         if (x.branch_target && ext.contains(*x.branch_target) && (x.flow == x86::Flow::jump || x.flow == x86::Flow::cond_jump))
             labelled.insert(*x.branch_target);
     for (const auto& t : ext.jump_tables)
-        for (u64 target : t.targets) labelled.insert(target);
+        for (u64 target : t.targets)
+            if (target) labelled.insert(target);
     auto label_for = [](u64 va) { return std::format("loc_{:x}", va); };
 
     std::map<u64, Reference> callees, data_refs;
@@ -199,7 +200,7 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
         for (const auto& t : ext.jump_tables) {
             if (t.jump_va != x.address) continue;
             std::vector<std::string> targets;
-            for (u64 target : t.targets) targets.push_back(label_for(target));
+            for (u64 target : t.targets) targets.push_back(target ? label_for(target) : "none");
             notes.push_back(std::format("switch: {} cases -> {}", t.targets.size(), join(targets, ", ")));
         }
         const auto& block = cfg.blocks[line.block];

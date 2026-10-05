@@ -27,6 +27,9 @@ _entry:
     push 3
     call Lilt_switch_two_level
     add esp, 4
+    push 16
+    call _switch_unchecked
+    add esp, 4
     call _calls_exit_helper
     call _tail_caller
     call _dead_code_after_exit
@@ -100,6 +103,32 @@ Ltwo_index:
     .byte 0, 1, 2, 1, 0, 3, 3, 2, 1, 0
     .globl _switch_two_level_end
 _switch_two_level_end:
+
+# A switch whose default cannot happen (`__assume(0)`), as cl.exe 19.5x lays it out: no bounds check,
+# a null entry for the cases that cannot happen, and the byte table right after the jump table.
+    .p2align 4, 0xcc
+    .globl _switch_unchecked
+_switch_unchecked:
+    mov eax, dword ptr [esp+4]
+    sub eax, 8
+    movzx eax, byte ptr [eax + Lunc_index]
+    jmp dword ptr [4*eax + Lunc_table]
+Lunc_a:
+    mov eax, 1
+    ret
+Lunc_b:
+    mov eax, 2
+    ret
+Lunc_c:
+    mov eax, 3
+    ret
+    .p2align 2, 0xcc
+Lunc_table:
+    .long Lunc_a, Lunc_b, Lunc_c, 0
+Lunc_index:
+    .byte 0, 3, 3, 3, 3, 3, 3, 3, 1, 3, 3, 3, 3, 3, 3, 3, 2
+    .globl _switch_unchecked_end
+_switch_unchecked_end:
 
 # A helper that never returns (it ends by exiting) and a caller with nothing after the call: the next
 # function follows the padding.

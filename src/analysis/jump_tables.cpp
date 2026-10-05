@@ -122,19 +122,32 @@ std::optional<u64> entry_target(const JumpTableContext& ctx, const JumpTable& t,
     return std::nullopt;
 }
 
-// Exactly `count` entries, all inside the function; nothing when one is not.
+// A null entry: MSVC leaves the cases of a switch whose default is `__assume(0)` without code.
+bool null_entry(const JumpTableContext& ctx, const JumpTable& t, usize i) {
+    const u64 slot = t.table_va + static_cast<u64>(i) * t.entry_size;
+    if (t.entry_size == 8) return ctx.image->read<u64>(slot) == u64{0};
+    return ctx.image->read<u32>(slot) == u32{0};
+}
+
+// Exactly `count` entries, all inside the function or null (kept as 0); nothing when one is not.
 std::optional<std::vector<u64>> read_counted(const JumpTableContext& ctx, const JumpTable& t, usize count) {
     std::vector<u64> out;
     out.reserve(count);
     for (usize i = 0; i < count; ++i) {
+        if (null_entry(ctx, t, i)) {
+            out.push_back(0);
+            continue;
+        }
         auto target = entry_target(ctx, t, i);
         if (!target || !valid_target(ctx, *target)) return std::nullopt;
         out.push_back(*target);
     }
+    if (std::ranges::all_of(out, [](u64 v) { return v == 0; })) return std::nullopt;
     return out;
 }
 
-// Entries while they point into the function, up to the next named object.
+// Entries while they point into the function (or are null), up to the next named object; nulls at
+// the end are not the table's.
 std::vector<u64> read_while_valid(const JumpTableContext& ctx, const JumpTable& t) {
     std::vector<u64> out;
     for (usize i = 0; i < kMaxEntries; ++i) {
@@ -142,13 +155,33 @@ std::vector<u64> read_while_valid(const JumpTableContext& ctx, const JumpTable& 
         if (i > 0 && ctx.symbols)
             if (const Symbol* s = ctx.symbols->at(slot); s && s->kind != SymbolKind::label) break;
         if (i > 0 && ctx.table_starts && ctx.table_starts->contains(slot)) break;
-        auto target = entry_target(ctx, t, i);
-        if (!target || !valid_target(ctx, *target)) break;
         // A table in the code section ends where the code it points into would begin.
         if (std::ranges::find(out, slot) != out.end()) break;
+        if (null_entry(ctx, t, i)) {
+            if (slot + t.entry_size > ctx.fn_limit && slot >= ctx.fn_start) break;
+            out.push_back(0);
+            continue;
+        }
+        auto target = entry_target(ctx, t, i);
+        if (!target || !valid_target(ctx, *target)) break;
         out.push_back(*target);
     }
+    while (!out.empty() && out.back() == 0) out.pop_back();
     return out;
+}
+
+// A byte table read without a bound (the switch has no bounds check when its default cannot happen):
+// small values up to padding, another table or the function's end.
+usize unbounded_index_bytes(const JumpTableContext& ctx, u64 va) {
+    usize n = 0;
+    for (; n < 256; ++n) {
+        const u64 at = va + n;
+        if (n > 0 && ctx.table_starts && ctx.table_starts->contains(at)) break;
+        if (at >= ctx.fn_limit && va >= ctx.fn_start && va < ctx.fn_limit) break;
+        const auto b = ctx.image->read<u8>(at);
+        if (!b || *b >= 0x80) break;
+    }
+    return n;
 }
 
 // The byte table of a two-level dispatch: the instruction before `before[from]` that loads the jump's
@@ -198,7 +231,11 @@ std::optional<IndexLoad> index_load(const JumpTableContext& ctx, std::span<const
 bool fill_entries(const JumpTableContext& ctx, JumpTable& t, std::span<const Instruction> before, usize from, const std::string& index,
                   std::optional<std::string> image_base_reg) {
     if (auto load = index_load(ctx, before, from, index, image_base_reg)) {
-        if (auto values = bound_of(before, load->position, load->index); values && *values <= 256) {
+        std::optional<u64> values = bound_of(before, load->position, load->index);
+        const bool bounded = values.has_value();
+        if (!values)
+            if (const usize n = unbounded_index_bytes(ctx, load->table_va)) values = n;
+        if (values && *values <= 256) {
             std::vector<u8> bytes;
             for (u64 i = 0; i < *values; ++i) {
                 auto b = ctx.image->read<u8>(load->table_va + i);
@@ -210,7 +247,7 @@ bool fill_entries(const JumpTableContext& ctx, JumpTable& t, std::span<const Ins
                 t.targets = std::move(*targets);
                 t.index_va = load->table_va;
                 t.index_entries = bytes.size();
-                t.bounded = true;
+                t.bounded = bounded;
                 return true;
             }
         }

@@ -5,32 +5,34 @@
  Preferred load address is 0000000000400000
 
  Start         Length     Name                   Class
- 0001:00000000 00000191H .text                   CODE
+ 0001:00000000 000001f1H .text                   CODE
  0003:00000000 00000004H .data                   DATA
  0003:00000004 00000000H .bss                    DATA
 
   Address         Publics by Value              Rva+Base               Lib:Object
 
  0001:00000030       _entry                     0000000000401030     idioms.obj
- 0001:00000061       _entry_end                 0000000000401061     idioms.obj
- 0001:00000070       _switch_one_level          0000000000401070     idioms.obj
- 0001:000000b8       _switch_one_level_end      00000000004010b8     idioms.obj
- 0001:000000c0       _switch_two_level          00000000004010c0     idioms.obj
- 0001:00000112       _switch_two_level_end      0000000000401112     idioms.obj
- 0001:00000120       _exit_helper               0000000000401120     idioms.obj
- 0001:0000012a       _exit_helper_end           000000000040112a     idioms.obj
- 0001:00000130       _calls_exit_helper         0000000000401130     idioms.obj
- 0001:00000137       _calls_exit_helper_end     0000000000401137     idioms.obj
- 0001:00000140       _dead_code_after_exit      0000000000401140     idioms.obj
- 0001:0000014d       _dead_code_after_exit_end  000000000040114d     idioms.obj
- 0001:00000150       _tail_caller               0000000000401150     idioms.obj
- 0001:0000015b       _tail_caller_end           000000000040115b     idioms.obj
- 0001:00000160       _tail_target               0000000000401160     idioms.obj
- 0001:00000164       _tail_target_end           0000000000401164     idioms.obj
- 0001:00000170       _callback                  0000000000401170     idioms.obj
- 0001:00000176       _callback_end              0000000000401176     idioms.obj
- 0001:00000180       _unreferenced              0000000000401180     idioms.obj
- 0001:0000018d       _unreferenced_end          000000000040118d     idioms.obj
+ 0001:0000006b       _entry_end                 000000000040106b     idioms.obj
+ 0001:00000080       _switch_one_level          0000000000401080     idioms.obj
+ 0001:000000c8       _switch_one_level_end      00000000004010c8     idioms.obj
+ 0001:000000d0       _switch_two_level          00000000004010d0     idioms.obj
+ 0001:00000122       _switch_two_level_end      0000000000401122     idioms.obj
+ 0001:00000130       _switch_unchecked          0000000000401130     idioms.obj
+ 0001:00000179       _switch_unchecked_end      0000000000401179     idioms.obj
+ 0001:00000180       _exit_helper               0000000000401180     idioms.obj
+ 0001:0000018a       _exit_helper_end           000000000040118a     idioms.obj
+ 0001:00000190       _calls_exit_helper         0000000000401190     idioms.obj
+ 0001:00000197       _calls_exit_helper_end     0000000000401197     idioms.obj
+ 0001:000001a0       _dead_code_after_exit      00000000004011a0     idioms.obj
+ 0001:000001ad       _dead_code_after_exit_end  00000000004011ad     idioms.obj
+ 0001:000001b0       _tail_caller               00000000004011b0     idioms.obj
+ 0001:000001bb       _tail_caller_end           00000000004011bb     idioms.obj
+ 0001:000001c0       _tail_target               00000000004011c0     idioms.obj
+ 0001:000001c4       _tail_target_end           00000000004011c4     idioms.obj
+ 0001:000001d0       _callback                  00000000004011d0     idioms.obj
+ 0001:000001d6       _callback_end              00000000004011d6     idioms.obj
+ 0001:000001e0       _unreferenced              00000000004011e0     idioms.obj
+ 0001:000001ed       _unreferenced_end          00000000004011ed     idioms.obj
  0002:0000004c       __imp__ExitProcess@4       000000000040204c     kernel32:kernel32.dll
  0003:00000000       _callbacks                 0000000000403000     idioms.obj
 
