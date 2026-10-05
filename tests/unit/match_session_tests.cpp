@@ -251,6 +251,8 @@ TEST_CASE("set_symbol and define_type: approvals, provenance, checks and revert"
     auto set_symbol = [&](const char* address, const char* name, const char* kind = "", int size = 0) {
         return session.call("set_symbol", Json{{"address", address}, {"name", name}, {"kind", kind}, {"size", size}, {"reason", "seen in dispatch"}});
     };
+    // read_counter's own source file, named after its address in this build of the fixture.
+    const auto read_counter_source = proj.matched_source_path(*program.symbols().at(*program.resolve("read_counter")));
 
     SUBCASE("set_symbol") {
         const u64 other = *program.resolve("other_value");
@@ -281,11 +283,10 @@ TEST_CASE("set_symbol and define_type: approvals, provenance, checks and revert"
         // Refused: a matched function, and a name a verified source uses.
         REQUIRE(proj.update_function(*program.resolve("add"), {project::FunctionStatus::matched, 100, 1, 0}));
         CHECK(set_symbol("add", "add2").is_error);
-        REQUIRE(fs::write_text(proj.root() / "src" / "functions" / "read_counter_401070.cpp",
-                               "extern int g_table[8];\nint read_counter() { return g_table[0]; }\n"));
+        REQUIRE(fs::write_text(read_counter_source, "extern int g_table[8];\nint read_counter() { return g_table[0]; }\n"));
         const auto used = set_symbol("g_table", "g_fib");
         CHECK(used.is_error);
-        CHECK(used.text.find("src/functions/read_counter_401070.cpp") != std::string::npos);
+        CHECK(used.text.find("src/functions/" + fs::to_utf8(read_counter_source.filename())) != std::string::npos);
         // Denied by policy: nothing changes.
         gate->set_policy(std::string(kSetSymbolAction), ApprovalPolicy::deny);
         const auto denied = set_symbol("sum_array", "sum_ints");
@@ -339,8 +340,7 @@ TEST_CASE("set_symbol and define_type: approvals, provenance, checks and revert"
         // A verified source that includes the header and defines Player itself: adding Player there would
         // break it, while another header is fine.
         REQUIRE(proj.update_function(*program.resolve("read_counter"), {project::FunctionStatus::matched, 100, 1, 0}));
-        REQUIRE(fs::write_text(proj.root() / "src" / "functions" / "read_counter_401070.cpp",
-                               "#include \"types.h\"\nstruct Player { int hp; };\nextern int g_counter;\n"
+        REQUIRE(fs::write_text(read_counter_source, "#include \"types.h\"\nstruct Player { int hp; };\nextern int g_counter;\n"
                                "__declspec(noinline) int read_counter() { return g_counter; }\n"));
         const auto breaks = define("Player", "struct Player { int hp; float speed; };");
         CHECK(breaks.is_error);
