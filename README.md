@@ -145,6 +145,11 @@ decomp funcs                                      # functions with address, size
 decomp classes --slots                            # classes, bases and vftables from the RTTI (/GR builds)
 decomp disasm sum_array                           # annotated disassembly of one function
 
+# Types: the headers in include/ are the source of truth, compiled and read back with the original compiler
+decomp types --pdb --filter Player                # the types the target's PDB defines
+decomp types check                                # each type the headers declare against the PDB's layout
+decomp types show Player                          # a type's layout: offsets, sizes, bases, vtable slots
+
 # Compile a candidate with the original toolchain and diff it against the target
 decomp diff sum_array --source sum_array.cpp      # exit code 0 = byte-exact, 2 = differs, 3 = compile failed
 decomp diff sum_array --obj sum_array.obj         # diff an object compiled elsewhere

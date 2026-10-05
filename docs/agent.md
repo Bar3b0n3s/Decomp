@@ -930,8 +930,28 @@ Your source is composed into it: your definition of the function joins the unit'
 Write a candidate with the function and what the unit's prelude lacks, and call compile_and_diff.
 ````
 
-The listing is cut to 400 lines. Initial bytes are shown for data symbols of up to 64 bytes. The
-`# Translation unit` section appears when the session works in the function's
+The listing is cut to 400 lines. Initial bytes are shown for data symbols of up to 64 bytes. A
+`# Types` section (before the unit's) lists the types the project's headers declare (kind and size,
+up to 60) and shows the layouts of the types the function's signature names in the PDB: its class (for
+a member function's `this`), then what its parameters and return value are or point to. Each layout
+comes from the header that declares the type, the source of truth, else from the PDB with a note that
+no header declares it yet (`define_type` can). The headers are compiled with the project's toolchain
+and read back once per session, and again after `define_type` changes one
+([project-format.md](project-format.md#include)); headers that do not compile are reported there with
+the compiler's errors. For Player::Hit of the fixture, without headers:
+
+````
+# Types
+The types this function's signature names:
+```
+// from the target's PDB; no project header declares it yet (define_type can)
+struct Player  // 8 bytes
+  +0x00  int hp
+  +0x04  float speed
+```
+````
+
+The `# Translation unit` section appears when the session works in the function's
 [unit](#translation-units). Once the unit's source holds functions, the section lists them and shows
 the unit's prelude (up to 200 lines) in a code block. For a C unit, the section adds "write C, not
 C++". Without a unit, the last line asks for "a complete candidate translation unit". When the project

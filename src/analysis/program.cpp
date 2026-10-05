@@ -81,6 +81,12 @@ std::string_view to_string(PdbStatus status) {
     return "absent";
 }
 
+struct Program::PdbTypes {
+    std::once_flag once;
+    usize pointer_size = 4;
+    ProgramTypes types;  // the stream and function types from the start, the catalog on first use
+};
+
 Program Program::with_symbols(SymbolDb symbols) const {
     Program p;
     p.path_ = path_;
@@ -90,7 +96,15 @@ Program Program::with_symbols(SymbolDb symbols) const {
     p.symbols_ = std::move(symbols);
     p.pdb_status_ = pdb_status_;
     p.pdb_detail_ = pdb_detail_;
+    p.pdb_types_ = pdb_types_;
     return p;
+}
+
+const ProgramTypes& Program::pdb_types() const {
+    static const ProgramTypes none;
+    if (!pdb_types_) return none;
+    std::call_once(pdb_types_->once, [types = pdb_types_.get()] { types->types.catalog = TypeCatalog::from(types->types.stream, types->pointer_size); });
+    return pdb_types_->types;
 }
 
 Result<Program> Program::open(const std::filesystem::path& binary, const OpenOptions& options) {
@@ -143,6 +157,14 @@ Result<Program> Program::open(const std::filesystem::path& binary, const OpenOpt
     }
     if (pdb_path && !reader) return make_error(ErrorCode::not_found, "PDB '{}' could not be used", fs::to_utf8(*pdb_path));
     p.symbols_ = SymbolDb::from_pe(*p.image_, reader.get());
+    if (reader) {
+        auto types = std::make_shared<PdbTypes>();
+        types->pointer_size = p.arch() == Arch::x64 ? 8 : 4;
+        for (const auto& procedure : reader->procedures())
+            if (procedure.type_index != 0) types->types.function_types.emplace(p.image_->image_base() + procedure.rva, procedure.type_index);
+        types->types.stream = reader->take_types();
+        p.pdb_types_ = std::move(types);
+    }
     p.fold_linker_thunks();
     if (options.map) {
         TRY_ASSIGN(auto named, p.add_map(*options.map));

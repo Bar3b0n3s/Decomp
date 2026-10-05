@@ -49,6 +49,47 @@ TEST_CASE("tool schemas are strict-compatible") {
     CHECK(system_prompt().find("compile_and_diff") != std::string::npos);
 }
 
+TEST_CASE("the brief's types: the layouts the function's signature names, from the project's headers or the PDB") {
+    if (!matching::find_clang_cl()) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    auto dir = fs::TempDir::create("decomp-brief-types").value();
+    auto proj = project::Project::init(dir.path() / "p", test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86").value();
+    auto program = proj.open_program().value();
+    auto setup = clang_setup(dir.path() / "work");
+    setup.include_dirs = {proj.root() / "include"};
+    const u64 hit = *program.resolve("Player::Hit");
+    {
+        // Player::Hit's `this` is a Player: no header declares it, so its layout comes from the PDB.
+        MatchSession session(program, &proj, setup, hit);
+        const auto brief = session.brief();
+        CHECK(brief.find("# Types") != std::string::npos);
+        CHECK(brief.find("from the target's PDB; no project header declares it yet") != std::string::npos);
+        CHECK(brief.find("struct Player  // 8 bytes\n  +0x00  int hp\n  +0x04  float speed\n") != std::string::npos);
+    }
+    // Declared in a header, it comes from there: the source of truth.
+    REQUIRE(fs::write_text(proj.root() / "include" / "game.h", "#pragma once\nstruct Player { int hp; float speed; void Hit(int); };\nenum Mode { Easy, Hard };\n"));
+    {
+        MatchSession session(program, &proj, setup, hit);
+        const auto brief = session.brief();
+        CHECK(brief.find("The project's headers declare: struct Player (8 bytes), enum Mode (4 bytes).") != std::string::npos);
+        CHECK(brief.find("// include/game.h\nstruct Player  // 8 bytes") != std::string::npos);
+        CHECK(brief.find("no project header declares it yet") == std::string::npos);
+    }
+    // Headers that do not compile say so.
+    REQUIRE(fs::write_text(proj.root() / "include" / "game.h", "struct Player { int hp\n"));
+    {
+        MatchSession session(program, &proj, setup, hit);
+        const auto brief = session.brief();
+        CHECK(brief.find("The project's headers do not compile") != std::string::npos);
+        CHECK(brief.find("include/game.h:1") != std::string::npos);
+    }
+    // A function whose signature names no struct has no layouts to show.
+    MatchSession plain(program, nullptr, setup, *program.resolve("add"));
+    CHECK(plain.brief().find("# Types") == std::string::npos);
+}
+
 TEST_CASE("read-only tools and the brief") {
     auto program = Program::open(test::fixture("x86/basic.exe")).value();
     auto tmp = fs::TempDir::create("decomp-session").value();

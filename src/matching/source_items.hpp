@@ -16,7 +16,7 @@ enum class ItemKind : u8 {
     preprocessor,  // a directive line, with its continuation lines
     declaration,   // anything that ends in `;` at the top level: declarations, data and type definitions
     function,      // a function definition: a head with a parameter list, then a body in braces
-    block,         // a braced block that is not a function body: extern "C" { ... }, namespace n { ... }
+    block,         // a braced block that is not a function body: extern "C" { ... }, namespace n { ... }, namespace a::b { ... }
     comment,       // comments after the last item
 };
 

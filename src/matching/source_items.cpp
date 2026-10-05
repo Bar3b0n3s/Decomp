@@ -169,7 +169,11 @@ Declarator declarator(std::string_view head) {
 ItemKind classify_head(std::string_view head) {
     const auto tokens = head_tokens(head);
     if (tokens.empty()) return ItemKind::block;
-    if (tokens.size() <= 2 && tokens[0].first.text == "namespace") return ItemKind::block;
+    // namespace n {, namespace {, namespace a::b {, inline namespace v1 {
+    const usize ns = tokens[0].first.text == "inline" ? 1 : 0;
+    if (ns < tokens.size() && tokens[ns].first.text == "namespace" &&
+        std::all_of(tokens.begin() + static_cast<std::ptrdiff_t>(ns) + 1, tokens.end(), [](const auto& t) { return t.first.word || t.first.text == "::"; }))
+        return ItemKind::block;
     if (tokens[0].first.text == "extern" && tokens.size() == 2 && !tokens[1].first.word) return ItemKind::block;  // extern "C" {
     // An initializer: `=` at the top level, outside a template's parameter list and an operator's name.
     usize k = 0;

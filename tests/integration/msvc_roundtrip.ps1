@@ -1,7 +1,7 @@
 # Builds the fixture program with the real MSVC toolchain (cl.exe + link.exe from a developer
 # environment), then checks that every function diffs byte-exact against the objects it was linked
 # from. Exercises MSVC-specific output the clang-cl fixtures cannot: Rich headers, MSVC PDBs,
-# x86 jump tables inside .text and x64 RVA jump tables.
+# x86 jump tables inside .text and x64 RVA jump tables, and the type records cl.exe writes with /Z7.
 param([ValidateSet("x86", "x64")][string]$Arch = "x64")
 $ErrorActionPreference = "Stop"
 
@@ -52,3 +52,24 @@ if ($LASTEXITCODE -ne 0) { throw "scripted agent run did not match add() with cl
 & $decomp -C $project units verify
 if ($LASTEXITCODE -ne 0) { throw "the unit source of add() does not verify with cl.exe ($Arch)" }
 Write-Host "MSVC agent replay ($Arch): matched"
+
+# The fixtures' types, declared in project headers (tests/fixtures/include), compile with cl.exe /Z7 to
+# the layouts in the PDBs link.exe wrote: a struct, and classes with virtual functions, multiple and
+# virtual inheritance.
+Copy-Item "$root\tests\fixtures\include\basic.h" (Join-Path $project "include")
+& $decomp -C $project types check
+if ($LASTEXITCODE -ne 0) { throw "the types of include\basic.h differ from the PDB's with cl.exe ($Arch)" }
+$typeInfo = if ($Arch -eq "x86") { "_rtti_type_info_vftable" } else { "rtti_type_info_vftable" }
+& cl.exe /nologo /c /O2 /Gy /GS- /GR /EHs-c- /Zl /Z7 "$src\rtti.cpp" "/Fo$out\rtti.obj"
+if ($LASTEXITCODE -ne 0) { throw "cl.exe failed on rtti.cpp" }
+& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug "/alternatename:??_7type_info@@6B@=$typeInfo" `
+    "/out:$out\rtti.exe" "/pdb:$out\rtti.pdb" "$out\rtti.obj"
+if ($LASTEXITCODE -ne 0) { throw "link.exe failed on rtti.obj" }
+$rttiProject = Join-Path $out "rtti-project"
+if (Test-Path $rttiProject) { Remove-Item -Recurse -Force $rttiProject }
+& $decomp init "$out\rtti.exe" --dir $rttiProject --toolchain "msvc-$Arch" --flag /O2 --flag /GR
+if ($LASTEXITCODE -ne 0) { throw "decomp init failed (rtti)" }
+Copy-Item "$root\tests\fixtures\include\rtti.h" (Join-Path $rttiProject "include")
+& $decomp -C $rttiProject types check
+if ($LASTEXITCODE -ne 0) { throw "the classes of include\rtti.h differ from the PDB's with cl.exe ($Arch)" }
+Write-Host "MSVC types ($Arch): the headers' layouts equal the PDBs'"

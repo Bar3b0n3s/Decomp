@@ -89,6 +89,19 @@ jobs:
           test -f "$(ls -d "$p"/.decomp/runs/*/ | head -1)run.json"
           ./bin/Release/decomp -C "$p" runs list | grep completed
 
+      - name: Types smoke test
+        run: |
+          # The fixtures' types, declared in project headers, compile (clang-cl /Z7) to the layouts in their PDBs.
+          for arch in x86 x64; do
+            for name in basic rtti; do
+              p="$(mktemp -d)/project"
+              ./bin/Release/decomp init tests/fixtures/$arch/$name.exe --dir "$p" --toolchain clang-cl-$arch
+              cp tests/fixtures/include/$name.h "$p/include/"
+              ./bin/Release/decomp -C "$p" types check
+            done
+          done
+          ./bin/Release/decomp -C "$p" types show Unit
+
       - name: Batch run smoke test
         run: |
           # Every function of the x86 fixture on 4 workers with scripted responses: 8 match, the rest give up.

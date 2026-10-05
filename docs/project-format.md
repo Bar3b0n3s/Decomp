@@ -255,8 +255,33 @@ new header must compile and name the type, and every verified source that includ
 functions' own files) must keep its byte-exact functions byte-exact. Each write is recorded in
 [`.decomp/changes.jsonl`](#changesjsonl-and-blobs) and can be reverted. Header names are relative to
 `include/`, written with forward slashes, without `.` or `..`, and end in `.h`, `.hh`, `.hpp` or
-`.hxx`. From Phase 4, headers are the source of truth for types, and their layouts are checked against
-the PDB.
+`.hxx`.
+
+The headers are the source of truth for the program's types. What the compiler makes of them is read
+back from its own debug information (`compile_header_types()` in `project/types.hpp`): one translation
+unit includes every header, in path order, and points a variable at each type they declare (at their
+top level, in named namespaces and in `extern "C"` blocks: struct, class, union and enum definitions and
+forward declarations, typedefs and `using` aliases), so that the compiler writes each type's
+definition. It is compiled with the project's toolchain, flags and include directories plus `/Z7` (and,
+for clang-cl, `-fstandalone-debug`, without which clang writes a class's definition only where its
+vtable or constructor is), and the layouts come from the object's type records (`.debug$T`): size,
+bases, vfptr and vbptr, vtable slots, fields with offsets, bits and types, enumerators
+([architecture.md](architecture.md#types)). The compile is cached like any other, keyed on the headers'
+contents.
+
+- `decomp types` lists the types the headers declare, with their kind, size and header, and whether
+  the target's PDB has the same layout; `--pdb` lists the PDB's types instead (`--filter` narrows
+  either).
+- `decomp types show <name>` prints a type's layout from the headers (else, or with `--pdb`, from the
+  PDB), and how the two differ.
+- `decomp types check` compares every declared type with the PDB's layout of the same name and lists
+  each difference ("field speed at +0x8, expected +0x4", "virtual slot 1: reset, expected none"); it
+  exits with 1 when any type differs.
+
+Session briefs list the types the headers declare and show the layouts of the types the function's
+signature names in the PDB (its class, and what its parameters and return value are or point to): the
+headers' layout when a header declares the type, else the PDB's. Toolchains of the GCC kinds write DWARF,
+which is not read; Visual C++ before 7.0 writes 16-bit type indices, which are not read either.
 
 ## Unit sources
 

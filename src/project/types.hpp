@@ -1,12 +1,15 @@
 #pragma once
 
-// Shared types in the project's headers under include/ (docs/project-format.md#include): what the
-// define_type tool adds or replaces. A change is composed and checked before anything is written: the
-// header must still compile and define the type, and every verified source that includes it must keep
-// its byte-exact functions byte-exact.
+// Shared types in the project's headers under include/ (docs/project-format.md#include), the source of
+// truth for the program's types: what the define_type tool adds or replaces, and what the compiler makes
+// of them, read back from its debug information. A change is composed and checked before anything is
+// written: the header must still compile and define the type, and every verified source that includes
+// it must keep its byte-exact functions byte-exact.
 
 #include "analysis/program.hpp"
+#include "analysis/types.hpp"
 #include "core/result.hpp"
+#include "core/types.hpp"
 #include "matching/match.hpp"
 #include "project/project.hpp"
 
@@ -50,5 +53,38 @@ Result<TypeChange> prepare_type_change(const Project& project, const Program& pr
 // Writes a prepared change (recorded in changes.jsonl). Fails with ErrorCode::conflict when the header
 // changed since it was prepared.
 Result<WriteReceipt> commit_type_change(const Project& project, const TypeChange& change, const ChangeOrigin& origin, const ChangeSubject& subject);
+
+// The project's headers: the files under include/ that valid_header_name() accepts, as "include/..."
+// paths, in path order.
+Result<std::vector<std::string>> project_headers(const Project& project);
+
+// A type a header declares: at its top level, in named namespaces ("game::Shape") and in extern "C"
+// blocks; struct, class, union and enum definitions and forward declarations, typedefs and using
+// aliases (not templates).
+struct DeclaredType {
+    std::string name;
+    std::string keyword;  // "struct", "class", "union" or "enum"; "" for typedefs and aliases
+};
+std::vector<DeclaredType> header_declared_types(std::string_view header_text);
+
+struct HeaderType {
+    std::string name;
+    std::string header;  // "include/types.h"
+};
+
+// The project's types as its compiler lays them out: every project header included by one translation
+// unit, compiled with the project's toolchain, flags and include directories and with debug information
+// (/Z7; clang-cl also -fstandalone-debug, so that it writes every type's definition), each declared type
+// referenced (a `T*` variable) so that the compiler writes it, and the layouts read back from the
+// object's type records (.debug$T). Fails when the headers do not compile, or the toolchain writes no
+// type records this reads (GCC-style toolchains, CodeView before Visual C++ 7.0).
+struct HeaderTypes {
+    std::vector<HeaderType> declared;  // in header order
+    TypeCatalog catalog;               // every type the compile wrote: also those the headers use from elsewhere
+    std::string source;                // the translation unit compiled
+
+    const HeaderType* header_of(std::string_view name) const;
+};
+Result<HeaderTypes> compile_header_types(const Project& project, const matching::MatchSetup& setup, Arch arch);
 
 } // namespace decomp::project

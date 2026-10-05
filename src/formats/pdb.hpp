@@ -69,6 +69,7 @@ public:
     const std::vector<Contribution>& contributions() const { return contributions_; }
     // The TPI stream: every type the program's code uses (empty when the PDB has none that reads).
     const codeview::TypeStream& types() const { return types_; }
+    codeview::TypeStream take_types() { return std::move(types_); }
 
     // True when the GUID and age match a PE's CodeView record.
     bool matches(const std::array<u8, 16>& guid, u32 age) const { return guid == info_.guid && age == info_.age; }

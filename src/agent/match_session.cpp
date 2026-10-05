@@ -534,6 +534,11 @@ ToolOutput MatchSession::define_type(const Json& input) {
                                                    project::ChangeSubject{symbol_.name, va_, {}, {}});
         if (!written && written.error().code == ErrorCode::conflict && attempt < 3) continue;  // another writer changed the header
         if (!written) return ToolOutput::error("Not defined: " + written.error().message);
+        {
+            std::lock_guard lock(types_mutex_);
+            header_types_loaded_ = false;
+            header_types_.reset();
+        }
         publish(events::FileWritten{change->header, "type definition", written->size, written->sha1, session_id_, approval});
         return ToolOutput::ok(std::format("Done ({}): {} is defined in {}. Use it with #include \"{}\".", approval, name, change->header,
                                           change->header.substr(std::string_view("include/").size())));
@@ -671,6 +676,53 @@ std::string MatchSession::status_line(int turns_left) const {
     return std::format("[status] turns left: {}; attempts: {}; best match: {:.1f}%", turns_left, attempts_.size(), best_match_);
 }
 
+std::shared_ptr<const project::HeaderTypes> MatchSession::header_types(std::string* error) const {
+    std::lock_guard lock(types_mutex_);
+    if (!header_types_loaded_ && project_) {
+        header_types_loaded_ = true;
+        header_types_error_.clear();
+        auto compiled = project::compile_header_types(*project_, setup_, program_.arch());
+        if (compiled) header_types_ = std::make_shared<const project::HeaderTypes>(std::move(*compiled));
+        else if (compiled.error().code != ErrorCode::unsupported) header_types_error_ = compiled.error().message;
+    }
+    if (error) *error = header_types_error_;
+    return header_types_;
+}
+
+std::string MatchSession::types_section() const {
+    std::string error;
+    const auto headers = header_types(&error);
+    const ProgramTypes& pdb = program_.pdb_types();
+    std::string out;
+    if (!error.empty()) out += "The project's headers do not compile, so their types are unknown:\n" + clip_lines(error, 12) + "\n";
+    if (headers && !headers->declared.empty()) {
+        std::vector<std::string> names;
+        for (const auto& declared : headers->declared) {
+            if (names.size() == 60) {
+                names.push_back(std::format("and {} more", headers->declared.size() - 60));
+                break;
+            }
+            const TypeLayout* layout = headers->catalog.find(declared.name);
+            names.push_back(layout ? std::format("{} {} ({} bytes)", to_string(layout->kind), declared.name, layout->size) : declared.name);
+        }
+        out += std::format("The project's headers declare: {}.\n", join(names, ", "));
+    }
+    // The layouts of the types the function's PDB type names: the headers' (the source of truth), else the PDB's.
+    std::string layouts;
+    for (const std::string& name : types_of_function(pdb, va_)) {
+        const project::HeaderType* declared = headers ? headers->header_of(name) : nullptr;
+        const TypeLayout* layout = declared ? headers->catalog.find(name) : nullptr;
+        std::string where = declared ? declared->header : std::string();
+        if (!layout) {
+            layout = pdb.catalog.find(name);
+            where = "from the target's PDB; no project header declares it yet (define_type can)";
+        }
+        if (layout) layouts += "```\n// " + where + "\n" + to_text(*layout) + "```\n";
+    }
+    if (!layouts.empty()) out += "The types this function's signature names:\n" + clip_lines(layouts, 150);
+    return out.empty() ? out : "\n# Types\n" + out;
+}
+
 std::string MatchSession::brief() const {
     std::string out = "# Target function\n";
     out += std::format("function: {}\n", symbol_.display.empty() ? symbol_.name : symbol_.display);
@@ -717,6 +769,7 @@ std::string MatchSession::brief() const {
                            import_note(d));
     }
     if (!fn->callers.empty()) out += std::format("\n# Callers\n{}\n", join(fn->callers, ", "));
+    out += types_section();
 
     if (unit_) {
         const auto text = fs::read_text(project_->root() / fs::from_utf8(unit_->source));

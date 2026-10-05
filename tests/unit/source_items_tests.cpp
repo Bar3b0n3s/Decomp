@@ -94,6 +94,15 @@ int Player::*member = &Player::hp;
     check(17, ItemKind::comment, "");
 }
 
+TEST_CASE("namespace blocks: nested names, inline and anonymous namespaces") {
+    const auto items = parse_source_items("namespace a::b { struct Deep {}; }\ninline namespace v1 { int f(); }\nnamespace { int g; }\nnamespace alias = a::b;\n");
+    REQUIRE(items.size() == 4);
+    CHECK(items[0].kind == ItemKind::block);
+    CHECK(items[1].kind == ItemKind::block);
+    CHECK(items[2].kind == ItemKind::block);
+    CHECK(items[3].kind == ItemKind::declaration);
+}
+
 TEST_CASE("more declarators: operators, destructors, templates, trailing return types") {
     auto only = [](std::string_view source) {
         const auto items = parse_source_items(source);

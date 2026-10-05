@@ -1,15 +1,20 @@
-// Types in project headers (project/types.hpp) and the program generations a run hands its sessions.
+// Types in project headers (project/types.hpp): composing them, compiling them and reading their layouts
+// back; and the program generations a run hands its sessions.
 
 #include "core/fs.hpp"
+#include "llvm_fixture.hpp"
 #include "project/project.hpp"
 #include "project/types.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
 
+#include <filesystem>
 #include <ostream>  // doctest prints std::string_view with operator<<, which MSVC declares without it
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 using namespace decomp;
 using namespace decomp::project;
@@ -71,4 +76,103 @@ TEST_CASE("program generations: a new one when the project's symbols change, not
     CHECK(second->symbols().at(add)->name == "add_counter");
     CHECK(first->symbols().at(add)->name != "add_counter");
     CHECK(second->resolve("add_counter") == add);
+}
+
+TEST_CASE("the types a header declares: in namespaces and extern \"C\" blocks, typedefs and aliases, not templates") {
+    const auto declared = header_declared_types(R"(#pragma once
+struct Point { int x, y; };
+class Shape;
+typedef struct { int a; } Pair, *PPair;
+using Score = long long;
+enum class Color : int { Red };
+template <class T> struct Box { T value; };
+extern "C" {
+typedef void (*Callback)(int);
+}
+namespace game {
+union Value { int i; float f; };
+namespace detail { struct Hidden; }
+}
+namespace a::b { struct Deep {}; }
+namespace { struct Local {}; }
+int g_value;
+)");
+    std::vector<std::pair<std::string, std::string>> got;
+    for (const auto& d : declared) got.emplace_back(d.name, d.keyword);
+    CHECK(got == std::vector<std::pair<std::string, std::string>>{{"Point", "struct"},
+                                                                  {"Shape", "class"},
+                                                                  {"Pair", ""},
+                                                                  {"PPair", ""},
+                                                                  {"Score", ""},
+                                                                  {"Color", "enum"},
+                                                                  {"Callback", ""},
+                                                                  {"game::Value", "union"},
+                                                                  {"game::detail::Hidden", "struct"},
+                                                                  {"a::b::Deep", "struct"}});
+}
+
+TEST_CASE("the project's headers compiled and read back: the fixtures' types equal their PDBs'") {
+    const auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    for (const Arch arch : {Arch::x86, Arch::x64}) {
+        const std::string a = arch == Arch::x86 ? "x86" : "x64";
+        for (const std::string name : {"basic", "rtti"}) {
+            CAPTURE(a);
+            CAPTURE(name);
+            auto dir = fs::TempDir::create("decomp-header-types").value();
+            auto p = Project::init(dir.path() / "p", test::fixture(a + "/" + name + ".exe"), std::nullopt, "clang-cl-" + a).value();
+            std::filesystem::copy_file(test::fixture("include/" + name + ".h"), p.root() / "include" / (name + ".h"));
+            const auto program = p.open_program().value();
+            const auto headers = compile_header_types(p, test::clang_setup(arch, tools->clang_cl, dir.path() / "work"), arch).value();
+            CHECK(headers.declared.size() == (name == "basic" ? 1u : 6u));
+            for (const auto& declared : headers.declared) {
+                CAPTURE(declared.name);
+                CHECK(declared.header == "include/" + name + ".h");
+                const TypeLayout* layout = headers.catalog.find(declared.name);
+                const TypeLayout* expected = program.pdb_types().catalog.find(declared.name);
+                REQUIRE(layout);
+                REQUIRE(expected);
+                CHECK(compare_layouts(*layout, *expected) == std::vector<std::string>{});
+            }
+            // A header that disagrees with the PDB says how.
+            REQUIRE(fs::write_text(p.root() / "include" / (name + ".h"), name == "basic" ? "struct Player { int hp; double speed; };\n"
+                                                                                         : "struct Named { virtual const char* name() const; int extra; };\n"));
+            const auto changed = compile_header_types(p, test::clang_setup(arch, tools->clang_cl, dir.path() / "work"), arch).value();
+            const std::string type = name == "basic" ? "Player" : "Named";
+            REQUIRE(changed.catalog.find(type));
+            CHECK_FALSE(compare_layouts(*changed.catalog.find(type), *program.pdb_types().catalog.find(type)).empty());
+        }
+    }
+}
+
+TEST_CASE("header types: none without headers; headers that do not compile; toolchains without CodeView") {
+    auto dir = fs::TempDir::create("decomp-header-types").value();
+    auto p = Project::init(dir.path() / "p", test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86").value();
+    matching::MatchSetup gcc;
+    gcc.toolchain.name = "mingw";
+    gcc.toolchain.kind = matching::ToolchainKind::gcc;
+    gcc.work_dir = dir.path() / "work";
+    // No headers: nothing to compile.
+    const auto none = compile_header_types(p, gcc, Arch::x86).value();
+    CHECK(none.declared.empty());
+    CHECK(none.catalog.empty());
+    CHECK(project_headers(p).value().empty());
+
+    REQUIRE(fs::create_directories(p.root() / "include" / "game"));
+    REQUIRE(fs::write_text(p.root() / "include" / "game" / "broken.h", "struct Broken { int x\n"));
+    REQUIRE(fs::write_text(p.root() / "include" / "notes.txt", "not a header"));
+    CHECK(project_headers(p).value() == std::vector<std::string>{"include/game/broken.h"});
+    const auto dwarf = compile_header_types(p, gcc, Arch::x86);
+    REQUIRE_FALSE(dwarf);
+    CHECK(dwarf.error().code == ErrorCode::unsupported);
+
+    const auto tools = test::find_llvm();
+    if (!tools) return;
+    const auto broken = compile_header_types(p, test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "work"), Arch::x86);
+    REQUIRE_FALSE(broken);
+    CHECK(broken.error().message.find("do not compile") != std::string::npos);
+    CHECK(broken.error().message.find("include/game/broken.h:1") != std::string::npos);
 }

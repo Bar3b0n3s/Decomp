@@ -6,6 +6,7 @@
 #include "events/bus.hpp"
 #include "matching/match.hpp"
 #include "project/project.hpp"
+#include "project/types.hpp"
 #include "project/units.hpp"
 
 #include <memory>
@@ -71,8 +72,11 @@ public:
     // Saving a verified match asks this gate first (the setup's `cancelled` ends a wait).
     void set_approvals(std::shared_ptr<ApprovalGate> approvals) { approvals_ = std::move(approvals); }
 
-    // First user message: target, toolchain, annotated listing, references, history.
+    // First user message: target, toolchain, annotated listing, references, types, history.
     std::string brief() const;
+    // The project's header types (project/types.hpp), compiled on first use and again after define_type
+    // changes a header: null without a project, or when they do not compile (`error` says why).
+    std::shared_ptr<const project::HeaderTypes> header_types(std::string* error = nullptr) const;
     // One line appended after tool results each turn.
     std::string status_line(int turns_left) const;
 
@@ -101,6 +105,7 @@ private:
     };
     Result<Evaluation> evaluate(const std::string& source);
     void publish(events::Payload payload) const;
+    std::string types_section() const;
 
     const Program& program_;
     const project::Project* project_;
@@ -122,6 +127,11 @@ private:
     std::vector<std::string> declined_;  // sources the supervisor declined to save
     std::optional<Unit> unit_;
     std::optional<std::string> written_path_;
+
+    mutable std::mutex types_mutex_;
+    mutable bool header_types_loaded_ = false;
+    mutable std::shared_ptr<const project::HeaderTypes> header_types_;
+    mutable std::string header_types_error_;
 };
 
 // The frozen system prompt (identical for every function so the prompt cache is shared).

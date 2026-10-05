@@ -106,6 +106,18 @@ private:
     std::unordered_map<std::string, usize> by_name_;
 };
 
+// A target's types, from its PDB: the type records, the layouts of the types they define, and the type
+// (LF_PROCEDURE, LF_MFUNCTION) of each function the PDB lists, by address.
+struct ProgramTypes {
+    codeview::TypeStream stream;
+    TypeCatalog catalog;
+    std::unordered_map<u64, codeview::TypeIndex> function_types;
+};
+
+// The structs, classes and unions a function's PDB type names: its class (`this`), then what its
+// parameters and return value are or point to, without repeats. Empty when the PDB does not type it.
+std::vector<std::string> types_of_function(const ProgramTypes& types, u64 va);
+
 // The differences of `actual` from `expected`, one line each ("size 12, expected 8", "field speed at
 // +0x8, expected +0x4", "virtual slot 2: Extra, expected Update"). Empty when the layouts agree in kind,
 // size, bases, table pointers, virtual methods, fields (names, offsets, sizes, bits and types) and

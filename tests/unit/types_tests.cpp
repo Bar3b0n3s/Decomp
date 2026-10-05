@@ -1,6 +1,7 @@
 // CodeView type records (formats/codeview.hpp) and type layouts (analysis/types.hpp): the fixture PDBs'
 // types, and a header compiled with clang-cl /Z7.
 
+#include "analysis/program.hpp"
 #include "analysis/types.hpp"
 #include "core/fs.hpp"
 #include "core/process.hpp"
@@ -135,6 +136,19 @@ TEST_CASE("PDB type records: the fixture's Player, and the types of its function
     const auto sum = std::ranges::find(procedures, std::string("sum_array"), &pdb::Procedure::name);
     REQUIRE(sum != procedures.end());
     CHECK(types.name_of(sum->type_index) == "int (const int*, int)");
+
+    // A program has them by function address; copies with other symbols share them.
+    const auto program = Program::open(test::fixture("x86/basic.exe")).value();
+    const ProgramTypes& pdb = program.pdb_types();
+    CHECK(pdb.catalog.find("Player"));
+    const auto hit_type = pdb.function_types.find(*program.resolve("Player::Hit"));
+    REQUIRE(hit_type != pdb.function_types.end());
+    CHECK(pdb.stream.name_of(hit_type->second) == "void (int)");
+    const Program copy = program.with_symbols(program.symbols());
+    CHECK(&copy.pdb_types() == &pdb);
+    const auto without = Program::open(test::fixture("x86/basic.exe"), OpenOptions{.use_pdb = false}).value();
+    CHECK(without.pdb_types().catalog.empty());
+    CHECK(without.pdb_types().function_types.empty());
 }
 
 TEST_CASE("PDB type records: classes with virtual functions, multiple and virtual inheritance") {

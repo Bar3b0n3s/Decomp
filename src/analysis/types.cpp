@@ -236,6 +236,25 @@ std::optional<TypeCatalog::FieldRef> TypeCatalog::resolve(const TypeLayout& layo
     return std::nullopt;
 }
 
+std::vector<std::string> types_of_function(const ProgramTypes& types, u64 va) {
+    std::vector<std::string> out;
+    const auto it = types.function_types.find(va);
+    if (it == types.function_types.end()) return out;
+    const auto function = types.stream.function(it->second);
+    if (!function) return out;
+    const auto add = [&](std::string name) {
+        if (!name.empty() && std::ranges::find(out, name) == out.end()) out.push_back(std::move(name));
+    };
+    if (function->class_type != 0) add(types.stream.udt_name(function->class_type));
+    for (const TypeIndex t : function->parameters) {
+        add(types.stream.udt_name(t));
+        add(types.stream.pointee_udt(t));
+    }
+    add(types.stream.udt_name(function->return_type));
+    add(types.stream.pointee_udt(function->return_type));
+    return out;
+}
+
 std::vector<std::string> compare_layouts(const TypeLayout& actual, const TypeLayout& expected) {
     std::vector<std::string> out;
     if (actual.kind != expected.kind) out.push_back(std::format("{}, expected {}", to_string(actual.kind), to_string(expected.kind)));
