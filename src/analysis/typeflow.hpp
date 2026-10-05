@@ -11,6 +11,7 @@
 #include "analysis/program.hpp"
 #include "analysis/types.hpp"
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -69,9 +70,29 @@ struct EntryTypes {
 };
 EntryTypes entry_types(const Program& program, u64 function, const TypeView& types);
 
+// A field (or virtual method) an instruction reaches through a pointer to `type`.
+struct TypedAccess {
+    usize instruction = 0;
+    std::string type;
+    std::string path;      // "hp", "pos.y", "items[eax]"; for a virtual call, the method with "()"
+    bool address = false;  // lea: the field's address, not the field
+};
+
 // Per instruction, what its memory operands reach through typed pointers ("this->hp",
-// "this->link.next->kind", "this->area() (virtual, slot 0)").
+// "this->link.next->kind", "this->area() (virtual, slot 0)"); with `accesses`, the same as records.
 std::vector<std::vector<std::string>> typed_operand_notes(const Program& program, std::span<const x86::Instruction> instructions, const Cfg& cfg,
-                                                          const EntryTypes& entry, const TypeView& types);
+                                                          const EntryTypes& entry, const TypeView& types,
+                                                          std::vector<TypedAccess>* accesses = nullptr);
+
+// Where the program's functions reach the fields of `type` through pointers they are given (their
+// `this` and parameters, as entry_types() finds them): the Types view's uses of a type.
+struct FieldUse {
+    u64 function = 0;
+    u64 address = 0;  // the instruction
+    std::string path;
+    bool address_of = false;
+};
+std::vector<FieldUse> find_field_uses(const Program& program, const TypeView& types, std::string_view type,
+                                      const std::function<bool()>& cancelled = {});
 
 } // namespace decomp

@@ -20,7 +20,8 @@
 #include <algorithm>
 #include <format>
 #include <optional>
-#include <ostream>  // doctest prints std::string_view with operator<<, which MSVC declares without it
+#include <ostream>
+#include <set>  // doctest prints std::string_view with operator<<, which MSVC declares without it
 #include <string>
 #include <string_view>
 #include <vector>
@@ -587,4 +588,21 @@ TEST_CASE("class skeletons from RTTI: bases where RTTI says, vfptrs, virtual met
     const TypeCatalog unnamed = rtti_skeletons(bare);
     REQUIRE(unnamed.find("game::Shape"));
     CHECK(definition_of(*unnamed.find("game::Shape"), unnamed) == "class Shape {\npublic:\n    virtual void vf0();\n    virtual void vf1();\n};\n");
+}
+
+TEST_CASE("where the program uses a type's fields") {
+    const auto program = Program::open(test::fixture("x86/basic.exe")).value();
+    const TypeView types(nullptr, &program.pdb_types().catalog);
+    const auto uses = find_field_uses(program, types, "Player");
+    std::set<std::string> fields;
+    std::set<u64> functions;
+    for (const FieldUse& use : uses) {
+        fields.insert(use.path);
+        functions.insert(use.function);
+    }
+    CHECK(fields == std::set<std::string>{"hp", "speed"});
+    CHECK(functions == std::set<u64>{*program.resolve("Player::Hit"), *program.resolve("Player::Score")});
+    CHECK(find_field_uses(program, types, "Nothing").empty());
+    // Cancelled before it starts: nothing.
+    CHECK(find_field_uses(program, types, "Player", [] { return true; }).empty());
 }

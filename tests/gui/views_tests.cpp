@@ -28,7 +28,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols", "units"};
+const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols", "units", "types"};
 
 // Sessions that finish at once (every other one matches) unless held.
 struct HeldSessions {
@@ -129,6 +129,11 @@ void render_my_views(HeadlessContext& gui, App& app, ProjectFixture& fx, const c
     // Units, with a unit selected: its functions and actions.
     for (const char* unit : {"basic.obj", "other.obj", "* Linker *"}) {
         app.context().open("units", {.anchor = unit});
+        settle(gui, app);
+    }
+    // Types, with the PDB's Player selected, and a name no source has.
+    for (const char* type : {"Player", "Missing"}) {
+        app.context().open("types", {.anchor = type});
         settle(gui, app);
     }
     CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());

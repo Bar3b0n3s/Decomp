@@ -500,6 +500,39 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
   recomputed in the background when the project changes.
 - The unit sources under `src/` and `.decomp/changes.jsonl` (what verify and emit write).
 
+### Types
+
+**Shows**
+
+- The types the project's headers declare (`include/`), as the project's compiler lays them out:
+  name, kind, size, the header, and whether the target's PDB has the same layout. Then the PDB's other
+  types, marked as found only there. A header line counts them, and shows the compiler's errors when
+  the headers do not compile.
+- A filter by name, and All / In headers / Only in the PDB / Differ from the PDB.
+- For the selected type: where it comes from, each difference from the PDB's layout, and its layout
+  (offsets, bases, vfptr and vbptr, fields with their types and bits, virtual methods by slot) in a
+  monospace block.
+- Its uses, on request: every instruction of the program's functions that reaches one of its fields (or
+  calls one of its virtual methods) through a pointer the function is given, with links to the
+  function and the address (the same type flow as the annotated listings).
+
+**Actions**
+
+- Import from the PDB: declare the selected type, and what it needs, in `include/types.h`, checked
+  against the PDB first (`decomp types import`). Import all from the PDB: every type `decomp types
+  import --all` takes. Not during a run.
+- Skeletons from RTTI, when the target's RTTI names classes: `decomp types skeletons`. Not during a
+  run.
+- Find uses of the selected type, in the background.
+- Refresh, after the headers were edited outside the GUI.
+
+**Data sources**
+
+- The headers compiled and read back (`compile_header_types`), in the background, when the project
+  changes; the PDB's layouts (`Program::pdb_types()`); the RTTI (`Program::rtti()`).
+- What the actions write goes through `.decomp/changes.jsonl` like any project file, and shows in
+  Changes.
+
 ### Cost and usage
 
 **Shows**
@@ -607,7 +640,6 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
 | View | Phase | Shows |
 |---|---|---|
-| Types and layouts | 4 | Types from the project headers with exact layouts read back from the PDB, where each field is used, and differences against the target's PDB types |
 | Data matching and relink | 5 | Per-section data comparison, split objects, the relink result, and SHA-1 comparison with the first differing bytes |
 | Permuter and flag search | 6 | Search runs, candidates tried, best score over time, and the winning flags or permutations |
 
@@ -807,6 +839,7 @@ past run.
 |---|---|
 | Dashboard | `decomp status`: functions and code bytes matched, status buckets, spend (the sum of the functions' `cost=` in `symbols.txt`), and per unit: functions and bytes matched and spend (`units` in its JSON) |
 | Units | `decomp units` (every unit with its kind, progress, spend and source; `derive`, `verify`, `emit`), `decomp run --unit <name>` |
+| Types | `decomp types` (the headers' types and whether the PDB agrees; `--pdb` for the PDB's), `decomp types show <name>`, `decomp types check`, `decomp types import`, `decomp types skeletons`; uses of a type's fields are a GUI feature, and `decomp disasm` names the fields in a listing |
 | Run monitor | `decomp run` and `decomp agent <func>`: a live progress view on stderr, on by default (`--no-progress` hides it, `--progress` keeps it with `--json` or `-q`). On a terminal it is a block redrawn in place: a run header (run ID, status, model and effort, elapsed time, spend, cache-hit rate, functions matched), the queue length, one line per worker (function, turn, phase, best score, spend, elapsed time; at most twelve) and the last four activity lines. Otherwise it prints the activity lines as they happen. `decomp run --interactive` takes the run controls on stdin. |
 | Agent session | Steering with `--interactive` (guidance lines and `:pause`, `:resume`, `:stop`, `:abort` for `decomp agent`; `:guide <fn> <text>` and the run controls for `decomp run`) and `--guidance`; Ctrl+C to stop, twice to abort; the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl` |
 | Diff viewer | `decomp diff <func> --source <file>` or `--obj <file>` (with `--compact`, `--context`, `--bytes`) |
@@ -979,7 +1012,7 @@ which `events.jsonl` omits and the transcript holds in full.
 | `decomp-gui`: chrome and every view above except the later-phase ones; multi-worker `RunController` (queue, concurrency, shared rate limiter, approvals queue, live budget changes, resumable runs) | Phase 1 |
 | Binary explorer enrichment (full cross-reference index, Rich-header compiler names, RTTI class names) | Phase 2 |
 | Units view; approvals for `set_symbol` and `define_type` | Phase 3 |
-| Types and layouts view | Phase 4 |
+| Types view; field names in listings | Phase 4 |
 | Data matching and relink view | Phase 5 |
 | Permuter and flag-search view | Phase 6 |
 

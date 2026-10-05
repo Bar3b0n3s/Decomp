@@ -138,12 +138,19 @@ class Flow {
 public:
     Flow(const TypeView& types, bool x64) : types_(types), x64_(x64), pointer_bits_(x64 ? 64 : 32), pointer_size_(x64 ? 8 : 4) {}
 
-    // Runs `x` on the state; with `notes`, says what its memory operands reach.
-    void step(TypeState& s, const x86::Instruction& x, i64 sp, std::optional<i64> frame, std::vector<std::string>* notes) const {
+    // Runs `x` on the state; with `notes`, says what its memory operands reach (and with `accesses`,
+    // records them as instruction `index`'s).
+    void step(TypeState& s, const x86::Instruction& x, i64 sp, std::optional<i64> frame, std::vector<std::string>* notes,
+              std::vector<TypedAccess>* accesses = nullptr, usize index = 0) const {
         if (notes)
             for (const x86::Operand& op : x.operands)
                 if (op.kind == x86::OperandKind::mem)
-                    if (const TypedValue* v = through(s, op.mem, frame)) describe(*v, op.mem, x.mnemonic == "lea", *notes);
+                    if (const TypedValue* v = through(s, op.mem, frame)) {
+                        const usize before = accesses ? accesses->size() : 0;
+                        describe(*v, op.mem, x.mnemonic == "lea", *notes, accesses);
+                        if (accesses)
+                            for (usize i = before; i < accesses->size(); ++i) (*accesses)[i].instruction = index;
+                    }
 
         const auto& ops = x.operands;
         const auto full_reg = [&](usize i) { return i < ops.size() && ops[i].kind == x86::OperandKind::reg && ops[i].size_bits == pointer_bits_; };
@@ -239,13 +246,15 @@ private:
     }
 
     // `address`: the operand is lea's, an address rather than an access.
-    void describe(const TypedValue& v, const x86::MemOperand& m, bool address, std::vector<std::string>& notes) const {
+    void describe(const TypedValue& v, const x86::MemOperand& m, bool address, std::vector<std::string>& notes,
+                  std::vector<TypedAccess>* accesses) const {
         if (v.vtable) {
             if (!m.index.empty() || m.disp < 0 || m.disp % static_cast<i64>(pointer_size_) != 0) return;
             const u64 slot = static_cast<u64>(m.disp) / pointer_size_;
             const std::string method = virtual_name(types_, v.type, slot);
             notes.push_back(method.empty() ? std::format("{} vtable slot {}", v.type, slot)
                                            : std::format("{}->{}() (virtual, slot {})", v.expression, method, slot));
+            if (accesses) accesses->push_back({0, v.type, method.empty() ? std::format("vtable slot {}", slot) : method + "()", false});
             return;
         }
         if (m.disp < 0 || (address && m.disp == 0 && m.index.empty())) return;
@@ -264,6 +273,7 @@ private:
         std::string text = (address ? "&" : "") + member(v, path);
         if (!ref->exact) text += std::format(" (+{})", ref->rest);
         notes.push_back(std::move(text));
+        if (accesses) accesses->push_back({0, v.type, ref->exact ? path : std::format("{} (+{})", path, ref->rest), address});
     }
 
     const TypeView& types_;
@@ -381,7 +391,7 @@ EntryTypes entry_types(const Program& program, u64 function, const TypeView& typ
 }
 
 std::vector<std::vector<std::string>> typed_operand_notes(const Program& program, std::span<const x86::Instruction> instructions, const Cfg& cfg,
-                                                          const EntryTypes& entry, const TypeView& types) {
+                                                          const EntryTypes& entry, const TypeView& types, std::vector<TypedAccess>* accesses) {
     std::vector<std::vector<std::string>> notes(instructions.size());
     if (instructions.empty() || cfg.blocks.empty() || (entry.state.registers.empty() && entry.state.stack.empty())) return notes;
     const bool x64 = program.arch() == Arch::x64;
@@ -418,9 +428,30 @@ std::vector<std::vector<std::string>> typed_operand_notes(const Program& program
     for (usize b = 0; b < n; ++b) {
         if (!in[b]) continue;
         TypeState s = *in[b];
-        for (usize i = cfg.blocks[b].first; i <= cfg.blocks[b].last; ++i) flow.step(s, instructions[i], points.sp[i], points.frame[i], &notes[i]);
+        for (usize i = cfg.blocks[b].first; i <= cfg.blocks[b].last; ++i)
+            flow.step(s, instructions[i], points.sp[i], points.frame[i], &notes[i], accesses, i);
     }
     return notes;
+}
+
+std::vector<FieldUse> find_field_uses(const Program& program, const TypeView& types, std::string_view type, const std::function<bool()>& cancelled) {
+    std::vector<FieldUse> out;
+    if (types.empty() || !types.find(type)) return out;
+    for (const Symbol* f : program.symbols().functions()) {
+        if (cancelled && cancelled()) break;
+        const EntryTypes entry = entry_types(program, f->va, types);
+        if (entry.state.registers.empty() && entry.state.stack.empty()) continue;
+        auto extent = program.function_extent(f->va);
+        if (!extent) continue;
+        auto instructions = program.function_instructions(*extent);
+        if (!instructions || instructions->empty()) continue;
+        const Cfg cfg = build_cfg(*instructions, extent->jump_tables);
+        std::vector<TypedAccess> accesses;
+        typed_operand_notes(program, *instructions, cfg, entry, types, &accesses);
+        for (const TypedAccess& a : accesses)
+            if (a.type == type) out.push_back({f->va, (*instructions)[a.instruction].address, a.path, a.address});
+    }
+    return out;
 }
 
 } // namespace decomp
