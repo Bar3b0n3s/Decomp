@@ -187,4 +187,6 @@ jobs:
           path: |
             build/corpus-msvc-x86/corpus.*
             build/corpus-msvc-x64/corpus.*
+            build/corpus-msvc-x86/obj/eh_*.obj
+            build/corpus-msvc-x64/obj/eh_*.obj
           if-no-files-found: ignore

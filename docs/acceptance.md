@@ -124,7 +124,9 @@ build of Zydis made with clang-cl and with cl.exe; this checklist adds the targe
       map and records their object files (`obj=` in `symbols.txt`); `decomp map import GAME.MAP` does
       the same for a project made without the map.
 - [ ] `decomp lib match LIBC.LIB ...` names the runtime functions the game linked and marks them
-      `library`; `decomp status` counts them in its `library` row.
+      `library`; `decomp status` counts them in its `library` row. `decomp analyze` afterwards traces
+      the functions again knowing those names (the runtime's `_exit` and `__CxxThrowException@8`
+      never return) and reports what changed.
 - [ ] If the target was built with `/GR`: `decomp classes --slots` lists its classes, bases and
       vftables, and the Inspector's listing of a virtual function says which vftable slots hold it.
 - [ ] In `decomp-gui`: the Dashboard shows what the target was built with; the Binary explorer has
