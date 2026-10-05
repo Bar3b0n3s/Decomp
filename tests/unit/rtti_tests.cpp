@@ -4,6 +4,9 @@
 #include "analysis/annotate.hpp"
 #include "analysis/program.hpp"
 #include "analysis/rtti.hpp"
+#include "core/fs.hpp"
+#include "project/analyze.hpp"
+#include "project/project.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
@@ -90,6 +93,32 @@ TEST_CASE("RTTI names the vftables of a target without a PDB, and listings say w
         CHECK(fn.virtual_slots == std::vector<std::string>{"slot 1 of Unit's vftable for game::Square", "slot 1 of game::Square's vftable"});
         CHECK(to_text(fn).find("; virtual:  slot 1 of game::Square's vftable") != std::string::npos);
     }
+}
+
+TEST_CASE("a project without the PDB has the RTTI's names; re-analysis gives them to a project that has none") {
+    auto dir = fs::TempDir::create("decomp-rtti").value();
+    const auto exe = dir.path() / "rtti.exe";  // without its PDB
+    std::filesystem::copy_file(test::fixture("x86/rtti.exe"), exe);
+    const Program truth = Program::open(test::fixture("x86/rtti.exe")).value();
+    const u64 vftable = *truth.resolve("??_7Unit@@6BNamed@@@");
+    auto p = project::Project::init(dir.path() / "p", exe, std::nullopt, "clang-cl-x86").value();
+    auto name_at = [&](u64 va) {
+        for (const Symbol& s : p.symbols())
+            if (s.va == va) return s.name;
+        return std::string();
+    };
+    CHECK(name_at(vftable) == "??_7Unit@@6BNamed@@@");
+
+    // A project made before the RTTI was read.
+    SymbolDb older;
+    for (Symbol s : p.symbols())
+        if (!s.name.starts_with("??_")) older.add(std::move(s));
+    REQUIRE(p.save_symbols(older));
+    CHECK(name_at(vftable).empty());
+    const auto summary = project::analyze(p).value();
+    CHECK(summary.added == 0);
+    CHECK(summary.removed == 0);
+    CHECK(name_at(vftable) == "??_7Unit@@6BNamed@@@");
 }
 
 TEST_CASE("MSVC number encoding and class names") {

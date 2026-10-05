@@ -10,6 +10,7 @@
 //   recorded. Their starts guide the analysis; their sizes are measured again (except the PDB's).
 // - A function renamed by the map keeps its work: its .decomp/functions/ directory and its matched
 //   source in src/functions/ are renamed with it.
+// - The RTTI's classes name their structures and vftables (analysis/rtti.hpp).
 //
 // Refused while a run is active (a session could be writing to the functions it renames).
 

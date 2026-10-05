@@ -118,8 +118,8 @@ function diffs byte-exact.
 
 ```sh
 # Inspect any binary; no project needed
-decomp info path/to/GAME.EXE
-decomp funcs path/to/GAME.EXE
+decomp info path/to/GAME.EXE                      # format, sections, PDB, and the compiler the Rich header names
+decomp funcs path/to/GAME.EXE                     # functions: from the PDB, or found by analysis without one
 
 # Register the original compiler (registry format: docs/project-format.md).
 # An installed clang-cl is detected automatically as clang-cl-x86 and clang-cl-x64.
@@ -129,7 +129,7 @@ decomp toolchain list
 decomp toolchain test vc6
 
 # Create a project in the current directory: decomp.json (target, toolchain, flags) and
-# symbols.txt (symbols from the PDB, exports and imports)
+# symbols.txt (symbols from the PDB, exports and imports; without a PDB, the functions analysis finds)
 mkdir game && cd game
 decomp init ../path/to/GAME.EXE --toolchain vc6 --flag /O2 --flag /Gy
 # (with the build's link map, if there is one: --map ../path/to/GAME.MAP, or later `decomp map import`)

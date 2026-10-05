@@ -226,13 +226,17 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
 - `scan_strings()` (`analysis/strings.hpp`): ASCII and UTF-16LE strings in the non-executable sections,
   cut at symbol boundaries; `string_refs()` finds the functions that use one.
 - `SymbolDb`: `std::map<va, Symbol>` with `Symbol{name (decorated), display (demangled), pdb_name,
-  kind: function | data | string | float | import | label | unknown, size, source: analysis | import |
-  export | pdb_public | pdb | agent | user, is_static, aliases}` and both exact and containing-address
-  lookups. It is populated from the PDB, exports, imports, x64 `.pdata` and `symbols.txt`. A more
-  trusted source takes over the primary name at an address; the other names become aliases (see
+  kind: function | data | string | float | import | label | unknown, size, source: analysis | library |
+  import | export | map | pdb_public | pdb | agent | user, is_static, aliases, object}` and both exact
+  and containing-address lookups. It is populated from the PDB, exports, imports, x64 `.pdata`, the
+  link map (`add_map()`), RTTI, function discovery, library matches and `symbols.txt`. A more trusted
+  source takes over the primary name at an address; the other names become aliases (see
   [matching.md](matching.md#opticf-folding)). Function status is kept by `project`, not here.
 - Demangling through LLVM's Demangle library (MSVC and Itanium schemes), plus the undecorated and
   qualified forms used for name equivalence.
+- Function discovery (`analysis/discovery.hpp`, see [Function discovery](#function-discovery)): the
+  functions of a target without a usable PDB, with their bounds; `Program::open()` runs it, and
+  `decomp init` writes what it finds to `symbols.txt`.
 - RTTI and vftables (`analysis/rtti.hpp`, see [RTTI and vftables](#rtti-and-vftables)): the classes a
   `/GR` build names, their bases and vftables (`Program::rtti()`, `decomp classes`).
 - Library functions (`analysis/signatures.hpp`, see [Library functions](#library-functions)): the
@@ -247,6 +251,38 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   from `esp`/`ebp`/`rsp`/`rbp` offsets), switch tables, loop headers and back edges, tail calls, plus
   callers, callees and data references. The annotated listing is what the agent and the human read;
   there is no decompiler output.
+
+#### Function discovery
+
+Without a usable PDB (VC6's PDB 2.0 files are not read) a target's functions are found by analysis
+(`analysis/discovery.hpp`). `discover_functions()` starts from what is known: the entry point, exports,
+x64 unwind data (chained entries merged into the function they continue) and any symbols (a map's,
+the project's). It traces each function through its flow up to the next known start: direct jumps,
+switch tables, returns, and calls that never return (imports such as `ExitProcess`, and functions
+with no return path, found as a greatest fixpoint over calls and tail calls). Code after such a call
+stays in the function when the compiler emitted it. New starts come from call targets; from jumps
+that leave a function for code past int3 padding (a tail call), unless a conditional jump of the
+function reaches it or its code jumps back into the function (MSVC puts int3 inside functions too);
+from the code left between functions after padding; and from code addresses held in relocations,
+data (aligned values, when there are no relocations) and instructions. Weakly evidenced starts that
+the previous function runs into are dropped. Each pass traces again only the functions a change
+affects, until nothing changes. Incremental linking's thunk table (a few int3 bytes at the start of
+the code, then `jmp rel32` thunks) is not reported as functions: a call, jump, pointer or entry point
+that lands on a thunk stands for the function behind it.
+
+Switch tables (`analysis/jump_tables.hpp`, shared with `Program::function_extent()`) get their entry
+count from the bounds check (`cmp`/`ja`, `jae`), a mask (`and idx, M`) or a byte index table (MSVC's
+two-level dispatch, x86 and x64), with biases applied after the bound. Tables MSVC places in the
+code section after the function are data and part of the function's extent. A switch whose default
+cannot happen (`__assume(0)`) has no bounds check: its byte table is read up to padding, another
+table or the function's end, and its null entries are cases that cannot happen, as are clang's int3
+entries.
+
+`decomp bounds <binary> --truth <pdb|map>` measures the functions found without the PDB against the
+build's PDB (starts and ends) or map file (starts; an end counts when only padding follows it), lists
+the mismatches (`--show-code`: how a start was found and the code where the bounds differ) and, with
+`--min-exact`, fails below a percentage. CI measures a build of Zydis (`tests/corpus`) made with
+clang-cl on Linux and with cl.exe on Windows, for x86 and x64.
 
 #### Library functions
 

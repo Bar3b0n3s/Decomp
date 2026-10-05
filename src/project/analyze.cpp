@@ -61,6 +61,7 @@ Result<AnalyzeSummary> analyze(Project& project, const AnalyzeOptions& options) 
         fresh.symbols().add(std::move(seed));
     }
     if (fresh.pdb_status() != PdbStatus::matched) fresh.add_discovered_functions();
+    add_rtti_symbols(fresh.symbols(), fresh.rtti(), fresh.arch());
 
     std::map<u64, const Symbol*> old_functions;
     for (const Symbol& s : before)
