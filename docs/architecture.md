@@ -153,10 +153,15 @@ Readers for binary formats, all built on `ByteReader` and returning `Result`:
 - `pdb::Reader` over raw_pdb: procedures (`S_GPROC32`/`S_LPROC32`) with code size and module, data
   symbols, public symbols (`S_PUB32`) for decorated names, modules with their source files and language
   (`S_COMPILE3`), section contributions (which place each module's code and data: the translation
-  units, see `analysis/units.hpp`), and a GUID/age check against the image. raw_pdb reads the
-  PDB 7.0 format used since Visual Studio .NET 2002 and by lld-link. VC6-era PDB 2.0 files (`NB10`)
-  use an older container that it does not read, so such targets rely on exports, map files (Phase 2),
-  user symbols and analysis.
+  units, see `analysis/units.hpp`), the type records (the TPI stream, with each procedure's function
+  type), and a GUID/age check against the image. raw_pdb reads the PDB 7.0 format used since Visual
+  Studio .NET 2002 and by lld-link. VC6-era PDB 2.0 files (`NB10`) use an older container that it does
+  not read, so such targets rely on exports, map files (Phase 2), user symbols and analysis.
+- `codeview::TypeStream`: CodeView type records, from a PDB's TPI stream or an object's `.debug$T`
+  section (`/Z7`): structs, classes, unions and enums with their field lists (members, bases, virtual
+  bases, vfptrs, methods and their vtable slots, enumerators), pointers, arrays, bitfields, modifiers
+  and function types, in the forms Visual C++ 7.0 and later write. `analysis/types.hpp` turns them into
+  type layouts (see [Types](#types)).
 - `map::MapFile`: link maps in the link.exe format (also written by lld-link): sections, public and
   static symbols with their object files and `f` (function) flags, the entry point and the timestamp.
 - `archive::Archive`: COFF archives (.lib): members, long names, the linker's symbol index and the
@@ -248,6 +253,11 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   from them. `analyze_functions()` computes them for many functions (about a microsecond per
   instruction); runs queue their functions easiest first by the score (`run::make_queue_items()`), the
   GUI's workspace keeps an analysis per program generation, and the Function browser shows it.
+- Type layouts (`analysis/types.hpp`, see [Types](#types)): what the compiler made of a struct, class,
+  union or enum, read from CodeView type records: size, bases, table pointers, virtual methods and
+  their slots, fields (offsets, sizes, bits, array dimensions, the types they are or point to) and
+  enumerators. A `TypeCatalog` holds them by name and names the field at an offset ("pos.x",
+  "items[2].count", "Named::__vfptr").
 - Translation units (`analysis/units.hpp`): the object files the program was linked from, in link
   order, and the unit of each function and global. `units_from_pdb()` takes them from the PDB's modules
   and section contributions, `units_from_objects()` from the object files a link map (or a library
@@ -372,6 +382,35 @@ annotated listings (and so the agent's brief) say which slots of which vftables 
 tells the agent it is a virtual member function and where it sits in the class. Targets built without
 `/GR` (VC6's default) have no RTTI; finding their vftables from the constructors that store them is
 future work.
+
+#### Types
+
+Layouts come from CodeView type records, which say exactly what a compiler made of a type: a PDB's TPI
+stream for the target, and an object's `.debug$T` section for code compiled with `/Z7`
+(`codeview::TypeStream`). Records refer to each other by type index; a struct's record names its field
+list, a forward reference (`sizeof 0`) stands for the definition of the same unique name
+(`.?AUPlayer@@`), and anonymous types go by their unique name. `layout_of()` reads a struct, class,
+union or enum into a `TypeLayout`:
+
+- size, and the kind (struct and class differ in decorated names, `PAUPlayer@@` and `PAVPlayer@@`);
+- direct bases with their offsets, virtual bases, the vfptr and vbptr a class adds, and its vtable's
+  entry count (`LF_VTSHAPE`);
+- virtual methods: the ones a class introduces with their slots (vtable offset over the pointer size,
+  `= 0` when pure), and the ones it overrides;
+- fields in offset order: offset, size, bitfield position and width, the type as C++ writes it
+  (`const char*`, `short[2][3]`, `void (__cdecl*)(int)`), array dimensions, and the struct, class or
+  union a field is or points to;
+- an enum's underlying type and enumerators (values read as the underlying type: clang writes -2 as an
+  unsigned 0xfffffffe).
+
+Visual C++ 7.0 and 7.1 write records with length-prefixed names (`LF_STRUCTURE_ST` and friends); they
+read the same way. VC6's 16-bit type indices are not read.
+
+`TypeCatalog::field_ref()` names the field at an offset as C++ would: through nested structs and
+arrays (`pos.y`, `grid[1][2]`, `pair.b`), a base's fields by their own names, the table pointers as
+`__vfptr` and `__vbptr` (a later base's as `Named::__vfptr`), with whether the offset is the field's
+start. `compare_layouts()` lists how two layouts of a type differ, one line per difference ("field speed
+at +0x8, expected +0x4", "virtual slot 1: Draw = 0, expected none").
 
 ### matching
 

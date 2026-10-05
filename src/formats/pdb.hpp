@@ -2,6 +2,7 @@
 
 #include "core/result.hpp"
 #include "core/types.hpp"
+#include "formats/codeview.hpp"
 
 #include <array>
 #include <filesystem>
@@ -17,6 +18,7 @@ struct Procedure {
     u32 size = 0;
     bool global = true;  // S_GPROC32 vs S_LPROC32 (static)
     u32 module = 0;      // index into modules()
+    u32 type_index = 0;  // its function type (LF_PROCEDURE, LF_MFUNCTION) in types(); 0 when unknown
 };
 
 struct DataSymbol {
@@ -53,7 +55,8 @@ struct Info {
     u32 signature = 0;
 };
 
-// Reads PDB 7.0 (MSF 7.00) files: procedures, data symbols, publics, modules and section contributions.
+// Reads PDB 7.0 (MSF 7.00) files: procedures, data symbols, publics, modules, section contributions and
+// the type records.
 class Reader {
 public:
     static Result<Reader> load(const std::filesystem::path& path);
@@ -64,6 +67,8 @@ public:
     const std::vector<PublicSymbol>& publics() const { return publics_; }
     const std::vector<Module>& modules() const { return modules_; }
     const std::vector<Contribution>& contributions() const { return contributions_; }
+    // The TPI stream: every type the program's code uses (empty when the PDB has none that reads).
+    const codeview::TypeStream& types() const { return types_; }
 
     // True when the GUID and age match a PE's CodeView record.
     bool matches(const std::array<u8, 16>& guid, u32 age) const { return guid == info_.guid && age == info_.age; }
@@ -75,6 +80,7 @@ private:
     std::vector<PublicSymbol> publics_;
     std::vector<Module> modules_;
     std::vector<Contribution> contributions_;
+    codeview::TypeStream types_;
 };
 
 } // namespace decomp::pdb

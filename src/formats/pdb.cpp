@@ -6,6 +6,7 @@
 #include <PDB_DBIStream.h>
 #include <PDB_InfoStream.h>
 #include <PDB_RawFile.h>
+#include <PDB_TPITypes.h>
 
 #include <cstring>
 
@@ -16,6 +17,24 @@ std::string array_to_string(const PDB::ArrayView<char>& view) {
     std::string out(view.Decay(), view.GetLength());
     while (!out.empty() && out.back() == '\0') out.pop_back();
     return out;
+}
+
+// A type stream's records (the TPI stream is 2, the IPI stream 4): the stream after its header. nullopt
+// when the stream is missing or of a version whose records do not read (before Visual C++ 7.0).
+std::optional<codeview::TypeStream> read_type_stream(const PDB::RawFile& raw, u32 index) {
+    if (index >= raw.GetStreamCount()) return std::nullopt;
+    const auto stream = raw.CreateMSFStream<PDB::DirectMSFStream>(index);
+    if (stream.GetSize() < sizeof(PDB::TPI::StreamHeader)) return std::nullopt;
+    const auto header = stream.ReadAtOffset<PDB::TPI::StreamHeader>(0);
+    using Version = PDB::TPI::StreamHeader::Version;
+    if (header.version != Version::V70 && header.version != Version::V80) return std::nullopt;
+    if (header.headerSize < sizeof(header) || header.headerSize > stream.GetSize()) return std::nullopt;
+    const usize size = std::min<usize>(header.typeRecordBytes, stream.GetSize() - header.headerSize);
+    std::vector<std::byte> bytes(size);
+    if (size > 0) stream.ReadAtOffset(bytes.data(), size, header.headerSize);
+    auto types = codeview::TypeStream::parse(std::move(bytes), header.typeIndexBegin);
+    if (!types) return std::nullopt;
+    return std::move(*types);
 }
 
 } // namespace
@@ -37,6 +56,9 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
         reader.info_.age = header->age;
         reader.info_.signature = header->signature;
     }
+    if (auto types = read_type_stream(raw, 2)) reader.types_ = std::move(*types);
+    // S_GPROC32_ID and S_LPROC32_ID name an item (LF_FUNC_ID, LF_MFUNC_ID) that names the function type.
+    const auto items = info_stream.HasIPIStream() ? read_type_stream(raw, 4) : std::nullopt;
 
     const PDB::DBIStream dbi = PDB::CreateDBIStream(raw);
     if (dbi.HasValidImageSectionStream(raw) != PDB::ErrorCode::Success ||
@@ -74,8 +96,11 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
                     const auto& p = record->data.S_GPROC32;
                     u32 rva = sections.ConvertSectionOffsetToRVA(p.section, p.offset);
                     if (rva == 0) return;
-                    reader.procedures_.push_back({p.name, rva, p.codeSize,
-                                                  kind == Kind::S_GPROC32 || kind == Kind::S_GPROC32_ID, module_index});
+                    u32 type_index = p.typeIndex;
+                    if (kind == Kind::S_GPROC32_ID || kind == Kind::S_LPROC32_ID)
+                        type_index = items ? items->function_type_of_id(p.typeIndex).value_or(0) : 0;
+                    reader.procedures_.push_back({p.name, rva, p.codeSize, kind == Kind::S_GPROC32 || kind == Kind::S_GPROC32_ID,
+                                                  module_index, type_index});
                 } else if (kind == Kind::S_LDATA32 || kind == Kind::S_GDATA32) {
                     const auto& v = record->data.S_LDATA32;
                     u32 rva = sections.ConvertSectionOffsetToRVA(v.section, v.offset);
