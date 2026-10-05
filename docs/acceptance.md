@@ -137,3 +137,53 @@ build of Zydis made with clang-cl and with cl.exe; this checklist adds the targe
 
 Note the target, the compiler the Rich header names, the `decomp bounds` numbers and the mismatch
 shapes `--show-code` shows, and the library match counts.
+
+# Phase 3 acceptance
+
+The manual check of the [Phase 3 exit criteria](roadmap.md#phase-3-project-organization) on a real
+target with a PDB, then with the agent at work. CI covers the same steps on the test fixtures.
+
+## What you need
+
+- A target built with a PDB, and the original compiler registered as a toolchain.
+- A project for it (`decomp init <binary> --toolchain <name> --flag ...`), and `ANTHROPIC_API_KEY` for
+  the agent steps (or the scripted sessions of the Phase 1 checklist on the fixture).
+
+## Checklist
+
+### Units
+
+- [ ] `decomp units` lists one unit per module of the PDB, in the PDB's order (compare with
+      `llvm-pdbutil dump --modules <pdb>`), and `decomp status` counts every function in a unit: no
+      "(no unit)" row.
+- [ ] Code units have sources named after the files the PDB names (`src/<file>.cpp`), and library,
+      import and linker units have none.
+
+### Unit sources
+
+- [ ] Run a few functions of one unit (`decomp run --unit <name>` or the Units view's Run). Each match
+      lands in the unit's source after a `// FUNCTION:` marker, and `decomp units verify <name>`
+      reports every function in it byte-exact.
+- [ ] With functions matched in their own files (a project from before Phase 3, or a guessed unit),
+      `decomp units emit` moves them into their units' sources, and `decomp units verify` agrees.
+
+### Symbols and types
+
+- [ ] In `decomp-gui`, with the policies for symbol changes and type definitions at "ask", a session
+      that calls `set_symbol` or `define_type` waits in Changes and approvals; approving applies it,
+      denying returns the reason to the agent.
+- [ ] `decomp symbols log --agent` lists the agent's symbol changes with session and reason, and
+      `decomp symbols revert --session <id>` undoes one session's; `decomp changes` lists the headers
+      `define_type` wrote, and `decomp changes revert <n>` undoes one.
+
+### Queue and cost
+
+- [ ] A new run's queue (Run monitor, or `run.json`) starts with the functions the Function browser
+      scores easiest.
+- [ ] `decomp status` and `decomp status --json` show each unit's functions and bytes matched and its
+      spend, and they add up to the totals; the Units view shows the same numbers.
+
+## Recording the result
+
+Note the target, the number of units and how they compare with the PDB's modules, the functions
+matched into unit sources, and anything the agent named or defined.

@@ -203,6 +203,26 @@ itself needs a real VC6 executable and its map file; the steps are in
 - The queue orders by difficulty, and `decomp status` (including `--json`) reports progress and cost
   per unit.
 
+**Status:** the scope is implemented, and CI covers each exit criterion on the test fixtures.
+
+- Units: on the fixtures, whose PDBs list `basic.obj`, `other.obj`, the import modules and
+  `* Linker *`, the derived units are those modules in that order, and every function belongs to one.
+  Without a PDB or a map, the analysis guesses units as a starting point: on the Zydis corpus it finds
+  a third of the true boundaries (`decomp bounds --units`).
+- Unit sources: sessions compose matches into their unit's source and verify the whole unit, and
+  `decomp units emit` moves earlier per-function sources into it. After the scripted 4-worker run, CI
+  checks with `decomp units verify` that every function in the two unit sources is byte-exact (and
+  `decomp units verify` with cl.exe in the Windows round trip).
+- `set_symbol` and `define_type` run through the approval gate (ask in the GUI, deny in command-line
+  runs unless configured), record their provenance (`symbols.log.jsonl`, `changes.jsonl`), and are
+  reverted with `decomp symbols revert`, `decomp changes revert` or the GUI. Tests drive both tools in
+  a session with real compiles.
+- The queue orders by the difficulty score of each function's code, and `decomp status` lists
+  progress and spend per unit (its JSON has a `units` array); the GUI's Units view shows the same and
+  runs a unit's functions.
+
+The manual check on a real target is in [acceptance.md](acceptance.md#phase-3-acceptance).
+
 ### Phase 4: Types
 
 **Goal:** real types instead of per-function ad hoc declarations.

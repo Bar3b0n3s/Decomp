@@ -8,14 +8,19 @@ decompilation yields source that is mechanically proven equivalent to the origin
 what preservation, porting and research projects need. Doing it by hand is slow, and most of the time
 goes into that same edit-compile-compare loop, which Decomp automates while a person supervises.
 
-> **Status: the first working slice and the Phase 1 runner and GUI are implemented.** The `decomp`
-> command loads PE targets and their PDBs, annotates disassembly, compiles candidates with the original
-> toolchain, diffs them with relocation awareness, and runs the built-in agent on one function
-> (`decomp agent`) or on many with several workers (`decomp run`), with transcripts, event logs, a live
-> progress view, budgets, approvals and resumable runs. `decomp-gui` opens projects; starts, watches,
-> steers and reopens runs; and has every Phase 1 view, from the Dashboard and the Function browser to
-> the Diff viewer with manual editing. CI is green on Linux and Windows, including a round trip with
-> the real MSVC `cl.exe` for x86 and x64. See [docs/roadmap.md](docs/roadmap.md).
+> **Status: the first working slice and Phases 1 to 3 are implemented.** The `decomp` command loads
+> PE targets and their PDBs, annotates disassembly, compiles candidates with the original toolchain,
+> diffs them with relocation awareness, and runs the built-in agent on one function (`decomp agent`) or
+> on many with several workers (`decomp run`), with transcripts, event logs, a live progress view,
+> budgets, approvals and resumable runs. Without a PDB, it finds functions, jump tables, names from map
+> files and static libraries, classes from RTTI and the compiler from the Rich header. Matched
+> functions are kept the way the original program was organized: one source per translation unit,
+> verified as a whole, with the queue ordered by difficulty and progress and cost per unit. The agent
+> can name symbols and define shared types under the supervisor's approval. `decomp-gui` opens
+> projects; starts, watches, steers and reopens runs; and has a view for each part, from the Dashboard
+> and the Function browser to the Diff viewer with manual editing and the Units view. CI covers Linux
+> and Windows, including a round trip with the real MSVC `cl.exe` for x86 and x64. See
+> [docs/roadmap.md](docs/roadmap.md).
 
 ## Key ideas
 
@@ -215,7 +220,7 @@ described in [docs/agent.md](docs/agent.md).
 | [docs/ui.md](docs/ui.md) | The supervision GUI, view by view, its event-driven architecture, and CLI parity |
 | [docs/project-format.md](docs/project-format.md) | Project files, symbol file, history, toolchain registry |
 | [docs/roadmap.md](docs/roadmap.md) | First slice checklist, Phases 1-7 with exit criteria, risks |
-| [docs/acceptance.md](docs/acceptance.md) | The manual Phase 1 acceptance checklist |
+| [docs/acceptance.md](docs/acceptance.md) | The manual acceptance checklists of Phases 1 to 3 |
 
 ## Repository layout
 
