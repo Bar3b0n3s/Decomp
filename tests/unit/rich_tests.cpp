@@ -38,12 +38,14 @@ TEST_CASE("Rich product ids: tools, versions and releases") {
     CHECK(pe::rich_product(0x0016)->variant == "Standard edition");
     CHECK(pe::rich_product(0x0004)->tool == pe::RichTool::linker);
     CHECK(pe::rich_product(0x000E)->tool == pe::RichTool::assembler);
-    CHECK(pe::rich_product(0x0105)->variant == "LTCG");
-    CHECK(pe::rich_product(0x0109)->variant == "PGO optimized");
-    CHECK(pe::rich_product(0x00FE)->name == "Linker1400");
-    CHECK(pe::rich_product(0x010A)->name == "Utc1900_POGO_O_CPP");
-    CHECK_FALSE(pe::rich_product(0x010B));
-    CHECK(pe::describe_rich_product(0x005C) == "C++ compiler 13.10 (Visual Studio .NET 2003)");
+    CHECK(pe::rich_product(0x0109)->variant == "LTCG");
+    CHECK(pe::rich_product(0x010D)->variant == "PGO optimized");
+    CHECK(pe::rich_product(0x0102)->name == "Linker1400");
+    CHECK(pe::rich_product(0x0104)->name == "Utc1900_C");
+    CHECK(pe::rich_product(0x0056)->name == "Linker624");
+    CHECK(pe::rich_product(0x010E)->name == "Utc1900_POGO_O_CPP");
+    CHECK_FALSE(pe::rich_product(0x010F));
+    CHECK(pe::describe_rich_product(0x0060) == "C++ compiler 13.10 (Visual Studio .NET 2003)");
     CHECK(pe::describe_rich_product(0x0001) == "imported functions");
     CHECK(pe::describe_rich_product(0x0300) == "product 0x0300");
 }
@@ -60,24 +62,24 @@ TEST_CASE("compiler versions of reference builds of each release") {
              Case{0x000A, 8168, "12.00.8168", "Visual C++ 6.0", "vc6"},
              Case{0x000B, 8804, "12.00.8804", "Visual C++ 6.0", "vc6"},
              Case{0x001D, 9466, "13.00.9466", "Visual Studio .NET 2002", "vs2002"},
-             Case{0x005C, 3077, "13.10.3077", "Visual Studio .NET 2003", "vs2003"},
-             Case{0x006A, 50727, "14.00.50727", "Visual Studio 2005", "vs2005"},
-             Case{0x0080, 30729, "15.00.30729", "Visual Studio 2008", "vs2008"},
-             Case{0x00A7, 40219, "16.00.40219", "Visual Studio 2010", "vs2010"},
-             Case{0x00CB, 61030, "17.00.61030", "Visual Studio 2012", "vs2012"},
-             Case{0x00DD, 40629, "18.00.40629", "Visual Studio 2013", "vs2013"},
-             Case{0x0101, 23026, "19.00.23026", "Visual Studio 2015", "vs2015"},
-             Case{0x0101, 24215, "19.00.24215", "Visual Studio 2015 Update 3", "vs2015"},
-             Case{0x0101, 25017, "19.10.25017", "Visual Studio 2017 15.0", "vs2017"},
-             Case{0x0101, 27054, "19.16.27054", "Visual Studio 2017 15.9", "vs2017"},
-             Case{0x0101, 27508, "19.20.27508", "Visual Studio 2019 16.0", "vs2019"},
-             Case{0x0101, 29913, "19.28.29913", "Visual Studio 2019 16.9", "vs2019"},
-             Case{0x0101, 30159, "19.29.30159", "Visual Studio 2019 16.11", "vs2019"},
-             Case{0x0101, 30705, "19.30.30705", "Visual Studio 2022 17.0", "vs2022"},
-             Case{0x0101, 33523, "19.39.33523", "Visual Studio 2022 17.9", "vs2022"},
-             Case{0x0101, 35213, "19.44.35213", "Visual Studio 2022 17.14", "vs2022"},
-             Case{0x0101, 36231, "19.x.36231", "Visual Studio 2026", "vs2026"},  // newer than the build table
-             Case{0x00FE, 30159, "14.29.30159", "Visual Studio 2019 16.11", "vs2019"},
+             Case{0x0060, 3077, "13.10.3077", "Visual Studio .NET 2003", "vs2003"},
+             Case{0x006E, 50727, "14.00.50727", "Visual Studio 2005", "vs2005"},
+             Case{0x0084, 30729, "15.00.30729", "Visual Studio 2008", "vs2008"},
+             Case{0x00AB, 40219, "16.00.40219", "Visual Studio 2010", "vs2010"},
+             Case{0x00CF, 61030, "17.00.61030", "Visual Studio 2012", "vs2012"},
+             Case{0x00E1, 40629, "18.00.40629", "Visual Studio 2013", "vs2013"},
+             Case{0x0105, 23026, "19.00.23026", "Visual Studio 2015", "vs2015"},
+             Case{0x0105, 24215, "19.00.24215", "Visual Studio 2015 Update 3", "vs2015"},
+             Case{0x0105, 25017, "19.10.25017", "Visual Studio 2017 15.0", "vs2017"},
+             Case{0x0105, 27054, "19.16.27054", "Visual Studio 2017 15.9", "vs2017"},
+             Case{0x0105, 27508, "19.20.27508", "Visual Studio 2019 16.0", "vs2019"},
+             Case{0x0105, 29913, "19.28.29913", "Visual Studio 2019 16.9", "vs2019"},
+             Case{0x0105, 30159, "19.29.30159", "Visual Studio 2019 16.11", "vs2019"},
+             Case{0x0105, 30705, "19.30.30705", "Visual Studio 2022 17.0", "vs2022"},
+             Case{0x0105, 33523, "19.39.33523", "Visual Studio 2022 17.9", "vs2022"},
+             Case{0x0105, 35213, "19.44.35213", "Visual Studio 2022 17.14", "vs2022"},
+             Case{0x0105, 36231, "19.x.36231", "Visual Studio 2026", "vs2026"},  // newer than the build table
+             Case{0x0102, 30159, "14.29.30159", "Visual Studio 2019 16.11", "vs2019"},
          }) {
         CAPTURE(k.product);
         CAPTURE(k.build);
@@ -87,10 +89,10 @@ TEST_CASE("compiler versions of reference builds of each release") {
         CHECK(v.suggested_name == k.name);
     }
     // The image's linker version gives the minor version of the toolset's own tools.
-    const pe::ToolVersion v = pe::tool_version(*pe::rich_product(0x0100), 36231, 51);
+    const pe::ToolVersion v = pe::tool_version(*pe::rich_product(0x0104), 36231, 51);
     CHECK(v.minor_known);
     CHECK(v.text() == "19.51.36231");
-    const auto build = build_of({{0x0100, 36231, 30}, {0x00FE, 36231, 1}, {0x0100, 35213, 2}}, 14, 51);
+    const auto build = build_of({{0x0104, 36231, 30}, {0x0102, 36231, 1}, {0x0104, 35213, 2}}, 14, 51);
     REQUIRE(build.main_compiler());
     CHECK(build.main_compiler()->version.text() == "19.51.36231");
     CHECK(build.compilers[1].version.text() == "19.44.35213");  // another build: from the table
@@ -138,7 +140,7 @@ TEST_CASE("a VC6 game: the newest build of the linker's release is the game's co
     const auto sp = matching::toolchain_fit(build, (0x000Bu << 16) | 8168);
     CHECK(sp.fit == matching::ToolchainFit::same_release);
     CHECK(sp.text.find("build 8804") != std::string::npos);
-    const auto other = matching::toolchain_fit(build, (0x0101u << 16) | 30159);
+    const auto other = matching::toolchain_fit(build, (0x0105u << 16) | 30159);
     CHECK(other.fit == matching::ToolchainFit::other_release);
     CHECK(other.toolchain_compiler == "C++ compiler 19.29.30159 (Visual Studio 2019 16.11)");
     CHECK(matching::toolchain_fit(build, std::nullopt).fit == matching::ToolchainFit::unknown);
@@ -151,7 +153,7 @@ TEST_CASE("toolchain suggestion notes: editions without an optimizer, LTCG, PGO,
     CHECK(has_note(s, "The Standard edition compiler has no optimizer"));
 
     // VS2019 with whole-program optimization, a library from VS2017, and a newer one from VS2022.
-    const auto modern = build_of({{0x0105, 30159, 40}, {0x0104, 30159, 5}, {0x0101, 27054, 12}, {0x0101, 33523, 4}, {0x00FE, 30159, 1}}, 14, 29);
+    const auto modern = build_of({{0x0109, 30159, 40}, {0x0108, 30159, 5}, {0x0105, 27054, 12}, {0x0105, 33523, 4}, {0x0102, 30159, 1}}, 14, 29);
     const pe::BuildTool* main = modern.main_compiler();
     REQUIRE(main);
     CHECK(main->description() == "C++ compiler 19.29.30159 (LTCG)");  // the linker's release, not the newest
@@ -162,7 +164,7 @@ TEST_CASE("toolchain suggestion notes: editions without an optimizer, LTCG, PGO,
     CHECK(has_note(m, "12 objects came from Visual Studio 2017 15.9"));
     CHECK(has_note(m, "4 objects came from Visual Studio 2022 17.9"));
 
-    const auto pgo = build_of({{0x0109, 30159, 7}, {0x00FE, 30159, 1}}, 14, 29);
+    const auto pgo = build_of({{0x010D, 30159, 7}, {0x0102, 30159, 1}}, 14, 29);
     CHECK(has_note(matching::suggest_toolchain(pgo).value(), "optimized with a profile"));
 
     pe::RichHeader edited;
@@ -183,7 +185,7 @@ TEST_CASE("Rich header parsing: the DanS marker, the entries and the checksum") 
     data[1] = std::byte{'Z'};
     put32(0x3C, 0xC0);
     for (usize i = 0x40; i < 0x70; ++i) data[i] = std::byte(static_cast<u8>(i * 7));  // a DOS stub
-    const std::vector<RichEntry> entries = {{0x0101, 30159, 25}, {0x00FE, 30159, 1}, {0x0001, 0, 80}};
+    const std::vector<RichEntry> entries = {{0x0105, 30159, 25}, {0x0102, 30159, 1}, {0x0001, 0, 80}};
     const u32 key = pe::rich_checksum(ByteSpan(data), 0x70, entries);
     put32(0x70, 0x536E6144u ^ key);
     put32(0x74, key);
@@ -201,7 +203,7 @@ TEST_CASE("Rich header parsing: the DanS marker, the entries and the checksum") 
     CHECK(h->key == key);
     CHECK(h->checksum_ok);
     REQUIRE(h->entries.size() == 3);
-    CHECK(h->entries[0].product_id == 0x0101);
+    CHECK(h->entries[0].product_id == 0x0105);
     CHECK(h->entries[0].build == 30159);
     CHECK(h->entries[2].count == 80);
     // A changed DOS stub byte breaks the checksum; without "Rich" there is no header.

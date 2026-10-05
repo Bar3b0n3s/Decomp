@@ -105,6 +105,7 @@ public:
             imported_slots_.insert(imp.iat_va);
             if (noreturn_import(imp.name)) noreturn_slots_.insert(imp.iat_va);
         }
+        find_incremental_linking_tables();
     }
 
     DiscoveryResult run() {
@@ -143,6 +144,50 @@ private:
         return nullptr;
     }
 
+    // Incremental linking (link /INCREMENTAL, the default with /DEBUG) puts a table of `jmp rel32` thunks
+    // at the start of the code section, after five int3 bytes, and every call and function pointer goes
+    // through it. The thunks are not functions: each one stands for the function it jumps to.
+    void find_incremental_linking_tables() {
+        auto jmp_target = [&](u64 va) -> std::optional<u64> {
+            if (image_.read<u8>(va).value_or(0) != 0xE9) return std::nullopt;
+            const auto rel = image_.read<u32>(va + 1);
+            if (!rel) return std::nullopt;
+            const u64 target = va + 5 + static_cast<u64>(static_cast<i64>(static_cast<i32>(*rel)));
+            if (!range_of(target)) return std::nullopt;
+            return target;
+        };
+        for (const auto& r : ranges_) {
+            u64 at = r.begin;
+            while (at < r.end && at < r.begin + 16 && image_.read<u8>(at).value_or(0) == 0xCC) ++at;
+            const u64 first = at;
+            std::vector<std::pair<u64, u64>> entries;
+            for (; at + 5 <= r.end; at += 5) {
+                const auto target = jmp_target(at);
+                if (!target) break;
+                entries.emplace_back(at, *target);
+            }
+            if (entries.size() < 2) continue;
+            const u64 end = entries.back().first + 5;
+            for (const auto& [thunk, target] : entries)
+                if (target < first || target >= end) ilt_[thunk] = target;
+            ilt_runs_.emplace_back(first, end);
+            log::debug("discovery: incremental linking table at {:#x}-{:#x} ({} thunks)", first, end, entries.size());
+        }
+    }
+
+    // The function an address stands for: itself, or the function an incremental-linking thunk jumps to.
+    u64 through_ilt(u64 va) const {
+        auto it = ilt_.find(va);
+        return it == ilt_.end() ? va : it->second;
+    }
+
+    // The incremental-linking table that `va` is in.
+    const std::pair<u64, u64>* ilt_run_at(u64 va) const {
+        for (const auto& run : ilt_runs_)
+            if (va >= run.first && va < run.second) return &run;
+        return nullptr;
+    }
+
     const Insn* insn(u64 va) {
         if (auto it = cache_.find(va); it != cache_.end()) return it->second.length ? &it->second : nullptr;
         Insn out;
@@ -155,12 +200,12 @@ private:
                     out.suspicious = suspicious(*ins);
                     if (ins->branch_target) {
                         out.has_branch = true;
-                        out.target = *ins->branch_target;
+                        out.target = through_ilt(*ins->branch_target);
                     } else if (ins->memory_target) {
                         out.has_memory = true;
                         out.target = *ins->memory_target;
                     }
-                    out.code_ref = code_reference(*ins);
+                    if (const u64 ref = code_reference(*ins)) out.code_ref = through_ilt(ref);
                 }
         }
         auto [it, inserted] = cache_.emplace(va, out);
@@ -206,6 +251,10 @@ private:
     }
 
     void add(u64 va, FunctionEvidence evidence, u64 fixed_end = 0, std::string_view why = {}) {
+        if (const u64 to = through_ilt(va); to != va) {
+            va = to;
+            fixed_end = 0;
+        }
         if (!range_of(va)) return;
         auto [it, inserted] = fns_.try_emplace(va);
         if (inserted || evidence < it->second.evidence) it->second.evidence = evidence;
@@ -566,6 +615,11 @@ private:
         bool added = false;
         u64 p = at + padding_length(image_, decoder_, at, next);
         while (p < next) {
+            if (const auto* run = ilt_run_at(p)) {
+                p = std::min(run->second, next);
+                p += padding_length(image_, decoder_, p, next);
+                continue;
+            }
             if (auto body = plausible(p)) {
                 // Something holds its address: say so, though the gap found it first.
                 add(p, referenced(p) ? FunctionEvidence::address : FunctionEvidence::gap);
@@ -630,14 +684,14 @@ private:
         };
         if (image_.has_relocations()) {
             for (const auto& r : image_.base_relocations())
-                if (auto value = read_pointer(image_.image_base() + r.rva); value && range_of(*value)) candidates_.insert(*value);
+                if (auto value = read_pointer(image_.image_base() + r.rva); value && range_of(*value)) candidates_.insert(through_ilt(*value));
             return;
         }
         // No relocations: aligned pointer-sized values in the data sections that point into code.
         for (const auto& s : image_.image_sections()) {
             if (s.executable || s.file_size == 0) continue;
             for (u64 va = s.va; va + ptr <= s.va + s.file_size; va += ptr)
-                if (auto value = read_pointer(va); value && range_of(*value)) candidates_.insert(*value);
+                if (auto value = read_pointer(va); value && range_of(*value)) candidates_.insert(through_ilt(*value));
         }
     }
 
@@ -658,6 +712,8 @@ private:
     bool candidates_built_ = false;
     std::set<u64> table_starts_;  // every switch table (and byte table) found so far
     bool new_table_starts_ = false;
+    std::unordered_map<u64, u64> ilt_;              // incremental-linking thunk -> the function it jumps to
+    std::vector<std::pair<u64, u64>> ilt_runs_;     // the tables of such thunks
 };
 
 } // namespace

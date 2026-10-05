@@ -67,7 +67,7 @@ TEST_CASE("dashboard: Rich header entries by role") {
 
     // Visual Studio 2015 and later: the image's linker version (14.xx) gives the minor version of the
     // tools that share the linker's build.
-    const std::vector<pe::RichEntry> modern = {{0x0101, 36231, 40}, {0x00FE, 36231, 1}, {0x0101, 30159, 3}};
+    const std::vector<pe::RichEntry> modern = {{0x0105, 36231, 40}, {0x0102, 36231, 1}, {0x0105, 30159, 3}};
     const auto v = rich_builds(modern, 14, 51);
     CHECK(v[0].version == "19.51.36231");
     CHECK(v[0].visual_studio == "Visual Studio 2026");

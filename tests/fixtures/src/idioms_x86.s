@@ -4,13 +4,28 @@
     .intel_syntax noprefix
     .text
 
+# An incremental linker's thunk table at the start of the code: five int3 bytes, then a `jmp` per
+# function. Calls and function pointers go through the thunks, which are not functions themselves.
+    .byte 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+Lilt_switch_one_level:
+    .byte 0xe9                          # jmp rel32, as the linker writes it
+    .long _switch_one_level - (. + 4)
+Lilt_switch_two_level:
+    .byte 0xe9
+    .long _switch_two_level - (. + 4)
+Lilt_callback:
+    .byte 0xe9
+    .long _callback - (. + 4)
+    .byte 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+
+    .p2align 4, 0xcc
     .globl _entry
 _entry:
     push 3
-    call _switch_one_level
+    call Lilt_switch_one_level
     add esp, 4
     push 3
-    call _switch_two_level
+    call Lilt_switch_two_level
     add esp, 4
     call _calls_exit_helper
     call _tail_caller
@@ -138,7 +153,7 @@ _tail_target:
     .globl _tail_target_end
 _tail_target_end:
 
-# Called only through a pointer in data (no relocations: found by scanning the data).
+# Called only through a pointer in data, by way of its thunk (no relocations: found by scanning the data).
     .p2align 4, 0x90
     .globl _callback
 _callback:
@@ -164,4 +179,4 @@ _unreferenced_end:
     .data
     .globl _callbacks
 _callbacks:
-    .long _callback
+    .long Lilt_callback

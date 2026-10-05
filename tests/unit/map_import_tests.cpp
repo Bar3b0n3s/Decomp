@@ -53,8 +53,11 @@ struct IdiomMap {
     std::filesystem::path path;
 };
 
-IdiomMap write_idiom_map(const std::filesystem::path& dir, u64 entry_offset = 0) {
+// `entry_shift` moves the entry point the map records, to make a map of another build.
+IdiomMap write_idiom_map(const std::filesystem::path& dir, u32 entry_shift = 0) {
     const auto lld = map::load(test::fixture("x86/idioms.map")).value();
+    REQUIRE(lld.entry_point);
+    const u32 entry_offset = lld.entry_point->second + entry_shift;
     std::map<std::string, u64> by_name;
     for (const auto& e : lld.entries) by_name[e.name] = e.va;
     IdiomMap out;
@@ -175,7 +178,7 @@ TEST_CASE("a program opened with its map: the map's names, and exact bounds from
 
     // A map of another build (its entry point is elsewhere) is refused.
     auto other = fs::TempDir::create("decomp-map").value();
-    const IdiomMap wrong = write_idiom_map(other.path(), 0x40);
+    const IdiomMap wrong = write_idiom_map(other.path(), 0x10);
     auto refused = Program::open(test::fixture("x86/idioms.exe"), OpenOptions{.map = wrong.path});
     REQUIRE_FALSE(refused);
     CHECK(refused.error().message.find("not for this image") != std::string::npos);

@@ -392,6 +392,10 @@ the call goes to a linker-generated stub, `jmp [__imp__Foo@4]`.
   entry point or an analysis-found function starts with a 5-byte `jmp rel32` to code, and that jump
   sits in a table of such jumps or leads to a function with an equivalent name, the symbol moves to the
   jump's destination. Functions are then named by the code the compiler produced.
+- Function discovery recognizes link.exe's table at the start of the code section (a few `int3`
+  bytes, then two or more `jmp rel32` thunks into code) and does not report its thunks as functions:
+  a call, jump, function pointer or entry point that lands on a thunk stands for the function the
+  thunk jumps to.
 - Imports compare by their `__imp_` names. A `dllimport` hint for an IAT call on one side and a stub
   call on the other is planned (Phase 2).
 

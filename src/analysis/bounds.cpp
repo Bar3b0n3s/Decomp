@@ -95,7 +95,8 @@ BoundsComparison compare_bounds(std::span<const FunctionBounds> truth, std::span
             ++c.extra;
             c.mismatches.push_back({BoundsMismatch::Kind::extra, start, 0, f->end, f->name});
         }
-    std::ranges::sort(c.mismatches, {}, &BoundsMismatch::start);
+    // What the truth has and the analysis got wrong first, then what the analysis found besides.
+    std::ranges::sort(c.mismatches, {}, [](const BoundsMismatch& m) { return std::pair{m.kind == BoundsMismatch::Kind::extra, m.start}; });
     return c;
 }
 
