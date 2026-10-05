@@ -219,6 +219,60 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
         });
     }
     {
+        auto* cmd = app.add_subcommand("classes", "List the classes the target's RTTI names: bases, vftables and virtual functions");
+        auto binary = std::make_shared<std::string>();
+        auto filter = std::make_shared<std::string>();
+        auto slots = std::make_shared<bool>(false);
+        cmd->add_option("binary", *binary, "PE image (default: the project's target)");
+        cmd->add_option("--filter", *filter, "Only classes whose name contains this text");
+        cmd->add_flag("--slots", *slots, "List each vftable's virtual functions");
+        cmd->callback([&g, binary, filter, slots] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, open_program(g, *binary));
+                const RttiInfo& rtti = p.rtti();
+                auto function_name = [&](u64 va) {
+                    const u64 at = p.thunk_destination(va).value_or(va);
+                    return p.describe_address(at);
+                };
+                Json arr = Json::array();
+                for (const auto& c : rtti.classes) {
+                    if (!filter->empty() && c.name.find(*filter) == std::string::npos) continue;
+                    if (g.json) {
+                        Json bases = Json::array(), vftables = Json::array();
+                        for (const auto& b : c.bases)
+                            bases.push_back({{"name", b.name}, {"offset", b.mdisp}, {"virtual", b.pdisp >= 0}, {"direct", b.direct}});
+                        for (const auto& v : c.vftables) {
+                            Json list = Json::array();
+                            for (u64 s : v.slots) list.push_back({{"va", s}, {"function", function_name(s)}});
+                            vftables.push_back({{"va", v.va}, {"name", c.vftable_name(v)}, {"locator", v.locator}, {"offset", v.offset},
+                                                {"for", v.for_base.empty() ? std::string() : class_display_name(v.for_base)}, {"slots", list}});
+                        }
+                        arr.push_back({{"name", c.name}, {"decorated", c.decorated}, {"struct", c.is_struct}, {"type_descriptor", c.type_descriptor},
+                                       {"multiple_inheritance", (c.attributes & 1) != 0}, {"virtual_inheritance", (c.attributes & 2) != 0},
+                                       {"bases", bases}, {"vftables", vftables}});
+                        continue;
+                    }
+                    std::vector<std::string> notes;
+                    if (c.attributes & 1) notes.push_back("multiple inheritance");
+                    if (c.attributes & 2) notes.push_back("virtual inheritance");
+                    std::println("{} {}{}", c.is_struct ? "struct" : "class", c.name, notes.empty() ? "" : " (" + join(notes, ", ") + ")");
+                    std::vector<std::string> bases;
+                    for (const auto& b : c.bases)
+                        if (b.direct) bases.push_back(b.pdisp >= 0 ? std::format("virtual {}", b.name) : std::format("{} at {:#x}", b.name, b.mdisp));
+                    if (!bases.empty()) std::println("  bases     {}", join(bases, ", "));
+                    for (const auto& v : c.vftables) {
+                        std::println("  vftable   {:#x}{} {} slots  {}", v.va, v.for_base.empty() ? std::string() : " for " + class_display_name(v.for_base),
+                                     v.slots.size(), c.vftable_name(v));
+                        if (*slots)
+                            for (usize i = 0; i < v.slots.size(); ++i) std::println("    [{}] {:#x} {}", i, v.slots[i], function_name(v.slots[i]));
+                    }
+                }
+                if (g.json) print_json(arr);
+                return 0;
+            }));
+        });
+    }
+    {
         auto* cmd = app.add_subcommand("disasm", "Annotated disassembly of a function");
         auto binary = std::make_shared<std::string>();
         auto function = std::make_shared<std::string>();

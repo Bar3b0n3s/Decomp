@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analysis/jump_tables.hpp"
+#include "analysis/rtti.hpp"
 #include "analysis/symbols.hpp"
 #include "arch/x86/decoder.hpp"
 #include "core/result.hpp"
@@ -128,6 +129,10 @@ public:
     // Display name for an address: symbol (+offset), import, or hex.
     std::string describe_address(u64 va) const;
 
+    // The classes the image's MSVC RTTI names, with their vftables (computed on first use). Its
+    // `slots` are keyed by the functions behind incremental-linking thunks, where a slot holds one.
+    const RttiInfo& rtti() const;
+
     // Thunks the linker inserts between a call and its destination: incremental-linking (ILT)
     // entries `jmp rel32 <function>` (possibly chained) and import thunks `jmp [IAT slot]`. Returns the
     // function's address or the IAT slot's address; nullopt when `va` is not such a thunk.
@@ -154,6 +159,8 @@ private:
 
     mutable std::unique_ptr<std::once_flag> xref_once_ = std::make_unique<std::once_flag>();
     mutable std::unordered_map<u64, std::vector<Xref>> xrefs_;
+    mutable std::unique_ptr<std::once_flag> rtti_once_ = std::make_unique<std::once_flag>();
+    mutable std::unique_ptr<RttiInfo> rtti_;
 };
 
 } // namespace decomp

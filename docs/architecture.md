@@ -231,6 +231,8 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   [matching.md](matching.md#opticf-folding)). Function status is kept by `project`, not here.
 - Demangling through LLVM's Demangle library (MSVC and Itanium schemes), plus the undecorated and
   qualified forms used for name equivalence.
+- RTTI and vftables (`analysis/rtti.hpp`, see [RTTI and vftables](#rtti-and-vftables)): the classes a
+  `/GR` build names, their bases and vftables (`Program::rtti()`, `decomp classes`).
 - `Program::function_extent()`: the symbol size when known; otherwise recursive descent from the
   entry, bounded by the section and the next known function, stopping at `ret`, `int3` and jumps that
   leave the function. Indirect jumps through tables (`jmp [r*4+table]` on x86; the clang and MSVC x64
@@ -241,6 +243,30 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   from `esp`/`ebp`/`rsp`/`rbp` offsets), switch tables, loop headers and back edges, tail calls, plus
   callers, callees and data references. The annotated listing is what the agent and the human read;
   there is no decompiler output.
+
+#### RTTI and vftables
+
+MSVC's run-time type information (`/GR`) names every polymorphic class in the image. `find_rtti()`
+finds the TypeDescriptors by their decorated names (`.?AVFoo@@` for a class, `.?AUFoo@@` for a struct,
+two pointers into the descriptor, whose second pointer is null), then the CompleteObjectLocators that
+refer to them (signature 0 with addresses on x86; signature 1, image-relative references and the
+locator's own RVA on x64), each locator's ClassHierarchyDescriptor, BaseClassArray and
+BaseClassDescriptors (the array lists each base followed by its own bases, so the direct ones are
+known), and the vftables: the pointer-sized slot before a vftable holds its locator's address, and the
+slots that follow are the virtual functions up to the next vftable or the first value that is not
+code. A class with several vftables (multiple inheritance) names each after the direct base at its
+offset.
+
+`add_rtti_symbols()` names the structures as MSVC does, with source `analysis` so a PDB's or a map's
+names take precedence: `??_R0?AVFoo@@@8` (type descriptor), `??_R4Foo@@6B@` (locator), `??_R3Foo@@8`
+(hierarchy), `??_R2Foo@@8` (base array), `??_R1A@?0A@EA@Foo@@8` (base descriptor, whose name encodes
+its displacements and attributes in MSVC's number encoding) and the vftable `??_7Foo@@6B@`, or
+`??_7Foo@@6BBase@@@` when the class has a vftable per base. On the RTTI fixture every name matches its
+PDB. `Program::rtti()` keys the vftable slots by the functions behind incremental-linking thunks;
+annotated listings (and so the agent's brief) say which slots of which vftables hold a function, which
+tells the agent it is a virtual member function and where it sits in the class. Targets built without
+`/GR` (VC6's default) have no RTTI; finding their vftables from the constructors that store them is
+future work.
 
 ### matching
 

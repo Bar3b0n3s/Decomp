@@ -375,6 +375,9 @@ until the new one is ready.
 - A hex view per section with symbol overlays: functions, data, strings, floats, jump tables,
   relocations (underlined) and import slots, each color named in a legend; what starts on a row is
   written beside it. A selected byte shows what it belongs to and who references it.
+- Classes named by the RTTI (`/GR` builds): each class with its direct bases (virtual ones marked), its
+  type descriptor, and its vftables (for which base, when there are several) with every slot's
+  function as a link.
 - Rich header entries: product, build, count, the tool they name with its version and Visual Studio
   release, and whether the checksum matches; below them, what the target was built with and the
   notes of the toolchain suggestion.
@@ -393,7 +396,7 @@ until the new one is ready.
   references (`string_refs`), the overlays (`vm::build_hex_overlays`) and the references to an address
   (`Program::xrefs_to`: the functions' references, pointers stored in data and references through
   linker thunks), each a background job per program generation; the Rich header's tools and versions
-  (`pe::identify_build`). Phase 2 adds RTTI class names.
+  (`pe::identify_build`); the classes and vftables (`Program::rtti`).
 
 ### Symbols and provenance
 

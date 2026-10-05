@@ -44,6 +44,7 @@ struct AnnotatedFunction {
     std::vector<Reference> data_refs;
     std::vector<std::string> callers;  // readable names
     std::vector<JumpTable> jump_tables;
+    std::vector<std::string> virtual_slots;  // where vftables hold the function (RTTI)
 };
 
 // What an address in the image refers to, for operands and comments.

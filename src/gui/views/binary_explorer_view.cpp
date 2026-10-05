@@ -24,7 +24,7 @@ namespace decomp::gui {
 
 namespace {
 
-enum Tab : int { kSections, kImports, kExports, kStrings, kHex, kRich, kPdb, kTabCount };
+enum Tab : int { kSections, kImports, kExports, kStrings, kClasses, kHex, kRich, kPdb, kTabCount };
 
 struct ProgramKey {
     std::weak_ptr<const Program> program;
@@ -98,7 +98,7 @@ public:
         }
         draw_toolbar(ctx, access);
         if (ImGui::BeginTabBar("##binary_tabs")) {
-            const char* names[kTabCount] = {"Sections", "Imports", "Exports", "Strings", "Hex", "Rich header", "PDB"};
+            const char* names[kTabCount] = {"Sections", "Imports", "Exports", "Strings", "Classes", "Hex", "Rich header", "PDB"};
             for (int t = 0; t < kTabCount; ++t) {
                 const ImGuiTabItemFlags flags = tab_request_ == t ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
                 if (!ImGui::BeginTabItem(names[t], nullptr, flags)) continue;
@@ -107,6 +107,7 @@ public:
                 case kImports: draw_imports(ctx, access); break;
                 case kExports: draw_exports(ctx, access); break;
                 case kStrings: draw_strings(ctx, access); break;
+                case kClasses: draw_classes(ctx, access); break;
                 case kHex: draw_hex(ctx, access); break;
                 case kRich: draw_rich(ctx, access); break;
                 case kPdb: draw_pdb(ctx, access); break;
@@ -128,6 +129,7 @@ private:
         string_refs_.poll();
         overlays_.poll();
         refs_.poll();
+        rtti_.poll();
         const auto program = access.program;
         if (const std::string root = fs::to_utf8(access.project->root()); root != project_root_) {
             project_root_ = root;
@@ -135,6 +137,7 @@ private:
             string_refs_.reset();
             overlays_.reset();
             refs_.reset();
+            rtti_.reset();
             refs_va_.reset();
             selected_va_.reset();
             selected_import_.reset();
@@ -158,6 +161,13 @@ private:
                 };
             });
         }
+        // The RTTI scan fills the program's cache; the Classes tab reads it once it is done.
+        rtti_.update(ctx.jobs, key, [program] {
+            return [program] {
+                (void)program->rtti();
+                return true;
+            };
+        });
         if (refs_va_) {
             const u64 va = *refs_va_;
             refs_.update(ctx.jobs, AddressKey{key, va}, [program, va] { return [program, va] { return program->xrefs_to(va); }; });
@@ -612,6 +622,49 @@ private:
         draw_references(ctx, access, va);
     }
 
+    void draw_classes(ViewContext& ctx, const ProjectAccess& access) {
+        if (!rtti_.value() || !rtti_.current(ProgramKey{access.program})) {
+            ImGui::TextDisabled("Reading the RTTI...");
+            return;
+        }
+        const RttiInfo& rtti = access.program->rtti();
+        if (rtti.classes.empty()) {
+            ImGui::TextDisabled("No RTTI: the target was compiled without /GR, or has no classes with virtual functions.");
+            return;
+        }
+        ImGui::TextDisabled("%zu classes named by the RTTI (MSVC /GR), with their bases and vftables.", rtti.classes.size());
+        for (usize ci = 0; ci < rtti.classes.size(); ++ci) {
+            const RttiClass& c = rtti.classes[ci];
+            ImGui::PushID(static_cast<int>(ci));
+            std::string label = std::format("{} {}", c.is_struct ? "struct" : "class", c.name);
+            std::vector<std::string> bases;
+            for (const auto& b : c.bases)
+                if (b.direct) bases.push_back(b.pdisp >= 0 ? "virtual " + b.name : b.name);
+            if (!bases.empty()) label += " : " + join(bases, ", ");
+            if (ImGui::TreeNode("##class", "%s", label.c_str())) {
+                if (ImGui::SmallButton("Type descriptor")) go_to(*access.program, c.type_descriptor);
+                for (usize vi = 0; vi < c.vftables.size(); ++vi) {
+                    const RttiVftable& v = c.vftables[vi];
+                    ImGui::PushID(static_cast<int>(vi));
+                    const std::string title = std::format("vftable at {:#x}{} ({} slots)", v.va,
+                                                          v.for_base.empty() ? std::string() : " for " + class_display_name(v.for_base), v.slots.size());
+                    address_link(ctx, title, v.va);
+                    for (usize si = 0; si < v.slots.size(); ++si) {
+                        ImGui::PushID(static_cast<int>(si));
+                        const u64 fn = access.program->thunk_destination(v.slots[si]).value_or(v.slots[si]);
+                        ImGui::Text("  [%zu]", si);
+                        ImGui::SameLine();
+                        function_link(ctx, access.program->describe_address(fn), fn);
+                        ImGui::PopID();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+    }
+
     void draw_rich(ViewContext& ctx, const ProjectAccess& access) {
         const pe::Image& image = access.program->image();
         const auto builds = vm::rich_builds(image.rich_entries(), image.linker_major(), image.linker_minor());
@@ -685,6 +738,7 @@ private:
     KeyedJob<DerivedKey, std::shared_ptr<const std::vector<StringRefs>>> string_refs_;
     KeyedJob<DerivedKey, std::shared_ptr<const vm::HexOverlays>> overlays_;
     KeyedJob<AddressKey, std::vector<Xref>> refs_;
+    KeyedJob<ProgramKey, bool> rtti_;
     std::optional<u64> refs_va_;
     std::optional<std::string> pending_anchor_;
     int tab_request_ = -1;

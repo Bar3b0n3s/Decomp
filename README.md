@@ -136,6 +136,7 @@ decomp init ../path/to/GAME.EXE --toolchain vc6 --flag /O2 --flag /Gy
 
 # Explore the target
 decomp funcs                                      # functions with address, size and symbol source
+decomp classes --slots                            # classes, bases and vftables from the RTTI (/GR builds)
 decomp disasm sum_array                           # annotated disassembly of one function
 
 # Compile a candidate with the original toolchain and diff it against the target

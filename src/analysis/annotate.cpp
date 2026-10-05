@@ -233,6 +233,7 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
     for (auto& [va, ref] : data_refs) fn.data_refs.push_back(ref);
     if (include_callers)
         for (u64 caller : program.callers_of(start)) fn.callers.push_back(program.describe_address(caller));
+    fn.virtual_slots = program.rtti().describe_slots(start);
     return fn;
 }
 
@@ -243,6 +244,7 @@ std::string to_text(const AnnotatedFunction& fn, bool with_bytes) {
     out += std::format("; range:    {:#x}-{:#x} ({} bytes, {} instructions, {} blocks, {} loops)\n", fn.start, fn.end,
                        fn.end - fn.start, fn.instruction_count, fn.block_count, fn.loop_count);
     if (!fn.callers.empty()) out += std::format("; callers:  {}\n", join(fn.callers, ", "));
+    for (const auto& v : fn.virtual_slots) out += std::format("; virtual:  {}\n", v);
     for (const auto& c : fn.callees)
         out += std::format("; calls:    {} = {}\n", c.display, c.detail.empty() ? c.name : c.detail);
     for (const auto& d : fn.data_refs)
@@ -275,6 +277,7 @@ Json to_json(const AnnotatedFunction& fn) {
     j["blocks"] = fn.block_count;
     j["loops"] = fn.loop_count;
     j["callers"] = fn.callers;
+    j["virtual_slots"] = fn.virtual_slots;
     auto refs = [](const std::vector<Reference>& list) {
         Json arr = Json::array();
         for (const auto& r : list)

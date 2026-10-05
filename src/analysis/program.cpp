@@ -149,7 +149,23 @@ Result<Program> Program::open(const std::filesystem::path& binary, const OpenOpt
         log::debug("map: {} symbols from '{}'", named, fs::to_utf8(*options.map));
     }
     if (options.discover && p.pdb_status_ != PdbStatus::matched) p.add_discovered_functions();
+    if (options.discover) add_rtti_symbols(p.symbols_, p.rtti(), p.arch());
     return p;
+}
+
+const RttiInfo& Program::rtti() const {
+    std::call_once(*rtti_once_, [this] {
+        auto info = std::make_unique<RttiInfo>(find_rtti(*image_));
+        // A slot that holds an incremental-linking thunk stands for the function behind it.
+        std::multimap<u64, VirtualSlot> slots;
+        for (const auto& [fn, slot] : info->slots) {
+            const auto through = linker_thunk_target(fn);
+            slots.emplace(through && symbols_.at(*through) && symbols_.at(*through)->kind == SymbolKind::function ? *through : fn, slot);
+        }
+        info->slots = std::move(slots);
+        rtti_ = std::move(info);
+    });
+    return *rtti_;
 }
 
 Result<usize> Program::add_map(const std::filesystem::path& map_path) {

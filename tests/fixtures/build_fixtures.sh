@@ -38,9 +38,20 @@ build_idioms() {
     rm -f "$arch/idioms.obj" "$arch/idioms.lib"
 }
 
+# C++ classes compiled with RTTI (src/rtti.cpp): the image and its PDB, whose names are the truth for
+# the class names, vftables and RTTI structures found in the image alone.
+build_rtti() {
+    local arch=$1 target=$2 type_info=$3
+    "$CLANG_CL" --target="$target" /nologo /O2 /Gy /GS- /GR /EHs-c- /Zl /Z7 /Brepro -c src/rtti.cpp "/Fo$arch/rtti.obj"
+    lld-link "${LDFLAGS[@]}" "/alternatename:??_7type_info@@6B@=$type_info" "/out:$arch/rtti.exe" "/pdb:$arch/rtti.pdb" "$arch/rtti.obj"
+    rm -f "$arch/rtti.obj" "$arch/rtti.lib"
+}
+
 build_arch x86 i686-pc-windows-msvc
 build_arch x64 x86_64-pc-windows-msvc
 CLANG=${CLANG:-$(command -v clang || echo /usr/lib/llvm-18/bin/clang)}
 build_idioms x86 i686-pc-windows-msvc /fixed /safeseh:no   # no relocations, as VC6 programs ship
 build_idioms x64 x86_64-pc-windows-msvc
+build_rtti x86 i686-pc-windows-msvc _rtti_type_info_vftable
+build_rtti x64 x86_64-pc-windows-msvc rtti_type_info_vftable
 echo "fixtures rebuilt"
