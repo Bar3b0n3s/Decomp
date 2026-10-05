@@ -567,7 +567,8 @@ private:
         u64 p = at + padding_length(image_, decoder_, at, next);
         while (p < next) {
             if (auto body = plausible(p)) {
-                add(p, FunctionEvidence::gap);
+                // Something holds its address: say so, though the gap found it first.
+                add(p, referenced(p) ? FunctionEvidence::address : FunctionEvidence::gap);
                 Fn& fn = fns_.at(p);
                 fn.body = std::move(*body);
                 fn.traced = true;
@@ -589,8 +590,25 @@ private:
         return added;
     }
 
+    // A code address held in data, a relocation or an instruction of a traced function.
+    bool referenced(u64 va) {
+        if (!options_.address_taken) return false;
+        if (!candidates_built_) {
+            build_address_candidates();
+            data_refs_ = candidates_;
+            candidates_built_ = true;
+        }
+        if (data_refs_.contains(va)) return true;
+        for (const auto& [start, fn] : fns_)
+            if (std::ranges::find(fn.body.code_refs, va) != fn.body.code_refs.end()) return true;
+        return false;
+    }
+
     bool add_address_taken() {
-        if (!candidates_built_) build_address_candidates();
+        if (!candidates_built_) {
+            build_address_candidates();
+            data_refs_ = candidates_;
+        }
         candidates_built_ = true;
         // Code addresses held in the operands of traced code.
         for (const auto& [start, fn] : fns_)
@@ -636,6 +654,7 @@ private:
     std::set<u64> noreturn_slots_;
     std::set<u64> rejected_;
     std::set<u64> candidates_;
+    std::set<u64> data_refs_;  // code addresses in data and relocations
     bool candidates_built_ = false;
     std::set<u64> table_starts_;  // every switch table (and byte table) found so far
     bool new_table_starts_ = false;

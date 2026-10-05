@@ -27,6 +27,20 @@ build_arch() {
     rm -f "$arch/basic_fixed.pdb" "$arch/basic.lib" "$arch/basic_fixed.lib"
 }
 
+# Hand-written code layouts (src/idioms_<arch>.s) for function discovery and switch tables: an
+# executable without a PDB, and its map file (every function f has a label f_end).
+build_idioms() {
+    local arch=$1 target=$2
+    shift 2
+    "$CLANG" --target="$target" -c "src/idioms_$arch.s" -o "$arch/idioms.obj"
+    lld-link /nologo /nodefaultlib /entry:entry /subsystem:console /Brepro "$@" \
+        "/out:$arch/idioms.exe" "/map:$arch/idioms.map" "$arch/idioms.obj" "$arch/kernel32.lib"
+    rm -f "$arch/idioms.obj" "$arch/idioms.lib"
+}
+
 build_arch x86 i686-pc-windows-msvc
 build_arch x64 x86_64-pc-windows-msvc
+CLANG=${CLANG:-$(command -v clang || echo /usr/lib/llvm-18/bin/clang)}
+build_idioms x86 i686-pc-windows-msvc /fixed /safeseh:no   # no relocations, as VC6 programs ship
+build_idioms x64 x86_64-pc-windows-msvc
 echo "fixtures rebuilt"

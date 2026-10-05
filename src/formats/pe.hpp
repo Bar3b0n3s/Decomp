@@ -76,6 +76,9 @@ struct RuntimeFunction {
     u32 begin_rva = 0;
     u32 end_rva = 0;
     u32 unwind_rva = 0;
+    // The unwind data continues another entry's (UNW_FLAG_CHAININFO): the begin RVA of the entry the
+    // chain starts from, so this range is part of that function. 0 for a function's own entry.
+    u32 chained_to = 0;
 };
 
 class Image final : public BinaryImage {

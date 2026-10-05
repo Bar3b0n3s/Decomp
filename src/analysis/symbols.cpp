@@ -6,6 +6,7 @@
 #include "formats/pe.hpp"
 
 #include <algorithm>
+#include <map>
 #include <format>
 
 namespace decomp {
@@ -152,6 +153,12 @@ const Symbol* SymbolDb::next_function_after(u64 va) const {
 
 namespace {
 
+struct RuntimeFunctionRange {
+    u32 root = 0;  // begin of the function the entry belongs to
+    u32 begin = 0;
+    u32 end = 0;
+};
+
 SymbolKind kind_for_public(const pdb::PublicSymbol& p) {
     if (p.is_function) return SymbolKind::function;
     if (is_string_literal_symbol(p.name)) return SymbolKind::string;
@@ -227,12 +234,23 @@ SymbolDb SymbolDb::from_pe(const pe::Image& image, const pdb::Reader* pdb) {
             db.add(std::move(s));
         }
     }
-    // x64 unwind data gives exact bounds for functions that have no symbol.
-    for (const auto& f : image.runtime_functions()) {
-        u64 va = base + f.begin_rva;
+    // x64 unwind data gives exact bounds for functions that have no symbol. An entry chained to another
+    // is part of that function: it extends the function when it follows on directly (a function whose
+    // unwind data the compiler split), and is not a function of its own otherwise (code moved away).
+    std::map<u32, u32> ends;  // function begin RVA -> end RVA
+    for (const auto& f : image.runtime_functions())
+        if (!f.chained_to) ends.try_emplace(f.begin_rva, f.end_rva);
+    std::vector<RuntimeFunctionRange> chained;
+    for (const auto& f : image.runtime_functions())
+        if (f.chained_to) chained.push_back({f.chained_to, f.begin_rva, f.end_rva});
+    std::ranges::sort(chained, {}, &RuntimeFunctionRange::begin);
+    for (const auto& c : chained)
+        if (auto it = ends.find(c.root); it != ends.end() && c.begin == it->second) it->second = c.end;
+    for (const auto& [begin, end] : ends) {
+        const u64 va = base + begin;
         Symbol s;
         s.va = va;
-        s.size = f.end_rva - f.begin_rva;
+        s.size = end - begin;
         s.kind = SymbolKind::function;
         s.source = SymbolSource::analysis;
         if (!db.at(va)) s.name = std::format("sub_{:x}", va);

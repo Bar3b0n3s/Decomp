@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <format>
+#include <map>
 
 using namespace decomp;
 
@@ -224,4 +225,111 @@ TEST_CASE("a map file as ground truth gives starts; ends are checked against the
     CHECK(truth.front().end == 0);
     const auto c = compare_bounds(truth, function_bounds(bare.symbols(), bare.image()), bare.image(), bare.decoder());
     CHECK(c.exact == functions);
+}
+
+namespace {
+
+// The idiom fixtures' functions: every function f has a label f_end in the map file.
+std::vector<FunctionBounds> idiom_truth(const char* arch) {
+    const auto m = map::load(test::fixture(std::string(arch) + "/idioms.map")).value();
+    std::map<std::string, u64> by_name;
+    for (const auto& e : m.entries) by_name[e.name] = e.va;
+    std::vector<FunctionBounds> out;
+    for (const auto& [name, va] : by_name)
+        if (auto end = by_name.find(name + "_end"); end != by_name.end()) out.push_back({va, end->second, name});
+    std::ranges::sort(out, {}, &FunctionBounds::start);
+    return out;
+}
+
+u64 idiom(const std::vector<FunctionBounds>& truth, std::string_view name) {
+    auto it = std::ranges::find(truth, name, &FunctionBounds::name);
+    REQUIRE(it != truth.end());
+    return it->start;
+}
+
+} // namespace
+
+TEST_CASE("discovery on MSVC and VC6 code layouts: tables after the code, byte tables, calls that do not return, tail calls") {
+    for (const char* arch : {"x86", "x64"}) {
+        CAPTURE(arch);
+        const Program p = Program::open(test::fixture(std::string(arch) + "/idioms.exe")).value();
+        const auto truth = idiom_truth(arch);
+        REQUIRE(truth.size() == (std::string_view(arch) == "x86" ? 10u : 8u));
+        const auto c = compare_bounds(truth, function_bounds(p.symbols(), p.image()), p.image(), p.decoder());
+        for (const auto& m : c.mismatches) MESSAGE(to_string(m.kind), " ", m.name, " found end ", m.found_end, " truth end ", m.truth_end);
+        CHECK(c.exact == truth.size());
+        CHECK(c.extra == 0);
+    }
+    // The x86 fixture has no relocations: the callback is found through the pointer to it in the data.
+    const Program x86 = Program::open(test::fixture("x86/idioms.exe")).value();
+    CHECK_FALSE(x86.image().has_relocations());
+    const auto truth = idiom_truth("x86");
+    const auto found = discover_functions(x86.image(), x86.decoder(), SymbolDb::from_pe(x86.image()));
+    auto evidence = [&](std::string_view name) {
+        auto f = std::ranges::find(found.functions, idiom(truth, name), &DiscoveredFunction::start);
+        REQUIRE(f != found.functions.end());
+        return f->evidence;
+    };
+    CHECK(evidence("_callback") == FunctionEvidence::address);
+    CHECK(evidence("_tail_target") == FunctionEvidence::tail_jump);
+    CHECK(evidence("_unreferenced") == FunctionEvidence::gap);
+    CHECK(evidence("_switch_one_level") == FunctionEvidence::call);
+    auto helper = std::ranges::find(found.functions, idiom(truth, "_exit_helper"), &DiscoveredFunction::start);
+    REQUIRE(helper != found.functions.end());
+    CHECK(helper->noreturn);
+}
+
+TEST_CASE("switch tables: the bound from the check, tables after the code, byte index tables, RVA entries") {
+    struct Case {
+        const char* arch;
+        const char* one;
+        const char* two;
+        TableEncoding encoding;
+    };
+    for (const Case& k : {Case{"x86", "_switch_one_level", "_switch_two_level", TableEncoding::absolute},
+                          Case{"x64", "switch_rva", "switch_rva_two_level", TableEncoding::rva}}) {
+        CAPTURE(k.arch);
+        const Program p = Program::open(test::fixture(std::string(k.arch) + "/idioms.exe")).value();
+        const auto truth = idiom_truth(k.arch);
+
+        const auto one = p.function_extent(idiom(truth, k.one)).value();
+        REQUIRE(one.jump_tables.size() == 1);
+        const JumpTable& t = one.jump_tables[0];
+        CHECK(t.encoding == k.encoding);
+        CHECK(t.bounded);
+        CHECK(t.targets.size() == 5);
+        CHECK(t.inside_code);
+        CHECK(t.index_entries == 0);
+        // The table is data at the end of the function, not instructions.
+        REQUIRE(one.data_ranges.size() == 1);
+        CHECK(one.data_ranges[0] == std::pair{t.table_va, t.table_va + 5 * 4});
+        CHECK(one.data_ranges[0].second == one.end);
+
+        const auto two = p.function_extent(idiom(truth, k.two)).value();
+        REQUIRE(two.jump_tables.size() == 1);
+        const JumpTable& u = two.jump_tables[0];
+        CHECK(u.bounded);
+        CHECK(u.targets.size() == 4);
+        CHECK(u.index_entries == 10);
+        CHECK(u.index_va == u.table_va + 16);
+        CHECK(two.data_ranges.size() == 2);
+        CHECK(two.end == u.index_va + 10);
+        // The instructions skip the tables.
+        const auto list = p.function_instructions(two).value();
+        CHECK(std::ranges::none_of(list, [&](const x86::Instruction& ins) { return ins.address >= u.table_va; }));
+    }
+}
+
+TEST_CASE("x64 unwind data split into a chained entry is one function") {
+    const Program p = Program::open(test::fixture("x64/idioms.exe")).value();
+    const auto truth = idiom_truth("x64");
+    const u64 chained = idiom(truth, "chained");
+    const auto& runtime = p.image().runtime_functions();
+    const auto part = std::ranges::find_if(runtime, [&](const pe::RuntimeFunction& f) { return f.chained_to != 0; });
+    REQUIRE(part != runtime.end());
+    CHECK(p.image().image_base() + part->chained_to == chained);
+    const Symbol* s = p.symbols().at(chained);
+    REQUIRE(s);
+    CHECK(s->size == 20);
+    CHECK_FALSE(p.symbols().at(p.image().image_base() + part->begin_rva));
 }

@@ -3,6 +3,7 @@
 #include "core/fs.hpp"
 
 #include <algorithm>
+#include <map>
 #include <format>
 
 namespace decomp::pe {
@@ -309,6 +310,36 @@ Result<void> Image::parse_pdata(u32 rva, u32 size) {
                           read_le<u32>(d, *off + 8).value_or(0)};
         if (f.begin_rva == 0 && f.end_rva == 0) break;
         runtime_functions_.push_back(f);
+    }
+    // Chained unwind data: the entry's UNWIND_INFO has UNW_FLAG_CHAININFO and ends with the
+    // RUNTIME_FUNCTION it continues (after the unwind codes, padded to an even count). Some linkers point
+    // UnwindData straight at that RUNTIME_FUNCTION instead, with the low bit set. Chains are followed to
+    // the entry they start from.
+    auto parent_of = [&](const RuntimeFunction& f) -> std::optional<u32> {
+        if (f.unwind_rva & 1) {
+            auto off = rva_to_offset(f.unwind_rva & ~1u);
+            if (!off) return std::nullopt;
+            return read_le<u32>(d, *off).value_or(0);
+        }
+        auto off = rva_to_offset(f.unwind_rva);
+        if (!off) return std::nullopt;
+        const u8 version_flags = read_le<u8>(d, *off).value_or(0);
+        const u8 codes = read_le<u8>(d, *off + 2).value_or(0);
+        if ((version_flags >> 3) != 0x4) return std::nullopt;  // flags == UNW_FLAG_CHAININFO
+        const u32 chained = *off + 4 + 2 * ((codes + 1u) & ~1u);
+        return read_le<u32>(d, chained).value_or(0);
+    };
+    std::map<u32, u32> parent;  // begin -> begin of the entry it continues
+    for (const auto& f : runtime_functions_)
+        if (auto p = parent_of(f); p && *p && *p != f.begin_rva) parent[f.begin_rva] = *p;
+    for (auto& f : runtime_functions_) {
+        u32 root = f.begin_rva;
+        for (int hop = 0; hop < 32; ++hop) {
+            auto it = parent.find(root);
+            if (it == parent.end()) break;
+            root = it->second;
+        }
+        if (root != f.begin_rva) f.chained_to = root;
     }
     return {};
 }
