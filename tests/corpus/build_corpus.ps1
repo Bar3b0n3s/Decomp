@@ -1,6 +1,7 @@
 # Builds the function-bounds corpus with the real MSVC toolchain (cl.exe + link.exe from a developer
-# environment for -Arch) and measures the bounds Decomp finds without the PDB against the PDB and the
-# map file. See build_corpus.sh for the corpus itself.
+# environment for -Arch), checks that the image's Rich header identifies cl.exe's own version, and
+# measures the bounds Decomp finds without the PDB against the PDB and the map file. See
+# build_corpus.sh for the corpus itself.
 #
 #   tests\corpus\build_corpus.ps1 -Arch x86 [-MinExact 95]
 param([ValidateSet("x86", "x64")][string]$Arch = "x64", [double]$MinExact = 95)
@@ -30,6 +31,19 @@ foreach ($src in $sources) {
 if ($LASTEXITCODE -ne 0) { throw "link.exe failed" }
 
 & $decomp info "$out\corpus.exe"
+if ($LASTEXITCODE -ne 0) { throw "decomp info failed" }
+
+# The Rich header names the compiler that built the corpus: the version cl.exe itself reports.
+$banner = cmd /c "cl.exe 2>&1" | Out-String
+if ($banner -notmatch 'Version (\d+\.\d+\.\d+)') { throw "cannot read cl.exe's version from: $banner" }
+$clVersion = $Matches[1]
+$info = & $decomp --json info "$out\corpus.exe" | Out-String | ConvertFrom-Json
+$main = $info.build.main_compiler
+if (-not $main) { throw "the corpus's Rich header names no compiler" }
+Write-Host "cl.exe $clVersion; the Rich header says $($main.description) ($($main.visual_studio))"
+if ($main.version -ne $clVersion) { throw "the Rich header's compiler version $($main.version) is not cl.exe's $clVersion" }
+if (-not $info.build.checksum_ok) { throw "the corpus's Rich header checksum does not match" }
+
 $failed = $false
 foreach ($truth in "corpus.pdb", "corpus.map") {
     & $decomp bounds "$out\corpus.exe" --truth "$out\$truth" --errors 60 --min-exact $MinExact

@@ -2,23 +2,30 @@
 
 #include "core/fs.hpp"
 #include "core/hash.hpp"
+#include "matching/suggest.hpp"
 
 #include <algorithm>
 #include <format>
 
 namespace decomp::vm {
 
-std::vector<RichBuild> rich_builds(const std::vector<pe::RichEntry>& entries) {
+std::vector<RichBuild> rich_builds(const std::vector<pe::RichEntry>& entries, u8 linker_major, u8 linker_minor) {
     std::vector<RichBuild> out;
-    for (const auto& e : entries) {
+    for (const auto& tool : pe::build_tools(pe::RichHeader{.entries = entries}, linker_major, linker_minor)) {
         RichBuild b;
-        b.product_id = e.product_id;
-        b.build = e.build;
-        b.count = e.count;
-        if (auto d = pe::describe_rich_product(e.product_id)) b.description = *d;
-        else b.description = std::format("product {:#06x}", e.product_id);
-        if (b.description.find("compiler") != std::string::npos) b.role = RichBuild::Role::compiler;
-        else if (b.description.starts_with("linker")) b.role = RichBuild::Role::linker;
+        b.product_id = tool.entry.product_id;
+        b.build = tool.entry.build;
+        b.count = tool.entry.count;
+        b.description = pe::describe_rich_product(tool.entry.product_id);
+        const pe::RichTool kind = tool.product ? tool.product->tool : pe::RichTool::unknown;
+        if (tool.product && kind != pe::RichTool::imports && kind != pe::RichTool::unmarked) {
+            b.version = tool.version.text();
+            b.visual_studio = tool.version.visual_studio;
+        }
+        b.text = tool.description();
+        if (!b.visual_studio.empty()) b.text += std::format(" ({})", b.visual_studio);
+        if (kind == pe::RichTool::compiler) b.role = RichBuild::Role::compiler;
+        else if (kind == pe::RichTool::linker) b.role = RichBuild::Role::linker;
         out.push_back(std::move(b));
     }
     std::ranges::stable_sort(out, {}, &RichBuild::role);
@@ -50,7 +57,15 @@ TargetIdentity target_identity(const Program& program, const project::TargetStat
     if (t.entry_point)
         if (const Symbol* s = program.symbols().at(t.entry_point)) t.entry_name = s->display.empty() ? s->name : s->display;
     t.linker_version = std::format("{}.{:02}", image.linker_major(), image.linker_minor());
-    t.rich = rich_builds(image.rich_entries());
+    t.rich = rich_builds(image.rich_entries(), image.linker_major(), image.linker_minor());
+    if (const auto build = image.build_info()) {
+        t.rich_checksum_ok = build->checksum_ok;
+        if (const auto s = matching::suggest_toolchain(*build)) {
+            t.built_with = s->visual_studio.empty() ? s->compiler : s->visual_studio + ": " + s->compiler;
+            t.suggested_toolchain = s->name;
+            t.build_notes = s->notes;
+        }
+    }
     if (program.pdb_path()) t.pdb_path = fs::to_utf8(program.pdb_path()->lexically_normal());
     if (const auto& cv = image.codeview()) {
         t.has_codeview = true;

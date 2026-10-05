@@ -46,18 +46,34 @@ TEST_CASE("dashboard: the target's identity") {
 }
 
 TEST_CASE("dashboard: Rich header entries by role") {
-    const std::vector<pe::RichEntry> entries = {{0x0001, 0, 30}, {0x0004, 8447, 1}, {0x000B, 8168, 12}, {0x00FF, 1, 2}, {0x000A, 8168, 3}};
+    const std::vector<pe::RichEntry> entries = {{0x0001, 0, 30}, {0x0004, 8447, 1}, {0x000B, 8168, 12}, {0x0200, 1, 2}, {0x000A, 8168, 3}};
     const auto builds = rich_builds(entries);
     REQUIRE(builds.size() == 5);
     CHECK(builds[0].role == RichBuild::Role::compiler);
-    CHECK(builds[0].description == "C++ compiler 12.00 (VC6)");
+    CHECK(builds[0].description == "C++ compiler 12.00 (Visual C++ 6.0)");
+    CHECK(builds[0].version == "12.00.8168");
+    CHECK(builds[0].visual_studio == "Visual C++ 6.0");
+    CHECK(builds[0].text == "C++ compiler 12.00.8168 (Visual C++ 6.0)");
     CHECK(builds[0].build == 8168);
     CHECK(builds[0].count == 12);
-    CHECK(builds[1].description == "C compiler 12.00 (VC6)");
+    CHECK(builds[1].description == "C compiler 12.00 (Visual C++ 6.0)");
     CHECK(builds[2].role == RichBuild::Role::linker);
-    CHECK(builds[2].description == "linker 6.00 (VC6)");
+    CHECK(builds[2].description == "linker 6.00 (Visual C++ 6.0)");
     CHECK(builds[3].role == RichBuild::Role::other);  // import entries
-    CHECK(builds[4].description == "product 0x00ff");
+    CHECK(builds[3].description == "imported functions");
+    CHECK(builds[3].version.empty());
+    CHECK(builds[4].description == "product 0x0200");
+    CHECK(builds[4].text == "product 0x0200 build 1");
+
+    // Visual Studio 2015 and later: the image's linker version (14.xx) gives the minor version of the
+    // tools that share the linker's build.
+    const std::vector<pe::RichEntry> modern = {{0x0101, 36231, 40}, {0x00FE, 36231, 1}, {0x0101, 30159, 3}};
+    const auto v = rich_builds(modern, 14, 51);
+    CHECK(v[0].version == "19.51.36231");
+    CHECK(v[0].visual_studio == "Visual Studio 2026");
+    CHECK(v[1].version == "19.29.30159");
+    CHECK(v[1].visual_studio == "Visual Studio 2019 16.11");
+    CHECK(v[2].version == "14.51.36231");
 }
 
 TEST_CASE("dashboard: spend of the shown run and of every run") {

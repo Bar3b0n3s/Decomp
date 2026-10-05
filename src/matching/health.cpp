@@ -4,6 +4,7 @@
 #include "core/process.hpp"
 #include "core/strings.hpp"
 #include "formats/coff.hpp"
+#include "formats/rich.hpp"
 
 #include <format>
 
@@ -52,6 +53,8 @@ Result<HealthReport> check_toolchain(const Toolchain& toolchain) {
             report.arch = obj->arch();
             report.functions = obj->function_symbols().size();
             report.object = std::format("COFF {} object, {} functions", to_string(obj->arch()), report.functions);
+            for (const auto& s : obj->symbols())
+                if (s.name == "@comp.id") report.comp_id = s.value;
         } else {
             report.ok = false;
             report.object = "not a COFF object (" + obj.error().message + ")";
@@ -62,7 +65,10 @@ Result<HealthReport> check_toolchain(const Toolchain& toolchain) {
 
 Json to_json(const HealthReport& r) {
     return {{"ok", r.ok}, {"command", r.command}, {"output", r.output}, {"duration_ms", r.duration.count()}, {"object", r.object},
-            {"arch", r.arch ? Json(std::string(to_string(*r.arch))) : Json(nullptr)}, {"functions", r.functions}, {"version", r.version}};
+            {"arch", r.arch ? Json(std::string(to_string(*r.arch))) : Json(nullptr)}, {"functions", r.functions}, {"version", r.version},
+            {"comp_id", r.comp_id ? Json(*r.comp_id) : Json(nullptr)},
+            {"compiler_id", r.comp_id ? Json(pe::describe_rich_product(static_cast<u16>(*r.comp_id >> 16)) + std::format(" build {}", *r.comp_id & 0xFFFF))
+                                      : Json(nullptr)}};
 }
 
 } // namespace decomp::matching

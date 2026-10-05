@@ -24,6 +24,9 @@ struct HealthReport {
     // The compiler's own version line ("Microsoft (R) 32-bit C/C++ Optimizing Compiler Version
     // 12.00.8804 for 80x86", "clang version 18.1.3 ..."); empty when it could not be read.
     std::string version;
+    // The object's @comp.id: (Rich product id << 16) | build, what the object adds to an image's Rich
+    // header. MSVC writes it; clang-cl does not.
+    std::optional<u32> comp_id;
 };
 
 // Asks the compiler for its version: cl.exe prints its banner when run without arguments, the others

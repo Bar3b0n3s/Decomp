@@ -5,10 +5,12 @@
 
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "gui/views/view_support.hpp"
 #include "gui/widgets.hpp"
 #include "gui/workspace.hpp"
 #include "matching/health.hpp"
 #include "matching/match.hpp"
+#include "matching/suggest.hpp"
 #include "matching/toolchain.hpp"
 #include "project/setup.hpp"
 #include "viewmodel/common.hpp"
@@ -36,6 +38,7 @@ struct Health {
     bool ok = false;
     std::string summary;  // or the error
     std::string version;  // the compiler's version line, when it could be read
+    std::optional<u32> comp_id;  // the probe object's compiler id (MSVC)
     std::string command, output;
     std::optional<vm::Notification> failure;  // what the notification center gets when it failed
 };
@@ -82,6 +85,15 @@ private:
             colored_text(ctx.colors().error, "Cannot read the toolchain registry: " + load_error_);
             return;
         }
+        // What the open project's target was built with, from its Rich header.
+        if (const auto build = target_build(ctx))
+            if (const auto s = matching::suggest_toolchain(*build)) {
+                ImGui::TextWrapped("The target was built with %s: %s.", s->visual_studio.c_str(), s->compiler.c_str());
+                if (!s->name.empty())
+                    ImGui::TextDisabled("A toolchain for that release is called \"%s\" in the docs%s.", s->name.c_str(),
+                                        registry_->find(s->name) ? " (configured here)" : " (not configured here)");
+                ImGui::Spacing();
+            }
         ImGui::TextDisabled("User registry: %s", fs::to_utf8(registry_->path()).c_str());
         if (ImGui::SmallButton("Reload")) {
             loaded_ = false;
@@ -163,6 +175,7 @@ private:
                 h.ok = report->ok;
                 h.summary = std::format("{} in {} ms: {}", report->ok ? "works" : "failed", report->duration.count(), report->object);
                 h.version = report->version;
+                h.comp_id = report->comp_id;
                 h.command = join_words(report->command);
                 h.output = report->output;
                 return h;
@@ -201,6 +214,15 @@ private:
         if (health_result_ && health_result_->toolchain == t.name) {
             colored_text(health_result_->ok ? ctx.colors().ok : ctx.colors().error, health_result_->summary);
             if (!health_result_->version.empty()) ImGui::TextWrapped("Version: %s", health_result_->version.c_str());
+            if (const auto build = target_build(ctx)) {
+                const matching::FitReport fit = matching::toolchain_fit(*build, health_result_->comp_id);
+                const ThemeColors& c = ctx.colors();
+                const ImVec4& color = fit.fit == matching::ToolchainFit::same_build     ? c.ok
+                                      : fit.fit == matching::ToolchainFit::same_release ? c.warn
+                                      : fit.fit == matching::ToolchainFit::other_release ? c.error
+                                                                                        : c.muted;
+                colored_text(color, "Target: " + fit.text);
+            }
             if (!health_result_->command.empty()) {
                 ImGui::PushFont(ctx.fonts.mono, 0.0f);
                 ImGui::TextWrapped("%s", health_result_->command.c_str());
@@ -208,6 +230,13 @@ private:
                 ImGui::PopFont();
             }
         }
+    }
+
+    // The open project's build information (nullopt without a project or a Rich header).
+    static std::optional<pe::BuildInfo> target_build(ViewContext& ctx) {
+        const ProjectAccess access = project_access(ctx);
+        if (!access.program) return std::nullopt;
+        return access.program->image().build_info();
     }
 
     void draw_compiles(ViewContext& ctx) {

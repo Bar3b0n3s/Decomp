@@ -145,8 +145,8 @@ Readers for binary formats, all built on `ByteReader` and returning `Result`:
 
 - `pe::Image`: PE32 and PE32+ headers and sections; RVA/VA/file-offset conversion; exports; imports
   mapped to IAT slots; base relocations; the CodeView record (`RSDS` with PDB path, GUID and age, or
-  `NB10`); Rich header decoding (product IDs, build numbers and counts, with descriptions for the
-  VC6-to-VS2005 product IDs it knows); x64 `.pdata` entries.
+  `NB10`); the Rich header (`formats/rich.hpp`, see [Compiler identification](#compiler-identification));
+  x64 `.pdata` entries, with chained unwind entries resolved to the function they continue.
 - `coff::Object`: regular and `/bigobj` objects; sections, including COMDAT selection and
   associativity from the section-definition auxiliary records; symbols and their auxiliary records;
   relocations; the string table.
@@ -156,9 +156,26 @@ Readers for binary formats, all built on `ByteReader` and returning `Result`:
   PDB 7.0 format used since Visual Studio .NET 2002 and by lld-link. VC6-era PDB 2.0 files (`NB10`)
   use an older container that it does not read, so such targets rely on exports, map files (Phase 2),
   user symbols and analysis.
+- `map::MapFile`: link maps in the link.exe format (also written by lld-link): sections, public and
+  static symbols with their object files and `f` (function) flags, the entry point and the timestamp.
 - `BinaryImage`: the interface the rest of the code uses (architecture, image base and size, entry
   point, sections, bytes at a VA, relocation lookup), so that ELF can be added in Phase 7 without
   touching analysis or matching.
+
+#### Compiler identification
+
+`parse_rich_header()` decodes the Rich header and checks its key against the checksum of the DOS
+header, the stub and the entries. `rich_product()` names each product ID of Microsoft's enumeration
+(`Utc12_CPP`, `Linker600`, `Masm614`, ...) with its tool, its version (12.00 for the VC6 compiler,
+6.00 for its linker), its language and variant (Standard edition, LTCG, PGO, CIL) and the Visual
+Studio release it came with. Visual Studio 2015 and later share product IDs (compilers 19.xx,
+linkers 14.xx): `tool_version()` tells them apart by build number (a table of each toolset's first
+build, from Visual Studio 2015 to 2022 17.14) or, for the tools that share the image linker's build,
+by the image's linker version, whose minor number is the toolset's (14.51 for compiler 19.51), so
+newer toolsets are identified too. `identify_build()` sums a header up as `BuildInfo`: compilers and
+assemblers by objects, the linker, imports, objects without a tool ID, and the compiler the image's own
+code most likely came from (`main_compiler()`). `matching::suggest_toolchain()` turns that into a
+toolchain suggestion ([matching.md](matching.md#choosing-the-toolchain)).
 
 ### arch/x86
 

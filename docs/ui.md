@@ -107,7 +107,11 @@ Each view lists what it **shows**, what the user can **do**, and its **data sour
     matches against the wrong binary; a project that records no SHA-1 shows it as unverified;
   - format (PE32 or PE32+), architecture, EXE or DLL, and the linker version; image base and entry
     point (a link to its function);
-  - the Rich header's compiler and linker builds (the other entries folded);
+  - what the target was built with: the compiler its own code came from, with its version and
+    Visual Studio release, the toolchain name for that release (a link to Toolchains and compiles)
+    and notes that matter for matching (an edition without an optimizer, LTCG, PGO, other compilers,
+    assembly objects); the Rich header's compiler and linker builds (the other entries folded), and a
+    warning when its checksum does not match;
   - PDB status: matching GUID and age, mismatch, absent, or unsupported format, with the PDB loaded
     and the debug record (path, GUID, age) the image carries.
 - Progress by code bytes and by number of functions, with the same figures and wording as
@@ -370,8 +374,9 @@ until the new one is ready.
 - A hex view per section with symbol overlays: functions, data, strings, floats, jump tables,
   relocations (underlined) and import slots, each color named in a legend; what starts on a row is
   written beside it. A selected byte shows what it belongs to and who references it.
-- Rich header entries: product, build, count and the compiler or linker they name (VC6 to Visual
-  Studio 2005 today; a complete table in Phase 2).
+- Rich header entries: product, build, count, the tool they name with its version and Visual Studio
+  release, and whether the checksum matches; below them, what the target was built with and the
+  notes of the toolchain suggestion.
 - PDB information: match state, the PDB loaded, the path the image records, GUID and age.
 
 **Actions**
@@ -494,8 +499,12 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
 - The registry: name, kind, compiler path, wrapper, flags, include directories and environment,
   for the user's toolchains and the detected clang-cl ones.
+- What the open project's target was built with (from its Rich header), and whether a toolchain for
+  that release is configured.
 - Health-check results: whether a probe compiles into a usable object, the command line and output,
-  and the compiler's version (cl.exe's banner, or `--version`).
+  the compiler's version (cl.exe's banner, or `--version`) and, for the open project, how the
+  toolchain fits the target's compiler: the same build, the same release with another build, another
+  release, or unknown (no compiler ID in the probe object, as with clang-cl).
 - The run's recent compiles (the last 200): time, function, toolchain, result, exit code, duration,
   cache hit, and for the selected one the full command line and output.
 
@@ -509,7 +518,8 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
 **Data sources**
 
-- `ToolchainRegistry`, `matching::check_toolchain` and `detect_version`.
+- `ToolchainRegistry`, `matching::check_toolchain` and `detect_version`; the target's
+  `pe::BuildInfo`, `matching::suggest_toolchain` and `matching::toolchain_fit`.
 - `compile_started` and `compile_finished` (toolchain, command line, exit code, output up to 4 KB,
   duration, cache hit), and the function's `attempts.jsonl` for a re-run.
 

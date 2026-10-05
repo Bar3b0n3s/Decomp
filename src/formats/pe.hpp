@@ -2,6 +2,7 @@
 
 #include "core/result.hpp"
 #include "formats/image.hpp"
+#include "formats/rich.hpp"
 
 #include <array>
 #include <filesystem>
@@ -54,12 +55,6 @@ struct Import {
 struct BaseRelocation {
     u32 rva = 0;
     u8 type = 0;  // IMAGE_REL_BASED_* (3 = HIGHLOW, 10 = DIR64)
-};
-
-struct RichEntry {
-    u16 product_id = 0;
-    u16 build = 0;
-    u32 count = 0;
 };
 
 struct CodeViewInfo {
@@ -118,7 +113,10 @@ public:
     const std::vector<Import>& imports() const { return imports_; }
     const std::vector<BaseRelocation>& base_relocations() const { return base_relocations_; }
     const std::optional<CodeViewInfo>& codeview() const { return codeview_; }
-    const std::vector<RichEntry>& rich_entries() const { return rich_entries_; }
+    const std::vector<RichEntry>& rich_entries() const;  // empty without a Rich header
+    const std::optional<RichHeader>& rich_header() const { return rich_; }
+    // How the image was built, from its Rich header (nullopt without one: not linked by link.exe).
+    std::optional<BuildInfo> build_info() const;
     const std::vector<RuntimeFunction>& runtime_functions() const { return runtime_functions_; }
     ByteSpan data() const { return data_; }
 
@@ -129,7 +127,6 @@ private:
     Result<void> parse_base_relocations(u32 rva, u32 size);
     Result<void> parse_debug_directory(u32 rva, u32 size);
     Result<void> parse_pdata(u32 rva, u32 size);
-    void parse_rich_header(u32 pe_offset);
     std::optional<std::string> read_cstring_rva(u32 rva) const;
 
     std::vector<std::byte> data_;
@@ -150,11 +147,8 @@ private:
     std::vector<Import> imports_;
     std::vector<BaseRelocation> base_relocations_;  // sorted by rva
     std::optional<CodeViewInfo> codeview_;
-    std::vector<RichEntry> rich_entries_;
+    std::optional<RichHeader> rich_;
     std::vector<RuntimeFunction> runtime_functions_;
 };
-
-// Human-readable Visual Studio name for a Rich-header product id (e.g. "VS2008 C++ compiler"), if known.
-std::optional<std::string> describe_rich_product(u16 product_id);
 
 } // namespace decomp::pe

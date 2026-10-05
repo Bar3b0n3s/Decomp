@@ -96,30 +96,49 @@ TEST_CASE("Rich header decoding") {
     data[0] = std::byte{'M'};
     data[1] = std::byte{'Z'};
     put32(0x3C, 0x100);
-    const u32 key = 0x1234ABCD;
-    put32(0x80, 0x536E6144u ^ key);  // DanS
-    put32(0x84, key);
-    put32(0x88, key);
-    put32(0x8C, key);
-    put32(0x90, ((0x000Bu << 16) | 8804) ^ key);  // VC6 C++ compiler, build 8804
-    put32(0x94, 12 ^ key);
-    put32(0x98, ((0x0004u << 16) | 8447) ^ key);  // linker 6.00
-    put32(0x9C, 1 ^ key);
-    put32(0xA0, 0x68636952u);  // "Rich"
-    put32(0xA4, key);
     put32(0x100, 0x00004550u);  // "PE\0\0"
     data[0x104] = std::byte{0x4C};  // machine i386
     data[0x105] = std::byte{0x01};
     data[0x114] = std::byte{0xE0};  // SizeOfOptionalHeader = 0xE0
     data[0x118] = std::byte{0x0B};  // PE32 magic
     data[0x119] = std::byte{0x01};
-    auto image = pe::Image::parse(std::move(data)).value();
+    data[0x11A] = std::byte{6};     // linker 6.00
+    const std::vector<pe::RichEntry> entries = {{0x000B, 8804, 12}, {0x0004, 8447, 1}};  // VC6 C++ compiler, linker 6.00
+    // The key is the checksum of the DOS header and stub before the header, and of the entries.
+    const u32 key = pe::rich_checksum(ByteSpan(data), 0x80, entries);
+    put32(0x80, 0x536E6144u ^ key);  // DanS
+    put32(0x84, key);
+    put32(0x88, key);
+    put32(0x8C, key);
+    for (usize i = 0; i < entries.size(); ++i) {
+        put32(0x90 + 8 * i, ((static_cast<u32>(entries[i].product_id) << 16) | entries[i].build) ^ key);
+        put32(0x94 + 8 * i, entries[i].count ^ key);
+    }
+    put32(0xA0, 0x68636952u);  // "Rich"
+    put32(0xA4, key);
+    auto image = pe::Image::parse(data).value();
     REQUIRE(image.rich_entries().size() == 2);
     CHECK(image.rich_entries()[0].product_id == 0x000B);
     CHECK(image.rich_entries()[0].build == 8804);
     CHECK(image.rich_entries()[0].count == 12);
     CHECK(image.rich_entries()[1].product_id == 0x0004);
-    CHECK(pe::describe_rich_product(0x000B) == "C++ compiler 12.00 (VC6)");
+    REQUIRE(image.rich_header());
+    CHECK(image.rich_header()->offset == 0x80);
+    CHECK(image.rich_header()->checksum_ok);
+    CHECK(pe::describe_rich_product(0x000B) == "C++ compiler 12.00 (Visual C++ 6.0)");
+    const auto build = image.build_info();
+    REQUIRE(build);
+    REQUIRE(build->main_compiler());
+    CHECK(build->main_compiler()->description() == "C++ compiler 12.00.8804");
+    REQUIRE(build->linker);
+    CHECK(build->linker->description() == "linker 6.00.8447");
+
+    // An entry changed after linking no longer matches the checksum.
+    put32(0x94, 13 ^ key);
+    auto edited = pe::Image::parse(std::move(data)).value();
+    REQUIRE(edited.rich_header());
+    CHECK_FALSE(edited.rich_header()->checksum_ok);
+    CHECK(edited.rich_entries()[0].count == 13);
 }
 
 TEST_CASE("PE parser rejects non-PE data") {

@@ -328,21 +328,34 @@ private:
         } else {
             ImGui::TextDisabled("none");
         }
+        row("Built with");
+        if (t.built_with.empty()) {
+            ImGui::TextDisabled(t.rich.empty() ? "unknown (no Rich header: not linked by Microsoft's linker)" : "unknown (the Rich header names no compiler)");
+        } else {
+            ImGui::TextWrapped("%s", t.built_with.c_str());
+            if (!t.suggested_toolchain.empty()) {
+                ImGui::TextDisabled("toolchain name for this release: %s", t.suggested_toolchain.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Toolchains")) ctx.open("toolchains");
+            }
+            for (const auto& note : t.build_notes) ImGui::BulletText("%s", note.c_str());
+        }
         row("Rich header");
         if (t.rich.empty()) {
-            ImGui::TextDisabled("none (no Rich header: not linked by Microsoft's linker)");
+            ImGui::TextDisabled("none (not linked by Microsoft's linker)");
         } else {
+            if (!t.rich_checksum_ok) colored_text(c.warn, "checksum mismatch: edited after linking");
             usize other = 0;
             for (const auto& r : t.rich) {
                 if (r.role == vm::RichBuild::Role::other) {
                     ++other;
                     continue;
                 }
-                ImGui::Text("%s, build %u (%u objects)", r.description.c_str(), r.build, r.count);
+                ImGui::Text("%s (%u objects)", r.text.c_str(), r.count);
             }
             if (other > 0 && ImGui::TreeNode("##rich_other", "%zu other entries", other)) {
                 for (const auto& r : t.rich)
-                    if (r.role == vm::RichBuild::Role::other) ImGui::BulletText("%s, build %u (%u)", r.description.c_str(), r.build, r.count);
+                    if (r.role == vm::RichBuild::Role::other) ImGui::BulletText("%s (%u)", r.text.c_str(), r.count);
                 ImGui::TreePop();
             }
         }

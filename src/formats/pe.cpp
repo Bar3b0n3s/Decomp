@@ -50,7 +50,7 @@ Result<void> Image::parse_headers() {
     auto pe_offset = read_le<u32>(d, 0x3C);
     if (!pe_offset || read_le<u32>(d, *pe_offset) != 0x00004550u)
         return make_error(ErrorCode::parse, "not a PE image (missing PE signature)");
-    parse_rich_header(*pe_offset);
+    rich_ = parse_rich_header(data_, *pe_offset);
 
     ByteReader r(d, *pe_offset + 4);
     TRY_ASSIGN(machine_, r.read<u16>());
@@ -344,54 +344,14 @@ Result<void> Image::parse_pdata(u32 rva, u32 size) {
     return {};
 }
 
-void Image::parse_rich_header(u32 pe_offset) {
-    // "Rich" marker followed by the XOR key, somewhere between the DOS stub and the PE header.
-    ByteSpan d = data_;
-    for (u32 pos = 0x40; pos + 8 <= pe_offset; pos += 4) {
-        if (read_le<u32>(d, pos) != 0x68636952u) continue;  // "Rich"
-        u32 key = read_le<u32>(d, pos + 4).value_or(0);
-        // Walk backwards to the XOR-ed "DanS" marker.
-        for (u32 start = pos; start >= 0x44; start -= 4) {
-            if ((read_le<u32>(d, start - 4).value_or(0) ^ key) != 0x536E6144u) continue;  // "DanS"
-            u32 first = start - 4 + 16;  // DanS + three zero padding dwords
-            for (u32 e = first; e + 8 <= pos; e += 8) {
-                u32 comp_id = read_le<u32>(d, e).value_or(0) ^ key;
-                u32 count = read_le<u32>(d, e + 4).value_or(0) ^ key;
-                rich_entries_.push_back({static_cast<u16>(comp_id >> 16), static_cast<u16>(comp_id & 0xFFFF), count});
-            }
-            return;
-        }
-        return;
-    }
+const std::vector<RichEntry>& Image::rich_entries() const {
+    static const std::vector<RichEntry> none;
+    return rich_ ? rich_->entries : none;
 }
 
-std::optional<std::string> describe_rich_product(u16 product_id) {
-    // Conservative subset of the well-documented product ids; Phase 2 extends this table.
-    switch (product_id) {
-    case 0x0001: return "import (link-time)";
-    case 0x0004: return "linker 6.00 (VC6)";
-    case 0x000A: return "C compiler 12.00 (VC6)";
-    case 0x000B: return "C++ compiler 12.00 (VC6)";
-    case 0x000E: return "MASM 6.13";
-    case 0x0015: return "C compiler 12.00 (VC6, standard)";
-    case 0x0016: return "C++ compiler 12.00 (VC6, standard)";
-    case 0x001C: return "C compiler 13.00 (VS2002)";
-    case 0x001D: return "C++ compiler 13.00 (VS2002)";
-    case 0x003D: return "linker 7.00 (VS2002)";
-    case 0x0040: return "MASM 7.00 (VS2002)";
-    case 0x005A: return "resource converter 7.10 (VS2003)";
-    case 0x005B: return "C compiler 13.10 (VS2003)";
-    case 0x005C: return "C++ compiler 13.10 (VS2003)";
-    case 0x0056: return "linker 7.10 (VS2003)";
-    case 0x0069: return "C compiler 14.00 (VS2005)";
-    case 0x006A: return "C++ compiler 14.00 (VS2005)";
-    case 0x006D: return "C compiler 14.00 LTCG (VS2005)";
-    case 0x006E: return "C++ compiler 14.00 LTCG (VS2005)";
-    case 0x0074: return "linker 8.00 (VS2005)";
-    case 0x0078: return "resource converter 8.00 (VS2005)";
-    case 0x0079: return "MASM 8.00 (VS2005)";
-    default: return std::nullopt;
-    }
+std::optional<BuildInfo> Image::build_info() const {
+    if (!rich_) return std::nullopt;
+    return identify_build(*rich_, linker_major_, linker_minor_);
 }
 
 } // namespace decomp::pe

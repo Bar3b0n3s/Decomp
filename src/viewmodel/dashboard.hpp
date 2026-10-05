@@ -23,11 +23,15 @@ struct RichBuild {
     u16 product_id = 0;
     u16 build = 0;
     u32 count = 0;
-    std::string description;  // pe::describe_rich_product(), or "product 0x00ff" when unknown
+    std::string description;    // pe::describe_rich_product(), or "product 0x00ff" when unknown
+    std::string version;        // "12.00.8804"; empty for unknown products, imports and unmarked objects
+    std::string visual_studio;  // "Visual C++ 6.0"
+    std::string text;           // the tool with its version and release: "C++ compiler 12.00.8804 (Visual C++ 6.0)"
     Role role = Role::other;
 };
-// Compilers first, then linkers, then the rest (each in header order).
-std::vector<RichBuild> rich_builds(const std::vector<pe::RichEntry>& entries);
+// Compilers first, then linkers, then the rest (each in header order). The image's linker version gives
+// the minor version of Visual Studio 2015-and-later tools (see pe::tool_version).
+std::vector<RichBuild> rich_builds(const std::vector<pe::RichEntry>& entries, u8 linker_major = 0, u8 linker_minor = 0);
 
 struct TargetIdentity {
     std::string path;     // the image file (UTF-8)
@@ -43,6 +47,10 @@ struct TargetIdentity {
     std::string entry_name;     // the symbol at the entry point, when there is one
     std::string linker_version; // from the optional header, "14.00"
     std::vector<RichBuild> rich;
+    bool rich_checksum_ok = true;
+    std::string built_with;           // "Visual C++ 6.0: C++ compiler 12.00.8804"; empty without a Rich header
+    std::string suggested_toolchain;  // the toolchain name for that release: "vc6"
+    std::vector<std::string> build_notes;  // matching::ToolchainSuggestion::notes
     PdbStatus pdb = PdbStatus::absent;
     std::string pdb_path;       // the PDB loaded or found (empty: none)
     std::string pdb_detail;     // why a PDB was ignored

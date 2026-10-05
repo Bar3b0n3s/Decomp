@@ -11,6 +11,7 @@
 #include "gui/views/view_support.hpp"
 #include "gui/widgets.hpp"
 #include "gui/workspace.hpp"
+#include "matching/suggest.hpp"
 #include "viewmodel/binary.hpp"
 #include "viewmodel/dashboard.hpp"
 
@@ -107,7 +108,7 @@ public:
                 case kExports: draw_exports(ctx, access); break;
                 case kStrings: draw_strings(ctx, access); break;
                 case kHex: draw_hex(ctx, access); break;
-                case kRich: draw_rich(access); break;
+                case kRich: draw_rich(ctx, access); break;
                 case kPdb: draw_pdb(ctx, access); break;
                 default: break;
                 }
@@ -611,14 +612,18 @@ private:
         draw_references(ctx, access, va);
     }
 
-    void draw_rich(const ProjectAccess& access) {
-        const auto builds = vm::rich_builds(access.program->image().rich_entries());
+    void draw_rich(ViewContext& ctx, const ProjectAccess& access) {
+        const pe::Image& image = access.program->image();
+        const auto builds = vm::rich_builds(image.rich_entries(), image.linker_major(), image.linker_minor());
         if (builds.empty()) {
             ImGui::TextDisabled("No Rich header (the image was not linked by Microsoft's linker).");
             return;
         }
-        if (!ImGui::BeginTable("##rich", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit)) return;
-        for (const char* h : {"Product", "Build", "Count", "Description"}) ImGui::TableSetupColumn(h);
+        const auto& header = image.rich_header();
+        if (header && !header->checksum_ok)
+            colored_text(ctx.colors().warn, "The checksum does not match: the header was edited after linking.");
+        if (!ImGui::BeginTable("##rich", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit)) return;
+        for (const char* h : {"Product", "Build", "Count", "Tool", "Version", "Release"}) ImGui::TableSetupColumn(h);
         ImGui::TableHeadersRow();
         for (const auto& b : builds) {
             ImGui::TableNextRow();
@@ -630,9 +635,18 @@ private:
             ImGui::Text("%u", b.count);
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(b.description.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(b.version.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(b.visual_studio.c_str());
         }
         ImGui::EndTable();
-        ImGui::TextDisabled("Compiler names for more product ids come with Phase 2.");
+        if (const auto build = image.build_info())
+            if (const auto s = matching::suggest_toolchain(*build)) {
+                ImGui::Spacing();
+                ImGui::TextWrapped("Built with %s: %s.", s->visual_studio.c_str(), s->compiler.c_str());
+                for (const auto& note : s->notes) ImGui::BulletText("%s", note.c_str());
+            }
     }
 
     void draw_pdb(ViewContext& ctx, const ProjectAccess& access) {

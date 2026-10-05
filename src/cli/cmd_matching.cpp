@@ -4,6 +4,7 @@
 #include "matching/diff.hpp"
 #include "matching/health.hpp"
 #include "matching/match.hpp"
+#include "matching/suggest.hpp"
 #include "matching/toolchain.hpp"
 #include "project/project.hpp"
 
@@ -70,9 +71,25 @@ void register_toolchain_commands(CLI::App& app, GlobalOptions& g) {
                 const auto* t = reg.find(*name);
                 if (!t) return make_error(ErrorCode::not_found, "unknown toolchain '{}'", *name);
                 TRY_ASSIGN(auto r, matching::check_toolchain(*t));
-                if (g.json) print_json(matching::to_json(r));
-                else std::println("{} {} ({} ms){}{}\n{}", r.ok ? "OK" : "FAILED", join(r.command, " "), r.duration.count(),
-                                  r.version.empty() ? "" : "\n  " + r.version, r.object.empty() ? "" : "\n  " + r.object, r.output);
+                // Inside a project, how the toolchain's compiler compares with the target's.
+                std::optional<matching::FitReport> fit;
+                if (auto project = project::Project::find(g.project)) {
+                    if (auto program = project->open_program(false))
+                        if (const auto build = program->image().build_info()) fit = matching::toolchain_fit(*build, r.comp_id);
+                }
+                if (g.json) {
+                    Json j = matching::to_json(r);
+                    j["target_fit"] = fit ? matching::to_json(*fit) : Json(nullptr);
+                    print_json(j);
+                } else {
+                    std::println("{} {} ({} ms){}{}", r.ok ? "OK" : "FAILED", join(r.command, " "), r.duration.count(),
+                                 r.version.empty() ? "" : "\n  " + r.version, r.object.empty() ? "" : "\n  " + r.object);
+                    if (r.comp_id)
+                        std::println("  compiler id {:#010x}: {} build {}", *r.comp_id, pe::describe_rich_product(static_cast<u16>(*r.comp_id >> 16)),
+                                     *r.comp_id & 0xFFFF);
+                    if (fit) std::println("  target      {}", fit->text);
+                    std::println("{}", r.output);
+                }
                 return r.ok ? 0 : 1;
             }));
         });

@@ -4,6 +4,7 @@
 #include "cli/common.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "matching/suggest.hpp"
 #include "project/project.hpp"
 
 #include <format>
@@ -37,9 +38,14 @@ Json info_json(const Program& p) {
     j["pdb_loaded"] = p.pdb_path() ? Json(p.pdb_path()->string()) : Json(nullptr);
     Json rich = Json::array();
     for (const auto& r : img.rich_entries())
-        rich.push_back({{"product_id", r.product_id}, {"build", r.build}, {"count", r.count},
-                        {"description", pe::describe_rich_product(r.product_id).value_or("")}});
+        rich.push_back({{"product_id", r.product_id}, {"build", r.build}, {"count", r.count}, {"description", pe::describe_rich_product(r.product_id)}});
     j["rich"] = rich;
+    j["build"] = nullptr;
+    j["suggested_toolchain"] = nullptr;
+    if (const auto build = img.build_info()) {
+        j["build"] = matching::to_json(*build);
+        if (const auto s = matching::suggest_toolchain(*build)) j["suggested_toolchain"] = matching::to_json(*s);
+    }
     usize functions = p.symbols().functions().size();
     j["symbols"] = p.symbols().size();
     j["functions"] = functions;
@@ -74,7 +80,18 @@ void register_analysis_commands(CLI::App& app, GlobalOptions& g) {
                 if (const auto& cv = img.codeview()) std::println("  codeview    {} {} age {}", cv->pdb_path, cv->guid_string(), cv->age);
                 std::println("  pdb         {}", p.pdb_path() ? p.pdb_path()->string() : std::string("(not loaded)"));
                 for (const auto& r : img.rich_entries())
-                    std::println("  rich        id {:#06x} build {:5} x{:<4} {}", r.product_id, r.build, r.count, pe::describe_rich_product(r.product_id).value_or("?"));
+                    std::println("  rich        id {:#06x} build {:5} x{:<4} {}", r.product_id, r.build, r.count, pe::describe_rich_product(r.product_id));
+                if (const auto build = img.build_info()) {
+                    if (!build->checksum_ok) std::println("  rich        the checksum does not match: edited after linking");
+                    if (const auto s = matching::suggest_toolchain(*build)) {
+                        std::println("  built with  {}: {}", s->visual_studio, s->compiler);
+                        if (build->linker) std::println("  linked by   {}", build->linker->description());
+                        if (!s->name.empty()) std::println("  toolchain   register it as \"{}\" (`decomp toolchain add {} --kind msvc ...`)", s->name, s->name);
+                        for (const auto& note : s->notes) std::println("  note        {}", note);
+                    }
+                } else {
+                    std::println("  rich        none (not linked by Microsoft's linker)");
+                }
                 std::println("  symbols     {} ({} functions)", p.symbols().size(), p.symbols().functions().size());
                 return 0;
             }));

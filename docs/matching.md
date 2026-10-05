@@ -429,14 +429,37 @@ followed by `call __chkstk` (the CRT routine is also known as `_alloca_probe`). 
 
 ### Rich header compiler IDs
 
-Images produced by Microsoft linkers usually carry a Rich header between the DOS stub and the PE
-header. It is XOR-masked and is located through its `Rich` and `DanS` markers. Each entry records a
-product ID, a build number and a count: which compiler front ends, linkers and assemblers built how
-many of the objects. That identifies the exact MSVC version and service pack, separately for C and
-C++ objects, and reveals objects built with link-time code generation. The slice decodes the entries,
-and `decomp info` shows them, with a description for the product IDs it knows (VC6 to Visual Studio
-2005). Phase 2 maps them to toolchain suggestions through a complete compiler table, and Phase 6
-probes candidate compilers when the header is absent.
+Images produced by Microsoft linkers (from Visual C++ 6.0 on) carry a Rich header between the DOS
+stub and the PE header. It is XOR-masked and is located through its `Rich` and `DanS` markers. Each
+entry records a product ID, a build number and a count: which compilers, assemblers, resource
+converters and linker made how many of the objects. The key is also a checksum of the DOS header and
+stub and of the entries, so an edited header shows. Decomp names every product ID of Microsoft's
+enumeration, from Visual C++ 5.0 to the Visual Studio 2015-and-later tools (which share their IDs),
+and turns each entry into a tool version and a Visual Studio release
+([architecture.md](architecture.md#compiler-identification)). `decomp info` lists the entries and
+what the image was built with; the Dashboard and the Binary explorer's Rich tab show the same.
+
+### Choosing the toolchain
+
+The compiler the target's own code came from decides which toolchain matches it. Decomp picks it
+from the Rich header: among the compilers of the linker's release, the newest build, because the
+runtime and SDK libraries linked into a program were often compiled with an older build of the same
+release (a VC6 game's C runtime objects can outnumber the game's own). The suggestion names the
+release the way the docs name toolchains (`vc6`, `vs2003`, `vs2019`) and notes what else matters for
+matching:
+
+- a Standard or Introductory edition compiler, which has no optimizer: the code is unoptimized
+  whatever flags were given;
+- objects compiled for link-time code generation (`/GL`) or optimized with a profile (PGO), whose code
+  the linker generated across objects;
+- other builds of the compiler (usually the runtime libraries), objects from other releases, assembly
+  objects, objects without a tool ID, and a checksum that does not match.
+
+A configured toolchain is compared with it through the `@comp.id` symbol that MSVC writes into every
+object: `decomp toolchain test` (and the GUI's health check) compiles a probe and reports the
+compiler ID it carries and, inside a project, whether it is the same build as the target's compiler,
+the same release with another build (a different service pack or update), or another release.
+clang-cl writes no compiler ID, so its fit is unknown.
 
 ### x64 `.pdata`
 
@@ -451,9 +474,9 @@ Comparing the unwind data itself (`.xdata`) belongs to data matching in Phase 5.
 
 Objects compiled with `/GL` contain intermediate code, and the machine code is generated at link time
 (`/LTCG`), where cross-function inlining and calling-convention changes happen. Per-function
-compile-and-diff cannot reproduce those decisions. The Rich header shows LTCG objects (`decomp info`
-labels the Visual Studio 2005 LTCG product IDs); a warning when the target contains them is planned.
-Targets built that way are out of scope for the slice.
+compile-and-diff cannot reproduce those decisions. The Rich header shows LTCG objects, and the
+toolchain suggestion warns about them ([Choosing the toolchain](#choosing-the-toolchain)). Targets
+built that way are out of scope for now.
 
 ## Driving compilers
 
@@ -473,8 +496,9 @@ file format and example entries for VC6, VS2008, clang-cl and Wine are in
 }`) in a temporary directory and prints `OK` or `FAILED`, the command line, the duration, whether the
 output parses as a COFF object (with its architecture and function count), and the compiler's output.
 It exits with 0 when the compile succeeded. A failed probe shows the compiler's own error, such as a
-DLL that is not on `PATH`. Recording the compiler's version banner (for example the
-`Version 12.00.8804` line of VC6's `cl.exe`) is planned.
+DLL that is not on `PATH`. It also prints the compiler's version banner (for example the
+`Version 12.00.8804` line of VC6's `cl.exe`), the probe object's compiler ID (`@comp.id`) and, inside
+a project, how the toolchain fits the target ([Choosing the toolchain](#choosing-the-toolchain)).
 
 ### Invocation
 
