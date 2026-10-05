@@ -340,7 +340,8 @@ the order of the `tool_use` blocks, whatever order they completed in.
 
 **Verification of `submit_result`.** For `outcome: "matched"`, Decomp compiles the submitted `source`
 again, diffs it (this counts as an attempt) and requires `byte_exact`. On success it writes the source
-to `src/functions/<fn>.cpp`, and the session ends without another request; the function becomes
+(into the function's unit source when it has one, see [Translation units](#translation-units), else
+to `src/functions/<fn>.cpp`), and the session ends without another request; the function becomes
 `matched` when the runner updates the project. On failure the model gets an `is_error` result
 containing the diff, and the loop continues. `give_up` ends the session; its `reason` (which may be
 empty) becomes the outcome detail.
@@ -407,6 +408,44 @@ long, and the API sends periodic pings, so silence means a dead connection. Ther
 request time, because long thinking turns are normal at high effort. Backoff waits go through an
 injectable sleep function, so tests never sleep.
 
+### Translation units
+
+When the function's translation unit has a source ([project-format.md](project-format.md#unit-sources)),
+the session works in it:
+
+- **Which unit.** The function's unit (its `obj=`), when that is a code unit with a source path and
+  the project trusts it: the unit comes from a PDB or a map, the user wrote it, or its source file
+  exists already. A unit that the analysis only guessed gets a source when `decomp units emit` (or the
+  user) starts it. Until then, its functions' matches go to their own files under `src/functions/`.
+- **The brief** gains a `# Translation unit` section. It names the unit, its source and the functions
+  that source holds, explains how candidates are composed, and shows the unit's prelude.
+- **`compile_and_diff`** composes the candidate into the unit source as it is on disk. The definition
+  joins the unit's functions in address order, with the `#pragma` and `#line` lines around it, and the
+  candidate's other items join the prelude unless the prelude has them already. Decomp then compiles
+  the whole unit under its file name (`basic.cpp`, so a `.c` unit compiles as C). Diagnostics point at
+  lines of the composed unit, so each one is followed by that line's text. A candidate without a
+  top-level definition of the function cannot join, and gets `unit: your source cannot join
+  src/basic.cpp: ...` without a compile. When other functions of the unit are not byte-exact with the
+  candidate in, the result names them: `unit: with your source in src/basic.cpp, 1 other function(s)
+  there are not byte-exact: add (match 62.5% ...)`.
+- **`submit_result`** requires the function to be byte-exact in the unit. Every function of the unit
+  that was byte-exact before (the unit source compiled without the candidate) must stay byte-exact;
+  otherwise the result is "not accepted: byte-exact itself, but with your source in src/basic.cpp
+  these functions of the unit are no longer byte-exact: add (...)".
+- **The approval** shows the whole unit source. The path is the unit's source, the content is the
+  unit with the function composed in, the previous content is the unit before the change, and the
+  summary reads "byte-exact read_counter joins src/basic.cpp (2 functions in it)".
+- **The write** replaces the unit source only if it still holds what the candidate was composed into.
+  If another session wrote it in between, the candidate is composed into the new content and verified
+  again (up to three times). A match that no longer holds is rejected: "not accepted: src/basic.cpp
+  changed while your match was being saved ...". The change in `.decomp/changes.jsonl` names the unit
+  and the function.
+- **History stays per function.** Attempts, `best.cpp` and notes keep the model's own source, not the
+  composed unit. The runner reports the unit source as the matched source.
+
+The GUI's Verify and save (manual mode) compiles and saves by the same rules
+(`project::compile_candidate()` and `project::save_verified_function()`).
+
 ## Tools
 
 Conventions shared by all tools:
@@ -432,7 +471,9 @@ Conventions shared by all tools:
 ### `compile_and_diff`
 
 Compiles a complete translation unit with the target's toolchain, flags and include directories,
-extracts the function being matched, and diffs it against the target ([matching.md](matching.md)).
+extracts the function being matched, and diffs it against the target ([matching.md](matching.md)). In a
+[translation unit](#translation-units), the candidate is first composed into the unit's source, and
+the whole unit is compiled.
 Every call is an attempt: it is recorded in `attempts.jsonl`, and an attempt that scores at least the
 best so far becomes `best.cpp`.
 
@@ -710,6 +751,8 @@ then, the first `request` record of every transcript contains the full text. It 
 4. *Output rules.* A complete, self-contained translation unit that declares everything it uses, with
    declarations that produce the decorated names shown in the brief (with examples of MSVC name
    decoration, `extern "C"` names and arrays). No inline assembly; only the headers the brief lists.
+   When the brief has a `# Translation unit` section, the source is composed into that unit's source,
+   and the section's rules apply.
 5. *Matching tips for MSVC and clang-cl.* Register allocation and instruction order follow declaration
    order, expression order, temporaries and scope; stack offset differences point to local variable
    order, size or type; signedness and width change instructions; an inverted branch means swapped
@@ -753,12 +796,20 @@ project headers available: (none)
 # Callers
 int __cdecl dispatch(int, int), entry
 
-Write a complete candidate translation unit and call compile_and_diff.
+# Translation unit
+This function belongs to the unit basic.obj (12 functions). Its source will be src/basic.cpp (C++): no function of the unit is matched yet, so yours starts it.
+Your source is composed into it: your definition of the function joins the unit's functions in address order (with the #pragma lines around it), and your other declarations, types and data join the unit's prelude unless it has them already. compile_and_diff compiles the whole unit that way, and submit_result also checks that the unit's other functions stay byte-exact. Define the function at the top level of your source, not inside a class or namespace block; do not define the prelude's types differently.
+
+Write a candidate with the function and what the unit's prelude lacks, and call compile_and_diff.
 ````
 
-The listing is cut to 400 lines. Initial bytes are shown for data symbols of up to 64 bytes. When the
-project has history for the function, an `# Earlier attempts` section follows the callers: the number
-of earlier attempts and the best score, the notes, and the best source so far.
+The listing is cut to 400 lines. Initial bytes are shown for data symbols of up to 64 bytes. The
+`# Translation unit` section appears when the session works in the function's
+[unit](#translation-units). Once the unit's source holds functions, the section lists them and shows
+the unit's prelude (up to 200 lines) in a code block. For a C unit, the section adds "write C, not
+C++". Without a unit, the last line asks for "a complete candidate translation unit". When the project
+has history for the function, an `# Earlier attempts` section follows: the number of earlier attempts
+and the best score, the notes, and the best source so far.
 
 **Status line and nudges.** These are appended as text blocks ([rules](#the-append-only-conversation))
 and never removed. A status line, a nudge, and guidance as the model sees them:
@@ -814,7 +865,7 @@ the session's own retry delay. Waits end early on Abort. Each change is publishe
 ### Approvals
 
 Some actions can need the supervisor's approval. The one gated action is `write_source`: saving a
-verified match to `src/functions/`. Each action has a policy:
+verified match into its unit's source or to `src/functions/`. Each action has a policy:
 
 | Policy | Effect |
 |---|---|
@@ -922,9 +973,10 @@ roll up per turn (`turn_finished` events), per session (the outcome, `summary.js
 - **Compiled, never executed.** No tool runs target or candidate code. Decomp contains no emulator
   and never launches the target.
 - **Writes are confined to the project.** The agent has no general file-writing tool. Decomp itself
-  writes only to `src/functions/<fn>.cpp` (verified sources), `symbols.txt` (statuses, scores and
-  spend) and `.decomp/` (history, runs, build directories, cache). Paths come from sanitized function
-  keys, never from model output.
+  writes only to unit sources (`src/<unit>.cpp`, at the paths `units.txt` gives) and
+  `src/functions/<fn>.cpp` (verified sources), `symbols.txt` (statuses, scores and spend) and
+  `.decomp/` (history, runs, build directories, cache). Paths come from `units.txt` and sanitized
+  function keys, never from model output.
 - **Compiler inputs are checked (planned).** Each candidate compiles in a fresh directory. Rejecting
   `#include` directives with absolute paths or `..` escapes outside the configured include directories,
   as well as MSVC `#import`, is planned; until then a candidate could pull local files into
@@ -993,7 +1045,7 @@ The API key is the one setting that never lives in a file: it comes from `ANTHRO
    aborted.
 4. Check the results:
    - `decomp status`;
-   - the source in `src/functions/`;
+   - the source: in its unit's source (`src/basic.cpp` for the fixture), or in `src/functions/`;
    - the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl`, where the `response` records
      should show `cache_read_input_tokens` greater than zero from the second turn.
 
@@ -1034,12 +1086,15 @@ All agent tests run without a network or a key:
 - Scripted sessions:
   - `tests/replay/agent_match_add.jsonl` matches `add` in the x86 fixture with clang-cl: two lookups in
     parallel, a wrong attempt, its diff, a corrected attempt, `submit_result`, `matched`. The CI smoke
-    test and the Windows MSVC round trip run it through `decomp agent`.
+    test and the Windows MSVC round trip run it through `decomp agent`, and check with `decomp units
+    verify` that the unit source it starts verifies.
   - `tests/replay/agent_session_sum_array.jsonl` drives the loop with stub tools: thinking with
     signatures, two parallel read-only calls, a 429 with `retry-after`, two compiles, a turn that ends
     without a tool call (nudged), and `submit_result`.
   - The unit tests script further sessions in code: a wrong source, its diff, a corrected source and
     `submit_result` with real clang-cl compiles (`matched`, and the source written to the project), a
+    session in a unit (the brief's section, a candidate that breaks another function of the unit and
+    is refused, a candidate that cannot join, the unit source written), a
     refusal (`refused`, no tools run), budget exhaustion (`budget_exhausted`), supervisor guidance
     injected mid-run (the history stays append-only), a stop between turns, pause, resume and abort, a
     mid-output fallback, a tool call cut off at `max_tokens`, invalid and schema-invalid tool input,

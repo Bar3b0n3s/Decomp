@@ -77,6 +77,14 @@ struct SymbolChange {
     std::optional<Symbol> before, after;
 };
 
+// What a recorded write is about: the function it was made for, its unit, every function it touches.
+struct ChangeSubject {
+    std::string function;
+    u64 va = 0;
+    std::string unit;
+    std::vector<u64> functions;
+};
+
 // A file the project wrote, with what it replaced (kept in .decomp/blobs/ so it can be restored).
 struct WriteReceipt {
     std::filesystem::path path;
@@ -161,6 +169,13 @@ public:
     // Writes the verified source to src/functions/; the previous content is kept as a blob and the
     // write is recorded in .decomp/changes.jsonl.
     Result<WriteReceipt> write_matched_source(const Symbol& fn, const std::string& source, const ChangeOrigin& origin = {}) const;
+    // Writes `content` to the project file at `relative` (under the project root), or removes the file
+    // when `content` is nullopt. The replaced content is kept in .decomp/blobs/ and the change recorded
+    // in .decomp/changes.jsonl, so revert_change() can undo it. With `expected`, the file must hold that
+    // content (empty: the file is absent or empty) or the write fails with ErrorCode::conflict.
+    Result<WriteReceipt> write_project_file(const std::filesystem::path& relative, const std::optional<std::string>& content,
+                                            const ChangeOrigin& origin, const ChangeSubject& subject = {},
+                                            const std::optional<std::string>& expected = std::nullopt) const;
     // Content kept for a replaced file (see WriteReceipt::previous_sha1).
     Result<std::string> read_blob(const std::string& sha1) const;
     // Undoes a write recorded in changes.jsonl (one of changes()): restores the content it replaced, or
@@ -194,6 +209,9 @@ private:
 
 // "Player::Hit" at 0x401000 -> "Player__Hit_401000" (stable, filesystem-safe, unique per address).
 std::string safe_function_name(const Symbol& fn);
+// Whether write_project_file() and revert_change() may write a path: relative, inside the project once
+// `..` is resolved, and not under .decomp/.
+bool writable_project_path(const std::filesystem::path& relative);
 
 // symbols.txt line codec (exposed for tests).
 std::string format_symbol_line(const Symbol& s, const FunctionInfo* info);

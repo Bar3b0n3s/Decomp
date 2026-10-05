@@ -13,6 +13,9 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <map>
+#include <set>
 
 using namespace decomp;
 
@@ -97,6 +100,57 @@ TEST_CASE("units.txt lines") {
     CHECK_FALSE(project::parse_unit_line("a.obj kind=bogus"));
     CHECK_FALSE(project::parse_unit_line("a.obj color=red"));
     CHECK_FALSE(project::parse_unit_line("a.obj source"));
+    // Sources stay C and C++ files under src/: sessions write them.
+    for (const char* good : {"src/a.c", "src/game/player.cpp", "src/x.CC", "src/my file.cxx"}) {
+        CAPTURE(good);
+        CHECK(project::valid_unit_source(good));
+    }
+    for (const char* bad : {"a.cpp", "src/../decomp.json", "src/a/../../x.cpp", "src/./a.cpp", "src//a.cpp", "/src/a.cpp", "src\\a.cpp",
+                            "C:/src/a.cpp", "src/a.h", "src/a", "src/functions/add_401060.cpp", "src/a.cpp/"}) {
+        CAPTURE(bad);
+        CHECK_FALSE(project::valid_unit_source(bad));
+    }
+    const auto escaping = project::parse_unit_line("a.obj source=src/../../etc/a.cpp");
+    REQUIRE_FALSE(escaping);
+    CHECK(escaping.error().message.find("not a C or C++ file under src/") != std::string::npos);
+    // What write_project_file() may write.
+    CHECK(project::writable_project_path("src/a.cpp"));
+    CHECK(project::writable_project_path("src/functions/../a.cpp"));
+    CHECK_FALSE(project::writable_project_path("src/../../a.cpp"));
+    CHECK_FALSE(project::writable_project_path(".decomp/changes.jsonl"));
+    CHECK_FALSE(project::writable_project_path("src/../.decomp/x"));
+    CHECK_FALSE(project::writable_project_path(std::filesystem::current_path() / "a.cpp"));
+    CHECK_FALSE(project::writable_project_path(""));
+    CHECK_FALSE(project::writable_project_path("."));
+}
+
+TEST_CASE("unit sources from the PDB's paths stay under src/") {
+    const Program p = Program::open(test::fixture("x86/basic.exe")).value();
+    auto f = p.symbols().functions();
+    REQUIRE(f.size() >= 4);
+    SymbolDb db;
+    UnitLayout layout;
+    const char* names[] = {"a.obj", "b.obj", "c.obj", "d.obj"};
+    for (usize i = 0; i < 4; ++i) {
+        layout.units.push_back(Unit{names[i], UnitKind::code, "", UnitOrigin::pdb});
+        Symbol s = *f[i];
+        s.object = names[i];
+        db.add(std::move(s));
+    }
+    // Four util.cpp files: the directories that tell them apart are kept, but not `..`, `.` or drives,
+    // and characters a file name cannot hold are replaced.
+    const std::map<std::string, std::string> sources = {{"a.obj", "..\\common\\util.cpp"},
+                                                        {"b.obj", "C:\\game\\util.cpp"},
+                                                        {"c.obj", "./engine/util.cpp"},
+                                                        {"d.obj", "/build/<gen>/util.cpp"}};
+    assign_sources(layout, db, sources);
+    std::set<std::string> paths;
+    for (const auto& u : layout.units) {
+        CAPTURE(u.source);
+        CHECK(project::valid_unit_source(u.source));
+        paths.insert(u.source);
+    }
+    CHECK(paths == std::set<std::string>{"src/common/util.cpp", "src/game/util.cpp", "src/engine/util.cpp", "src/_gen_/util.cpp"});
 }
 
 TEST_CASE("units from object files: a function without one joins the unit around it") {

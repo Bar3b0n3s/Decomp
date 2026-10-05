@@ -6,6 +6,7 @@
 #include "events/bus.hpp"
 #include "matching/match.hpp"
 #include "project/project.hpp"
+#include "project/units.hpp"
 
 #include <memory>
 #include <mutex>
@@ -81,11 +82,17 @@ public:
     // The source of this session's latest byte-exact attempt that the supervisor has not declined, while
     // no match has been accepted (the runner saves it when the session ends without submitting it).
     std::optional<std::string> unsubmitted_exact_source() const;
+    // The function's translation unit when the project has a source file for it: candidates are then
+    // composed into the unit's source, compiled and verified with it, and saved there.
+    const std::optional<Unit>& unit() const { return unit_; }
+    // The project file the accepted match was written to (relative to the project), once one was.
+    std::optional<std::string> written_path() const;
 
 private:
     struct Evaluation {
         matching::CandidateResult result;
         std::string text;
+        std::optional<project::UnitChange> unit;  // the unit source with the candidate composed in
     };
     Result<Evaluation> evaluate(const std::string& source);
     void publish(events::Payload payload) const;
@@ -108,6 +115,8 @@ private:
     std::vector<std::string> session_notes_;
     std::shared_ptr<ApprovalGate> approvals_;
     std::vector<std::string> declined_;  // sources the supervisor declined to save
+    std::optional<Unit> unit_;
+    std::optional<std::string> written_path_;
 };
 
 // The frozen system prompt (identical for every function so the prompt cache is shared).

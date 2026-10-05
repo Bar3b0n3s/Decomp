@@ -361,7 +361,10 @@ FunctionRunResult run_function(const Program& program, project::Project* project
         result.detail = json_string_or(outcome.finish_outcome, "reason", result.detail);
     result.best_match = session.best_match();
     result.best_source = session.best_source();
-    if (result.matched && project) result.matched_source = project->matched_source_path(sym);
+    if (result.matched && project) {
+        const auto written = session.written_path();
+        result.matched_source = written ? project->root() / fs::from_utf8(*written) : project->matched_source_path(sym);
+    }
 
     if (outcome.status == LoopStatus::refused) {
         const Json& sd = outcome.stop_details;

@@ -4,6 +4,7 @@
 #include "core/strings.hpp"
 #include "matching/match.hpp"
 #include "project/setup.hpp"
+#include "project/units.hpp"
 #include "viewmodel/attempts.hpp"
 
 #include <algorithm>
@@ -38,7 +39,12 @@ CompiledSource compile_source(const std::shared_ptr<const Program>& program, con
     setup->cancelled = [token] { return token.cancelled(); };
     Result<matching::CandidateResult> result = make_error(ErrorCode::internal, "not compiled");
     try {
-        result = matching::compile_and_diff(*program, *setup, va, source);
+        // As a session compiles it: in the function's unit when it has a source file.
+        const auto units = project::load_units(project);
+        const Symbol fn = function_symbol(*program, va);
+        const Unit* unit = units ? project::matching_unit(project, *units, fn) : nullptr;
+        if (auto candidate = project::compile_candidate(project, *program, *setup, fn, source, unit)) result = std::move(candidate->result);
+        else result = std::unexpected(candidate.error());
     } catch (const std::exception& e) {
         // Shown in place of the diff, so the view says what went wrong instead of staying empty.
         out.summary = std::format("the compile failed: {}", e.what());
@@ -90,14 +96,21 @@ VerifyResult verify_and_save(const std::shared_ptr<const Program>& program, proj
         r.message = std::format("Not saved: {} is not byte-exact ({}).", display, r.compiled.summary);
         return r;
     }
-    auto written = project.write_matched_source(fn, source, project::ChangeOrigin{SymbolSource::user, "", "verified by hand"});
-    if (!written) {
-        r.error = "cannot write the source: " + written.error().message;
+    // Into the function's unit source when it has one (every function there verified), else its own file.
+    auto setup = project::make_match_setup(&project, "");
+    if (!setup) {
+        r.error = setup.error().message;
         r.message = r.error;
         return r;
     }
-    std::error_code ec;
-    r.path = fs::to_utf8(std::filesystem::relative(written->path, project.root(), ec));
+    setup->cancelled = [token] { return token.cancelled(); };
+    auto written = project::save_verified_function(project, *program, *setup, fn, source, project::ChangeOrigin{SymbolSource::user, "", "verified by hand"});
+    if (!written) {
+        r.error = "cannot save the source: " + written.error().message;
+        r.message = std::format("Not saved: {}", written.error().message);
+        return r;
+    }
+    r.path = fs::to_utf8(written->path);
     auto updated = project.modify_function(va, [](project::FunctionInfo& info) {
         ++info.attempts;
         info.best_match = 100.0;

@@ -5,11 +5,13 @@
 #include "events/bus.hpp"
 #include "events/run_state.hpp"
 #include "llvm_fixture.hpp"
+#include "project/units.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
 
 #include <chrono>
+#include <format>
 #include <map>
 #include <thread>
 
@@ -386,7 +388,8 @@ TEST_CASE("agent runner: approvals decide whether a verified match is saved") {
         CHECK(r.outcome == "gave_up");
         CHECK_FALSE(r.matched);
         CHECK_FALSE(r.auto_submitted);  // a denied match is not saved behind the supervisor's back either
-        CHECK_FALSE(std::filesystem::exists(cp.project->matched_source_path(*cp.program->symbols().at(cp.add))));
+        CHECK_FALSE(project::has_matched_source(*cp.project, *cp.program->symbols().at(cp.add), project::load_units(*cp.project).value()));
+        CHECK_FALSE(std::filesystem::exists(cp.project->root() / "src" / "basic.cpp"));
         CHECK(cp.project->function_info(cp.add).status != project::FunctionStatus::matched);
         CHECK(rec.counts["file_written"] == 0);
         CHECK(rec.counts["approval_decided"] == 1);  // the declined source is not proposed again at the end
@@ -405,13 +408,19 @@ TEST_CASE("agent runner: approvals decide whether a verified match is saved") {
             for (int i = 0; i < 3000 && config.approvals->pending().empty(); ++i) std::this_thread::sleep_for(5ms);
             const auto pending = config.approvals->pending();
             REQUIRE(pending.size() == 1);
-            CHECK(pending[0].request.content == kRightAdd);
-            CHECK(pending[0].request.path.starts_with("src"));
+            // The supervisor sees the unit source the match goes into, with the function composed in.
+            CHECK(pending[0].request.path == "src/basic.cpp");
+            CHECK(pending[0].request.content == std::format("extern int g_counter;\n\n// FUNCTION: {:#010x}\n"
+                                                            "__declspec(noinline) int add(int a, int b) {{ return a + b + g_counter; }}\n",
+                                                            cp.add));
+            CHECK(pending[0].request.previous.empty());
+            CHECK(pending[0].request.summary.find("joins src/basic.cpp") != std::string::npos);
             CHECK(config.approvals->decide(pending[0].id, true));
         });
         const FunctionRunResult r = run_function(*cp.program, &*cp.project, cp.setup, cp.add, config, bus, {});
         supervisor.join();
         CHECK(r.outcome == "matched");
+        CHECK(r.matched_source == cp.project->root() / "src" / "basic.cpp");
         CHECK(std::filesystem::exists(r.matched_source));
         REQUIRE(rec.state.data().files_written.size() == 1);
         CHECK(rec.state.data().files_written.back().file.approval == "approved by user");

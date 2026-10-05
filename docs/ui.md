@@ -451,7 +451,7 @@ until the new one is ready.
 
 | Action type | Default policy |
 |---|---|
-| Write a verified source to `src/functions/` (`write_source`) | auto (mechanically verified) |
+| Write a verified source into its unit's source or `src/functions/` (`write_source`) | auto (mechanically verified) |
 | Record symbol bindings from a match (planned) | auto (can be switched to ask) |
 | Rename or create a symbol through `set_symbol` (Phase 3) | ask |
 | Change shared headers through `define_type` (Phase 3) | ask |
@@ -640,8 +640,11 @@ into the editor.
 "Verify and save" (Ctrl+S) runs the same mechanical check as `submit_result` (compile, diff, require
 `byte_exact`). Every verification is recorded in `attempts.jsonl` as an attempt with `origin: user`,
 in a session of its own (`user-<time>`), and a better score updates the best source. A byte-exact one
-is written to `src/functions/` (recorded in `.decomp/changes.jsonl` as written by the user, "verified
-by hand") and the function becomes `matched`.
+is saved (recorded in `.decomp/changes.jsonl` as written by the user, "verified by hand") and the
+function becomes `matched`. It is saved where a session would save it
+([agent.md](agent.md#translation-units)): into the function's unit source, when every function of the
+unit that was byte-exact there stays so, else to `src/functions/`. The editor's compiles work the same
+way: in a unit, the source is composed into the unit's source and the whole unit is compiled.
 
 "Hand back" sends the edited source to the agent as guidance: to the function's live session (a
 session paused for the take-over goes on); else the function is queued again in the live run and the

@@ -84,7 +84,7 @@ flowchart LR
     CMP --> DIFF["build_target_side, build_candidate_side<br/>diff_sides, to_text / to_json"]
     AN --> DIFF
     DIFF -->|"diff report"| LOOP
-    LOOP -->|"verified source"| PRJ["project<br/>src/functions, symbols.txt, .decomp/"]
+    LOOP -->|"verified source"| PRJ["project<br/>src/ (unit sources), symbols.txt, .decomp/"]
     LOOP -. events .-> BUS["EventBus"]
     BUS --> LOG["events.jsonl"]
     BUS --> RS["RunState reducer"]
@@ -384,6 +384,12 @@ The compile and diff engine ([matching.md](matching.md) has the full design):
   `diff_sides()` (alignment, row classification, verdicts, hints, bindings) and the reports
   `to_text()`, `to_json()` and `summary_line()`. `compile_and_diff()` (`matching/match.hpp`) compiles a
   source and diffs one function.
+- Unit sources (`matching/unit_source.hpp`): `parse_source_items()` (`matching/source_items.hpp`)
+  splits C and C++ sources into top-level items (directives, declarations, function definitions with
+  their declared names, blocks) with a lexer that knows comments, literals and brackets, not C++.
+  `UnitSource` holds a prelude and the matched functions behind `// FUNCTION: 0x...` markers;
+  `compose_function()` adds a function's verified translation unit to it, and `verify_unit()` compiles a
+  unit source once and diffs each of its functions.
 
 ### events
 
@@ -434,7 +440,9 @@ The built-in agent ([agent.md](agent.md) has the full design):
 - `Conversation`: the append-only message history. It serializes the system prompt, tools and model
   once and reuses them byte-identically.
 - `ToolRegistry` with a JSON Schema validator, and `MatchSession`, which holds the per-function
-  state and implements the match tools, the brief and the status line.
+  state and implements the match tools, the brief and the status line. In a translation unit with a
+  source, it composes candidates into the unit's source, compiles and verifies the whole unit, and
+  saves matches there ([agent.md](agent.md#translation-units)).
 - `run_loop()`, which returns a `LoopOutcome`, and `LoopControl`, its thread-safe commands: pause,
   resume, stop and abort with a reason (user, skip, run budget, shutdown), guidance with an id that can
   be retracted until it is sent, and live `LoopLimits` (turns, tokens, USD, wall clock) that take
@@ -453,7 +461,17 @@ The built-in agent ([agent.md](agent.md) has the full design):
 - Translation units (`project/units.hpp`): `units.txt` in link order, each symbol's unit as its
   `obj=`, derived at `init` (and again after `analyze`, `map import` and `lib match` while only the
   analysis made them), `derive_project_units()` for `decomp units derive`, and per-unit progress
-  (`compute_unit_progress()`, `decomp units`).
+  (`compute_unit_progress()`, `decomp units`). Unit sources: `prepare_unit_change()` composes verified
+  sources into a unit's source and verifies it, `commit_unit_change()` writes it when the file is
+  still what it was composed from (else `ErrorCode::conflict`), `verify_unit_sources()` and
+  `emit_unit_sources()` back `decomp units verify` and `emit`. `matching_unit()` picks the unit whose
+  source a new match joins (a trusted unit, or one whose source exists), `compile_candidate()` compiles
+  a candidate the way sessions do (composed into that unit, or alone), and `save_verified_function()`
+  saves a verified source there (manual mode); `broken_functions()` names the functions of the unit a
+  change would turn from byte-exact to not.
+- `write_project_file()`: every file Decomp writes or removes in the project goes through it, with the
+  replaced content kept in `.decomp/blobs/` and the change recorded in `changes.jsonl`. It writes only
+  inside the project and outside `.decomp/` (`writable_project_path()`), as does `revert_change()`.
 - Function status and history (`.decomp/functions/<fn>/`) and the per-function counters behind
   `decomp status` (`project/progress.hpp`), and the match setup a session needs
   (`project/setup.hpp`).
@@ -562,8 +580,9 @@ contains no matching or agent logic of its own:
    function's history.
 7. All tool results go back in one message, followed by any supervisor guidance and the status line.
    The loop repeats until `submit_result`, a budget, a refusal, a stop or an error ends it.
-8. On a verified match, `MatchSession` writes the source to `src/functions/`. When the session ends,
-   `symbols.txt` gets the function's new status, best score, attempts and spend.
+8. On a verified match, `MatchSession` writes the source: composed into the function's unit source
+   when it has one (every function there verified again), else to `src/functions/`. When the session
+   ends, `symbols.txt` gets the function's new status, best score, attempts and spend.
 9. The controller publishes `run_finished` and writes `run.json` and `summary.json` (so
    `decomp runs list` and the GUI list the run, and a stopped one can be resumed). Throughout, the
    event log and the transcript are appended, and the progress view renders the `RunState`.

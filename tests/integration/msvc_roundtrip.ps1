@@ -48,4 +48,7 @@ if ($LASTEXITCODE -ne 0) { throw "decomp init failed" }
 & $decomp -C $project agent add --replay "$root\tests\replay\agent_match_add.jsonl"
 if ($LASTEXITCODE -ne 0) { throw "scripted agent run did not match add() with cl.exe ($Arch)" }
 & $decomp -C $project status
+# The PDB gives add its unit: the match went into the unit's source, which verifies with cl.exe.
+& $decomp -C $project units verify
+if ($LASTEXITCODE -ne 0) { throw "the unit source of add() does not verify with cl.exe ($Arch)" }
 Write-Host "MSVC agent replay ($Arch): matched"

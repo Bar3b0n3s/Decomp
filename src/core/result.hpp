@@ -19,6 +19,7 @@ enum class ErrorCode {
     network,
     api,
     cancelled,
+    conflict,  // the state changed under the operation (another writer got there first)
     internal,
 };
 
@@ -34,6 +35,7 @@ constexpr std::string_view to_string(ErrorCode code) {
     case ErrorCode::network: return "network";
     case ErrorCode::api: return "api";
     case ErrorCode::cancelled: return "cancelled";
+    case ErrorCode::conflict: return "conflict";
     case ErrorCode::internal: return "internal";
     }
     return "unknown";

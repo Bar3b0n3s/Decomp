@@ -81,7 +81,9 @@ jobs:
             --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
           ./bin/Release/decomp -C "$p" agent add --replay tests/replay/agent_match_add.jsonl
           ./bin/Release/decomp -C "$p" status
-          test -f "$p/src/functions/add_401060.cpp"
+          # The fixture's PDB gives add its unit: the match is in the unit's source, which verifies.
+          grep -qx "// FUNCTION: 0x00401060" "$p/src/basic.cpp"
+          ./bin/Release/decomp -C "$p" units verify
           test -f "$(ls -d "$p"/.decomp/runs/*/ | head -1)summary.json"
           # A one-function run like any other: listed, with its run.json.
           test -f "$(ls -d "$p"/.decomp/runs/*/ | head -1)run.json"
@@ -98,7 +100,9 @@ jobs:
           run_id="$(ls "$p/.decomp/runs" | head -1)"
           ./bin/Release/decomp -C "$p" --json runs show "$run_id" > shown.json
           python3 tests/integration/check_run_summary.py shown.json "$p/.decomp/runs/$run_id/summary.json" 8
-          test "$(ls "$p"/src/functions/*.cpp | wc -l)" -eq 8
+          # The workers composed the 8 matches into the units' sources; every function there verifies.
+          test "$(cat "$p"/src/*.cpp | grep -c '^// FUNCTION: ')" -eq 8
+          ./bin/Release/decomp -C "$p" units verify
 
       - name: Function bounds corpus (clang-cl)
         run: |

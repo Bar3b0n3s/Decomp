@@ -5,6 +5,7 @@
 #include "core/fs.hpp"
 #include "core/log.hpp"
 #include "core/strings.hpp"
+#include "matching/unit_source.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -51,7 +52,7 @@ How to work:
 1. Read the brief: annotated disassembly, referenced symbols with their declarations, callers, and notes from earlier attempts.
 2. Work out the signature, calling convention and the types the function touches. Use disassemble on callers or callees when the brief is not enough.
 3. Write a first complete candidate and call compile_and_diff early. Fix the largest structural differences first (control flow, missing or extra code), then operand-level differences.
-4. The candidate must be a complete, self-contained translation unit: declare every external function, global variable and type it uses (extern declarations, struct definitions with the right layout). Declarations must produce the same decorated names shown in the brief: `?add@@YAHHH@Z` is `int __cdecl add(int, int)`; `extern "C"` names like `_entry` need `extern "C"`; arrays mangle like pointers (`?g_table@@3PAHA` can be `int g_table[8]`). No inline assembly. Only include headers the brief lists as available. Define the target function (and static helpers only if the target inlines them).
+4. The candidate must be a complete, self-contained translation unit: declare every external function, global variable and type it uses (extern declarations, struct definitions with the right layout). Declarations must produce the same decorated names shown in the brief: `?add@@YAHHH@Z` is `int __cdecl add(int, int)`; `extern "C"` names like `_entry` need `extern "C"`; arrays mangle like pointers (`?g_table@@3PAHA` can be `int g_table[8]`). No inline assembly. Only include headers the brief lists as available. Define the target function (and static helpers only if the target inlines them). When the brief has a "# Translation unit" section, your source is composed into that unit's source instead of compiled alone: follow what the section says.
 
 Matching tips (MSVC and clang-cl):
 - Register allocation and instruction order follow declaration order, expression order, temporaries and variable scope. Try equivalent rewrites: operand order (a + b vs b + a), x * 2 vs x << 1, splitting or merging statements, for/while/do-while, early return vs single exit, the order of if/else bodies, and where variables are declared.
@@ -81,7 +82,14 @@ MatchSession::MatchSession(const Program& program, const project::Project* proje
     if (project_) {
         if (auto best = project_->best_source(symbol_)) best_source_ = *best;
         best_match_ = project_->function_info(va).best_match;
+        if (auto units = project::load_units(*project_); units)
+            if (const Unit* unit = project::matching_unit(*project_, *units, symbol_)) unit_ = *unit;
     }
+}
+
+std::optional<std::string> MatchSession::written_path() const {
+    std::lock_guard lock(mutex_);
+    return written_path_;
 }
 
 void MatchSession::publish(events::Payload payload) const {
@@ -151,8 +159,16 @@ Result<MatchSession::Evaluation> MatchSession::evaluate(const std::string& sourc
     std::vector<std::string> flags = setup_.toolchain.flags;
     flags.insert(flags.end(), setup_.flags.begin(), setup_.flags.end());
     publish(events::CompileStarted{session_id_, setup_.toolchain.name, join(flags, " ")});
-    TRY_ASSIGN(auto r, matching::compile_and_diff(program_, setup_, va_, source));
+    // In a unit, the candidate joins the unit's source as it is on disk now and the whole unit is compiled.
     Evaluation ev;
+    matching::CandidateResult r;
+    if (unit_) {
+        TRY_ASSIGN(auto candidate, project::compile_candidate(*project_, program_, setup_, symbol_, source, &*unit_));
+        r = std::move(candidate.result);
+        ev.unit = std::move(candidate.unit);
+    } else {
+        TRY_ASSIGN(r, matching::compile_and_diff(program_, setup_, va_, source));
+    }
     publish(events::CompileFinished{session_id_, r.compile.ok, r.compile.cached, r.compile.duration.count(),
                                     static_cast<int>(std::ranges::count_if(r.compile.diagnostics,
                                                                            [](const matching::Diagnostic& d) {
@@ -163,9 +179,29 @@ Result<MatchSession::Evaluation> MatchSession::evaluate(const std::string& sourc
     MatchAttempt attempt;
     attempt.source = source;
     attempt.compiled = r.compile.ok;
-    if (!r.compile.ok) {
-        auto diags = matching::format_diagnostics(r.compile.diagnostics, 20);
-        ev.text = std::format("compile: FAILED{}\n{}", r.compile.timed_out ? " (timed out)" : "",
+    if (ev.unit && !ev.unit->rejected.empty()) {
+        ev.text = std::format("unit: your source cannot join {}: {}", unit_->source, ev.unit->rejected.front().second);
+        attempt.compiled = false;
+        attempt.summary = "cannot join the unit's source";
+    } else if (!r.compile.ok) {
+        // In a unit the lines are the unit source's: show their text, which the model wrote or read.
+        std::string diags;
+        if (ev.unit) {
+            const auto unit_lines = split_lines(ev.unit->content);
+            usize shown = 0;
+            for (const auto& d : r.compile.diagnostics) {
+                if (d.severity == "note") continue;
+                if (++shown > 20) break;
+                diags += std::format("line {}{}: {}{}: {}\n", d.line, d.column ? std::format(":{}", d.column) : "", d.severity,
+                                     d.code.empty() ? "" : " " + d.code, d.message);
+                if (d.line > 0 && static_cast<usize>(d.line) <= unit_lines.size())
+                    diags += std::format("    | {}\n", trim(unit_lines[static_cast<usize>(d.line) - 1]));
+            }
+        } else {
+            diags = matching::format_diagnostics(r.compile.diagnostics, 20);
+        }
+        ev.text = std::format("compile: FAILED{}{}\n{}", r.compile.timed_out ? " (timed out)" : "",
+                              ev.unit ? std::format(" ({} with your source composed in)", unit_->source) : std::string(),
                               diags.empty() ? truncate_utf8(r.compile.output, 4000) : diags);
         attempt.summary = "compile failed";
     } else if (!r.diff) {
@@ -178,6 +214,10 @@ Result<MatchSession::Evaluation> MatchSession::evaluate(const std::string& sourc
         ro.context = 2;
         ro.max_rows = kMaxDiffRows;
         ev.text = std::format("compile: ok{}\n{}", r.compile.cached ? " (cached)" : "", matching::to_text(d, ro));
+        if (ev.unit)
+            if (const auto failing = project::failing_functions(*ev.unit, va_); !failing.empty())
+                ev.text += std::format("\nunit: with your source in {}, {} other function(s) there are not byte-exact: {}", unit_->source,
+                                       failing.size(), project::describe_checks(program_, failing));
         attempt.match_percent = d.match_percent;
         attempt.byte_exact = d.byte_exact;
         attempt.summary = matching::summary_line(d);
@@ -364,24 +404,38 @@ ToolOutput MatchSession::submit_result(const Json& input) {
     if (!ev) return ToolOutput::error("internal error: " + ev.error().message);
     if (!ev->result.diff || !ev->result.diff->byte_exact)
         return ToolOutput::error("not accepted: the submitted source is not byte-exact.\n" + ev->text);
+    // In a unit, the unit's other functions must stay byte-exact (those that were before it joined).
+    if (ev->unit) {
+        auto broken = project::broken_functions(program_, setup_, *ev->unit, va_);
+        if (!broken) return ToolOutput::error("internal error: " + broken.error().message);
+        if (!broken->empty())
+            return ToolOutput::error(std::format("not accepted: byte-exact itself, but with your source in {} these functions of the unit "
+                                                 "are no longer byte-exact: {}. Change your source so that they compile as before "
+                                                 "(the declarations and helpers it adds to the unit's prelude affect them too).",
+                                                 unit_->source, project::describe_checks(program_, *broken)));
+    }
     std::string approval = "auto";
     if (project_ && approvals_) {
         // The supervisor may want to see (or veto) what lands in the project.
-        const auto path = project_->matched_source_path(symbol_);
         std::error_code ec;
-        std::string previous;
-        if (std::filesystem::exists(path, ec))
-            if (auto text = fs::read_text(path)) previous = std::move(*text);
+        std::string path, previous, content = source;
+        if (ev->unit) {
+            path = unit_->source;
+            previous = ev->unit->base;
+            content = ev->unit->content;
+        } else {
+            const auto file = project_->matched_source_path(symbol_);
+            if (std::filesystem::exists(file, ec))
+                if (auto text = fs::read_text(file)) previous = std::move(*text);
+            path = fs::to_utf8(std::filesystem::relative(file, project_->root(), ec));
+        }
         const std::string display = symbol_.display.empty() ? symbol_.name : symbol_.display;
-        ApprovalRequest request{std::string(kWriteSourceAction),
-                                session_id_,
-                                display,
-                                va_,
-                                fs::to_utf8(std::filesystem::relative(path, project_->root(), ec)),
-                                std::format("byte-exact {} ({} bytes of source{})", display, source.size(),
-                                            previous.empty() ? ", new file" : ", replaces the existing file"),
-                                source,
-                                std::move(previous)};
+        const std::string summary =
+            ev->unit ? std::format("byte-exact {} joins {} ({} functions in it{})", display, unit_->source, ev->unit->functions.size(),
+                                   previous.empty() ? ", new file" : "")
+                     : std::format("byte-exact {} ({} bytes of source{})", display, source.size(),
+                                   previous.empty() ? ", new file" : ", replaces the existing file");
+        ApprovalRequest request{std::string(kWriteSourceAction), session_id_, display, va_, path, summary, content, std::move(previous)};
         const ApprovalDecision decision = approvals_->request(std::move(request), setup_.cancelled, worker_);
         if (decision.verdict == "cancelled")
             return ToolOutput::error("Verified byte-exact, but the session ended before the supervisor decided whether to save it.");
@@ -395,6 +449,36 @@ ToolOutput MatchSession::submit_result(const Json& input) {
                                                  decision.reason.empty() ? "." : ": " + decision.reason + "."));
         approval = decision.by == "policy" ? "auto" : "approved by " + decision.by;
     }
+    // changes.jsonl says who let the write through when it was not automatic.
+    const std::string write_reason = approval == "auto" ? std::string("verified match") : std::format("verified match, {}", approval);
+    if (project_ && ev->unit) {
+        // Another worker may have changed the unit source since: compose again on top of it.
+        project::UnitChange change = std::move(*ev->unit);
+        for (int attempt = 0;; ++attempt) {
+            auto written = project::commit_unit_change(*project_, change, project::ChangeOrigin{SymbolSource::agent, session_id_, write_reason},
+                                                       project::ChangeSubject{symbol_.name, va_, {}, {}});
+            if (written) {
+                publish(events::FileWritten{unit_->source, "unit source", written->size, written->sha1, session_id_, approval});
+                std::lock_guard lock(mutex_);
+                written_path_ = unit_->source;
+                break;
+            }
+            if (written.error().code != ErrorCode::conflict || attempt >= 3)
+                return ToolOutput::error("Verified byte-exact, but the unit source could not be written: " + written.error().message);
+            auto again = project::prepare_unit_change(*project_, program_, setup_, *unit_, {{&symbol_, source}});
+            if (!again) return ToolOutput::error("internal error: " + again.error().message);
+            const bool exact = std::ranges::any_of(again->verification.functions, [&](const auto& c) { return c.va == va_ && c.byte_exact(); });
+            auto broken = exact && again->rejected.empty() ? project::broken_functions(program_, setup_, *again, va_)
+                                                           : Result<std::vector<const matching::UnitCheck*>>{};
+            if (!broken) return ToolOutput::error("internal error: " + broken.error().message);
+            if (!again->rejected.empty() || !again->verification.error.empty() || !exact || !broken->empty())
+                return ToolOutput::error(std::format("not accepted: {} changed while your match was being saved, and with its new content your "
+                                                     "source is no longer byte-exact or breaks another function there. Compile again and "
+                                                     "submit what matches.",
+                                                     unit_->source));
+            change = std::move(*again);
+        }
+    }
     {
         std::lock_guard lock(mutex_);
         matched_ = true;
@@ -402,13 +486,15 @@ ToolOutput MatchSession::submit_result(const Json& input) {
         best_match_ = 100.0;
         best_source_ = source;
     }
-    if (project_) {
-        // changes.jsonl says who let the write through when it was not automatic.
-        const std::string reason = approval == "auto" ? std::string("verified match") : std::format("verified match, {}", approval);
-        if (auto r = project_->write_matched_source(symbol_, source, project::ChangeOrigin{SymbolSource::agent, session_id_, reason}); r)
+    if (project_ && !unit_) {
+        if (auto r = project_->write_matched_source(symbol_, source, project::ChangeOrigin{SymbolSource::agent, session_id_, write_reason}); r) {
+            std::error_code ec;
             publish(events::FileWritten{fs::to_utf8(r->path), "matched source", r->size, r->sha1, session_id_, approval});
-        else
+            std::lock_guard lock(mutex_);
+            written_path_ = fs::to_utf8(std::filesystem::relative(r->path, project_->root(), ec));
+        } else {
             log::warn("cannot save the matched source of {}: {}", symbol_.name, r.error().message);
+        }
     }
     auto out = ToolOutput::ok("accepted: byte-exact match verified.");
     out.end_session = true;
@@ -476,6 +562,32 @@ std::string MatchSession::brief() const {
     }
     if (!fn->callers.empty()) out += std::format("\n# Callers\n{}\n", join(fn->callers, ", "));
 
+    if (unit_) {
+        const auto text = fs::read_text(project_->root() / fs::from_utf8(unit_->source));
+        matching::UnitSource source = matching::UnitSource::parse(text.value_or(""));
+        usize total = 0;
+        for (const Symbol* f : program_.symbols().functions()) total += f->object == unit_->name ? 1 : 0;
+        std::vector<std::string> names;
+        for (const auto& f : source.functions) {
+            const Symbol* s = program_.symbols().at(f.va);
+            names.push_back(s ? qualified_name(s->name) : std::format("{:#x}", f.va));
+        }
+        const bool c = unit_->source.ends_with(".c") || unit_->source.ends_with(".C");
+        out += std::format("\n# Translation unit\nThis function belongs to the unit {} ({} functions). ", unit_->name, total);
+        if (!text) out += std::format("Its source will be {} ({}): no function of the unit is matched yet, so yours starts it.\n", unit_->source, c ? "C" : "C++");
+        else out += std::format("Its source is {} ({}), which holds {} of them{}.\n", unit_->source, c ? "C" : "C++", names.size(),
+                                names.empty() ? "" : ": " + join(names, ", "));
+        out += "Your source is composed into it: your definition of the function joins the unit's functions in address order (with "
+               "the #pragma lines around it), and your other declarations, types and data join the unit's prelude unless it has them "
+               "already. compile_and_diff compiles the whole unit that way, and submit_result also checks that the unit's other "
+               "functions stay byte-exact. Define the function at the top level of your source, not inside a class or namespace "
+               "block; do not define the prelude's types differently";
+        out += c ? "; write C, not C++.\n" : ".\n";
+        source.functions.clear();
+        if (const std::string prelude = source.render(); !prelude.empty())
+            out += "The unit's prelude, which your source shares:\n```" + std::string(c ? "c" : "cpp") + "\n" + clip_lines(prelude, 200) + "```\n";
+    }
+
     if (project_) {
         auto notes = project_->notes(symbol_);
         auto attempts = project_->attempts(symbol_);
@@ -486,7 +598,8 @@ std::string MatchSession::brief() const {
             if (best_source_) out += "best source so far:\n```cpp\n" + *best_source_ + "\n```\n";
         }
     }
-    out += "\nWrite a complete candidate translation unit and call compile_and_diff.";
+    out += unit_ ? "\nWrite a candidate with the function and what the unit's prelude lacks, and call compile_and_diff."
+                 : "\nWrite a complete candidate translation unit and call compile_and_diff.";
     return out;
 }
 

@@ -542,8 +542,9 @@ private:
         if (ImGui::Button("Verify and save (Ctrl+S)")) verify_and_save(ctx);
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Compile, diff and require a byte-exact match (as submit_result does), then save the source to "
-                              "src/functions/ and mark the function matched.");
+            ImGui::SetTooltip("Compile, diff and require a byte-exact match (as submit_result does), then save the source into the "
+                              "function's unit source (every function there verified again), or to src/functions/ when it has none, "
+                              "and mark the function matched.");
         ImGui::SameLine();
         if (ImGui::Button("Hand back")) hand_back(ctx);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))

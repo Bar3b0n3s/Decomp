@@ -655,7 +655,7 @@ tool result (`compile: ok (cached)`), so the transcripts show which attempts act
 | Symbol sources | PDB 7.0 (publics, procedures, data), exports, imports, x64 `.pdata`, `symbols.txt` | MSVC `.map`, RTTI names, library signatures (Phase 2) |
 | Data compared | Narrow and wide strings, floats and SSE constants, jump tables | Global initializers, EH and unwind tables, string and float pools, section placement (Phase 5) |
 | Thunks | ILT and import thunks followed; names moved off ILT entries; the `dllimport` hint | |
-| Jump tables | x86 absolute, clang x64 relative and MSVC x64 RVA tables, compared as index lists | Two-level (byte index) tables; robust in-`.text` bounds for PDB-less MSVC targets (Phase 2) |
+| Jump tables | x86 absolute, clang x64 relative and MSVC x64 RVA tables, in `.text` too, compared as index lists; two-level switches' byte tables compared by content | |
 | Hints | Register-only, stack-only, encoding, inverted branch, reordering, instruction count, branch target, binding, reference (string, constant, callee) and `dllimport` hints | `signature`, `gs_cookie`, `chkstk`, `eh_frame` |
 | Toolchains | Registry with auto-detected clang-cl, `toolchain add`/`list`/`test`, compile cache, MSVC and GCC-style diagnostics; clang-cl round trip (Linux CI), `cl.exe` round trip (Windows CI, being brought up) | Version banner, project overrides, `CL`/`_CL_` removal, Wine wrapper on Linux; flag search and compiler identification (Phase 6) |
-| Verification scope | Single functions | Whole translation units and relinking with a SHA-1 check of the result (Phase 5) |
+| Verification scope | Single functions, and every function of a unit source compiled together (Phase 3) | Relinking with a SHA-1 check of the result (Phase 5) |

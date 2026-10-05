@@ -111,6 +111,15 @@ std::string safe_function_name(const Symbol& fn) {
     return std::format("{}_{:x}", out, fn.va);
 }
 
+bool writable_project_path(const std::filesystem::path& relative) {
+    // Inside the project once `..` is resolved, and not in .decomp/, whose files have writers of their own.
+    if (relative.empty() || relative.is_absolute() || relative.has_root_name() || relative.has_root_directory()) return false;
+    const auto normal = relative.lexically_normal();
+    if (normal.empty()) return false;
+    const std::string first = fs::to_utf8(*normal.begin());
+    return !first.empty() && first != "." && first != ".." && first != ".decomp";
+}
+
 std::string quote_if_needed(const std::string& v) {
     if (v.find_first_of(" \t\"=") == std::string::npos && !v.empty()) return v;
     return escape_c_string(v);
@@ -525,32 +534,57 @@ Result<void> Project::save_notes(const Symbol& fn, const std::string& text) cons
 }
 
 Result<WriteReceipt> Project::write_matched_source(const Symbol& fn, const std::string& source, const ChangeOrigin& origin) const {
+    std::error_code ec;
+    const auto rel = std::filesystem::relative(matched_source_path(fn), root_, ec);
+    return write_project_file(rel, source, origin, ChangeSubject{fn.name, fn.va, {}, {}});
+}
+
+Result<WriteReceipt> Project::write_project_file(const std::filesystem::path& relative, const std::optional<std::string>& content,
+                                                 const ChangeOrigin& origin, const ChangeSubject& subject,
+                                                 const std::optional<std::string>& expected) const {
+    if (!writable_project_path(relative))
+        return make_error(ErrorCode::invalid_argument, "'{}' is not a path inside the project", fs::to_utf8(relative));
     std::lock_guard lock(state_->mutex);
     TRY_ASSIGN(auto file_lock, lock_project());
     WriteReceipt receipt;
-    receipt.path = matched_source_path(fn);
-    receipt.size = source.size();
-    receipt.sha1 = sha1_hex(as_bytes(source.data(), source.size()));
-    if (auto old = fs::read_text(receipt.path); old && *old != source) {
+    receipt.path = root_ / relative;
+    if (content) {
+        receipt.size = content->size();
+        receipt.sha1 = sha1_hex(as_bytes(content->data(), content->size()));
+    }
+    const auto old = fs::read_text(receipt.path);
+    if (expected && old.value_or(std::string()) != *expected)
+        return make_error(ErrorCode::conflict, "{} changed while the change was being prepared", fs::to_utf8(relative));
+    if (old && (!content || *old != *content)) {
         const std::string old_sha1 = sha1_hex(as_bytes(old->data(), old->size()));
         const auto blob = blobs_dir() / old_sha1;
         std::error_code ec;
         if (!std::filesystem::exists(blob, ec)) TRY(fs::write_text(blob, *old));
         receipt.previous_sha1 = old_sha1;
     }
-    TRY(fs::write_text(receipt.path, source));
-    std::error_code ec;
-    auto rel = std::filesystem::relative(receipt.path, root_, ec);
+    if (content) {
+        TRY(fs::create_directories(receipt.path.parent_path()));
+        TRY(fs::write_text(receipt.path, *content));
+    } else {
+        if (!old) return make_error(ErrorCode::not_found, "{} does not exist", fs::to_utf8(relative));
+        std::error_code ec;
+        std::filesystem::remove(receipt.path, ec);
+        if (ec) return make_error(ErrorCode::io, "cannot remove {}: {}", fs::to_utf8(relative), ec.message());
+    }
+    std::string path_text = fs::to_utf8(relative);
+    std::ranges::replace(path_text, '\\', '/');
     Json record = {{"time", now_iso()},
-                   {"path", fs::to_utf8(ec ? receipt.path : rel)},
-                   {"function", fn.name},
-                   {"va", fn.va},
+                   {"path", path_text},
+                   {"function", subject.function},
+                   {"va", subject.va},
                    {"size", receipt.size},
-                   {"sha1", receipt.sha1},
+                   {"sha1", content ? Json(receipt.sha1) : Json(nullptr)},
                    {"previous_sha1", receipt.previous_sha1 ? Json(*receipt.previous_sha1) : Json(nullptr)},
                    {"source", std::string(to_string(origin.source))},
                    {"session", origin.session},
                    {"reason", origin.reason}};
+    if (!subject.unit.empty()) record["unit"] = subject.unit;
+    if (!subject.functions.empty()) record["functions"] = subject.functions;
     TRY(fs::append_text(root_ / ".decomp" / "changes.jsonl", dump_compact(record) + "\n"));
     return receipt;
 }
@@ -559,6 +593,8 @@ Result<void> Project::revert_change(const Json& change, const ChangeOrigin& orig
     const std::string rel = json_string_or(change, "path", "");
     const std::string sha1 = json_string_or(change, "sha1", "");
     if (rel.empty() || sha1.empty()) return make_error(ErrorCode::invalid_argument, "not a recorded change: {}", dump_compact(change));
+    if (!writable_project_path(fs::from_utf8(rel)))
+        return make_error(ErrorCode::invalid_argument, "'{}' is not a path inside the project", rel);
     const auto path = root_ / fs::from_utf8(rel);
     const std::optional<std::string> previous =
         change.contains("previous_sha1") && change["previous_sha1"].is_string() ? std::optional(change["previous_sha1"].get<std::string>()) : std::nullopt;
@@ -595,13 +631,31 @@ Result<void> Project::revert_change(const Json& change, const ChangeOrigin& orig
                        {"source", std::string(to_string(origin.source))},
                        {"session", origin.session},
                        {"reason", origin.reason.empty() ? std::string("revert") : origin.reason}};
+        if (change.contains("unit")) record["unit"] = change["unit"];
+        if (change.contains("functions")) record["functions"] = change["functions"];
         TRY(fs::append_text(root_ / ".decomp" / "changes.jsonl", dump_compact(record) + "\n"));
     }
-    // Without its source the function is no longer matched in the project.
-    if (!restored && va != 0) {
-        TRY(modify_function(va, [](FunctionInfo& info) {
-            if (info.status == FunctionStatus::matched) info.status = FunctionStatus::nonmatching;
-        }));
+    // A function whose source is gone (from its unit's source, or its own file) is no longer matched.
+    std::vector<u64> touched;
+    if (va != 0) touched.push_back(va);
+    if (change.contains("functions") && change["functions"].is_array())
+        for (const auto& f : change["functions"])
+            if (f.is_number_unsigned()) touched.push_back(f.get<u64>());
+    if (!touched.empty()) {
+        TRY_ASSIGN(const auto units, load_units(*this));
+        std::vector<u64> gone;
+        for (u64 v : touched) {
+            std::optional<Symbol> fn;
+            {
+                std::lock_guard lock(state_->mutex);
+                if (auto it = state_->symbols.find(v); it != state_->symbols.end()) fn = it->second;
+            }
+            if (fn && !has_matched_source(*this, *fn, units)) gone.push_back(v);
+        }
+        if (!gone.empty())
+            TRY(modify_functions(gone, [](u64, FunctionInfo& info) {
+                if (info.status == FunctionStatus::matched) info.status = FunctionStatus::nonmatching;
+            }));
     }
     return {};
 }

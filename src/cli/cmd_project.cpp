@@ -4,6 +4,7 @@
 #include "core/strings.hpp"
 #include "formats/archive.hpp"
 #include "formats/coff.hpp"
+#include "matching/diff.hpp"
 #include "project/analyze.hpp"
 #include "project/library.hpp"
 #include "project/progress.hpp"
@@ -190,6 +191,93 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
                 std::println("{} units from the {}: {} functions in a unit, {} in none", applied.units,
                              derived.from == UnitOrigin::pdb ? "PDB" : derived.from == UnitOrigin::map ? "link map" : "analysis",
                              applied.functions, applied.unassigned);
+                return 0;
+            }));
+        });
+        auto* verify = cmd->add_subcommand("verify", "Compile the unit sources and diff every function they hold against the target");
+        auto verify_units = std::make_shared<std::vector<std::string>>();
+        auto verify_toolchain = std::make_shared<std::string>();
+        verify->add_option("units", *verify_units, "Units to verify (default: every unit with a source)");
+        verify->add_option("--toolchain", *verify_toolchain, "Toolchain to compile with (default: the project's)");
+        verify->callback([&g, verify_units, verify_toolchain] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                TRY_ASSIGN(auto program, p.open_program());
+                TRY_ASSIGN(auto setup, make_match_setup(g, *verify_toolchain, {}));
+                TRY_ASSIGN(auto reports, project::verify_unit_sources(p, program, setup, *verify_units));
+                bool all = true;
+                Json arr = Json::array();
+                for (const auto& r : reports) {
+                    const auto& v = r.verification;
+                    all = all && v.all_byte_exact();
+                    usize exact = 0;
+                    for (const auto& f : v.functions) exact += f.byte_exact() ? 1 : 0;
+                    if (g.json) {
+                        Json fns = Json::array();
+                        for (const auto& f : v.functions)
+                            fns.push_back({{"va", f.va},
+                                           {"byte_exact", f.byte_exact()},
+                                           {"match_percent", f.diff ? f.diff->match_percent : 0.0},
+                                           {"error", f.error}});
+                        arr.push_back({{"unit", r.unit.name}, {"source", r.unit.source}, {"error", v.error}, {"functions", fns}});
+                        continue;
+                    }
+                    if (!v.error.empty()) {
+                        std::println("{} ({}): {}", r.unit.name, r.unit.source, v.error);
+                        for (const auto& d : v.compile.diagnostics)
+                            if (d.severity.find("error") != std::string::npos) std::println("  {}:{}: {}", d.line, d.column, d.message);
+                        continue;
+                    }
+                    std::println("{} ({}): {}/{} functions byte-exact", r.unit.name, r.unit.source, exact, v.functions.size());
+                    for (const auto& f : v.functions) {
+                        if (f.byte_exact()) continue;
+                        const Symbol* s = program.symbols().at(f.va);
+                        std::println("  {:#010x} {}: {}", f.va, s ? s->display : std::string(), f.diff ? matching::summary_line(*f.diff) : f.error);
+                    }
+                }
+                if (g.json) print_json(arr);
+                else if (reports.empty()) std::println("no unit sources yet: `decomp units emit` writes them from matched functions");
+                return all ? 0 : 2;
+            }));
+        });
+        auto* emit = cmd->add_subcommand("emit", "Move matched functions' own sources (src/functions/) into their units' sources");
+        auto emit_units = std::make_shared<std::vector<std::string>>();
+        auto emit_toolchain = std::make_shared<std::string>();
+        emit->add_option("units", *emit_units, "Units to emit (default: every unit)");
+        emit->add_option("--toolchain", *emit_toolchain, "Toolchain to compile with (default: the project's)");
+        emit->callback([&g, emit_units, emit_toolchain] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                TRY_ASSIGN(auto p, project::Project::find(g.project));
+                TRY_ASSIGN(auto run_lock, p.try_lock_active_run());
+                if (!run_lock) return make_error(ErrorCode::invalid_argument, "a run is active in this project; stop it before emitting unit sources");
+                TRY_ASSIGN(auto program, p.open_program());
+                TRY_ASSIGN(auto setup, make_match_setup(g, *emit_toolchain, {}));
+                TRY_ASSIGN(auto report, project::emit_unit_sources(p, program, setup,
+                                                                   project::ChangeOrigin{SymbolSource::user, "", "emitted into the unit source"},
+                                                                   *emit_units));
+                TRY_ASSIGN(const auto units, project::load_units(p));
+                if (g.json) {
+                    Json arr = Json::array();
+                    for (const auto& u : report.units) {
+                        Json kept = Json::array();
+                        for (const auto& [va, why] : u.kept) kept.push_back({{"va", va}, {"reason", why}});
+                        arr.push_back({{"unit", u.name}, {"emitted", u.emitted}, {"kept", kept}});
+                    }
+                    print_json(arr);
+                    return 0;
+                }
+                if (report.units.empty()) std::println("no matched function has its own source file in a unit with a source");
+                for (const auto& u : report.units) {
+                    auto unit = std::ranges::find(units, u.name, &Unit::name);
+                    std::println("{}: {} function{} moved into {}{}", u.name, u.emitted.size(), u.emitted.size() == 1 ? "" : "s",
+                                 unit != units.end() ? unit->source : std::string("its source"),
+                                 u.kept.empty() ? "" : std::format("; {} kept in {} own file{}", u.kept.size(), u.kept.size() == 1 ? "its" : "their",
+                                                                   u.kept.size() == 1 ? "" : "s"));
+                    for (const auto& [va, why] : u.kept) {
+                        const Symbol* s = program.symbols().at(va);
+                        std::println("  {:#010x} {}: {}", va, s ? s->display : std::string(), why);
+                    }
+                }
                 return 0;
             }));
         });

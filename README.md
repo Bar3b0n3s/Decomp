@@ -173,8 +173,10 @@ decomp -C /tmp/basic agent add --replay tests/replay/agent_match_add.jsonl
 decomp -C /tmp/basic status
 ```
 
-The session ends `matched`, the verified source is in `/tmp/basic/src/functions/add_401060.cpp`, and
-the run's event log, transcript and summary are under `/tmp/basic/.decomp/runs/`.
+The session ends `matched`, and the verified source is in `/tmp/basic/src/basic.cpp`: the fixture's
+PDB places `add` in the unit `basic.obj`, so the match starts that unit's source
+([docs/project-format.md](docs/project-format.md#unit-sources)). The run's event log, transcript and
+summary are under `/tmp/basic/.decomp/runs/`.
 
 A whole scripted batch, in the CLI or the GUI (scripts for every fixture function: 8 match, the rest
 give up):

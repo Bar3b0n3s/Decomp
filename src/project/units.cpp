@@ -1,5 +1,6 @@
 #include "project/units.hpp"
 
+#include "analysis/demangle.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
 #include "formats/pdb.hpp"
@@ -19,6 +20,21 @@ std::string format_unit_line(const Unit& unit) {
     return line;
 }
 
+bool valid_unit_source(std::string_view path) {
+    if (!path.starts_with("src/") || path.starts_with("src/functions/") || path.find_first_of("\\:") != std::string_view::npos) return false;
+    for (usize start = 0; start <= path.size();) {
+        const usize end = std::min(path.find('/', start), path.size());
+        const std::string_view part = path.substr(start, end - start);
+        if (part.empty() || part == "." || part == "..") return false;
+        start = end + 1;
+    }
+    const auto dot = path.rfind('.');
+    if (dot == std::string_view::npos || path.find('/', dot) != std::string_view::npos) return false;
+    std::string ext(path.substr(dot));
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == ".c" || ext == ".cc" || ext == ".cpp" || ext == ".cxx";
+}
+
 Result<Unit> parse_unit_line(std::string_view line) {
     const auto tokens = tokenize(line);
     if (tokens.empty() || tokens[0].empty()) return make_error(ErrorCode::parse, "expected '<name> [kind=] [source=] [origin=]'");
@@ -36,6 +52,8 @@ Result<Unit> parse_unit_line(std::string_view line) {
             if (!k) return make_error(ErrorCode::parse, "unknown unit kind '{}' (code, library, import or linker)", value);
             u.kind = *k;
         } else if (key == "source") {
+            if (!valid_unit_source(value))
+                return make_error(ErrorCode::parse, "source={} is not a C or C++ file under src/ (relative, with forward slashes)", value);
             u.source = value;
         } else if (key == "origin") {
             auto o = unit_origin_from_string(value);
@@ -232,6 +250,259 @@ Json to_json(const UnitProgress& p) {
               {"statuses", statuses}};
     if (!p.unit.source.empty()) j["source"] = p.unit.source;
     return j;
+}
+
+const Unit* source_unit(const std::vector<Unit>& units, const Symbol& fn) {
+    if (fn.object.empty()) return nullptr;
+    auto it = std::ranges::find(units, fn.object, &Unit::name);
+    if (it == units.end() || it->kind != UnitKind::code || it->source.empty()) return nullptr;
+    return &*it;
+}
+
+bool has_matched_source(const Project& project, const Symbol& fn, const std::vector<Unit>& units) {
+    std::error_code ec;
+    if (std::filesystem::exists(project.matched_source_path(fn), ec)) return true;
+    const Unit* unit = source_unit(units, fn);
+    if (!unit) return false;
+    auto text = fs::read_text(project.root() / fs::from_utf8(unit->source));
+    return text && matching::UnitSource::parse(*text).find(fn.va);
+}
+
+std::optional<std::filesystem::path> matched_source_location(const Project& project, const Symbol& fn, const std::vector<Unit>& units) {
+    if (const Unit* unit = source_unit(units, fn)) {
+        const auto path = project.root() / fs::from_utf8(unit->source);
+        if (auto text = fs::read_text(path); text && matching::UnitSource::parse(*text).find(fn.va)) return path;
+    }
+    std::error_code ec;
+    if (std::filesystem::exists(project.matched_source_path(fn), ec)) return project.matched_source_path(fn);
+    return std::nullopt;
+}
+
+const Unit* matching_unit(const Project& project, const std::vector<Unit>& units, const Symbol& fn) {
+    const Unit* unit = source_unit(units, fn);
+    if (!unit || unit->origin != UnitOrigin::analysis) return unit;
+    std::error_code ec;
+    return std::filesystem::exists(project.root() / fs::from_utf8(unit->source), ec) ? unit : nullptr;
+}
+
+std::vector<const matching::UnitCheck*> failing_functions(const UnitChange& change, u64 except) {
+    std::vector<const matching::UnitCheck*> out;
+    for (const auto& check : change.verification.functions)
+        if (check.va != except && !check.byte_exact()) out.push_back(&check);
+    return out;
+}
+
+Result<std::vector<const matching::UnitCheck*>> broken_functions(const Program& program, const matching::MatchSetup& setup,
+                                                                 const UnitChange& change, u64 except) {
+    auto failing = failing_functions(change, except);
+    if (failing.empty()) return failing;
+    std::set<u64> exact_before;
+    if (!change.base.empty()) {
+        std::vector<u64> vas;
+        for (const auto& f : matching::UnitSource::parse(change.base).functions) vas.push_back(f.va);
+        TRY_ASSIGN(const auto base, matching::verify_unit(program, setup, change.base, change.unit.source, vas));
+        for (const auto& check : base.functions)
+            if (check.byte_exact()) exact_before.insert(check.va);
+    }
+    std::erase_if(failing, [&](const matching::UnitCheck* check) { return !exact_before.contains(check->va); });
+    return failing;
+}
+
+std::string describe_checks(const Program& program, std::span<const matching::UnitCheck* const> checks) {
+    std::vector<std::string> out;
+    for (const auto* check : checks) {
+        const Symbol* s = program.symbols().at(check->va);
+        out.push_back(std::format("{} ({})", s ? qualified_name(s->name) : std::format("{:#x}", check->va),
+                                  check->diff ? matching::summary_line(*check->diff) : check->error));
+    }
+    return join(out, "; ");
+}
+
+Result<Candidate> compile_candidate(const Project& project, const Program& program, const matching::MatchSetup& setup, const Symbol& fn,
+                                    const std::string& source, const Unit* unit) {
+    Candidate out;
+    if (!unit) {
+        TRY_ASSIGN(out.result, matching::compile_and_diff(program, setup, fn.va, source));
+        return out;
+    }
+    TRY_ASSIGN(auto change, prepare_unit_change(project, program, setup, *unit, {{&fn, source}}));
+    if (!change.rejected.empty()) {
+        out.result.diff_error = change.rejected.front().second;
+        out.result.compile.output = out.result.diff_error;
+    } else {
+        out.result.compile = change.verification.compile;
+        if (!change.verification.error.empty()) out.result.diff_error = change.verification.error;
+        for (const auto& check : change.verification.functions)
+            if (check.va == fn.va) {
+                if (check.diff) out.result.diff = check.diff;
+                else out.result.diff_error = check.error;
+            }
+    }
+    out.unit = std::move(change);
+    return out;
+}
+
+Result<SavedSource> save_verified_function(const Project& project, const Program& program, const matching::MatchSetup& setup, const Symbol& fn,
+                                           const std::string& source, const ChangeOrigin& origin) {
+    TRY_ASSIGN(const auto units, load_units(project));
+    SavedSource saved;
+    const Unit* unit = matching_unit(project, units, fn);
+    if (!unit) {
+        TRY_ASSIGN(saved.receipt, project.write_matched_source(fn, source, origin));
+        std::error_code ec;
+        saved.path = std::filesystem::relative(saved.receipt.path, project.root(), ec);
+        return saved;
+    }
+    for (int attempt = 0;; ++attempt) {
+        TRY_ASSIGN(auto change, prepare_unit_change(project, program, setup, *unit, {{&fn, source}}));
+        if (!change.rejected.empty()) return make_error(ErrorCode::invalid_argument, "{}", change.rejected.front().second);
+        if (!change.verification.error.empty())
+            return make_error(ErrorCode::invalid_argument, "{} does not compile with it: {}", unit->source, change.verification.error);
+        const auto own = std::ranges::find(change.verification.functions, fn.va, &matching::UnitCheck::va);
+        if (own == change.verification.functions.end() || !own->byte_exact()) {
+            const matching::UnitCheck* checks[] = {own == change.verification.functions.end() ? nullptr : &*own};
+            return make_error(ErrorCode::invalid_argument, "it is not byte-exact in {}{}", unit->source,
+                              checks[0] ? ": " + describe_checks(program, checks) : std::string());
+        }
+        TRY_ASSIGN(const auto broken, broken_functions(program, setup, change, fn.va));
+        if (!broken.empty())
+            return make_error(ErrorCode::invalid_argument, "with it in {}, these functions are no longer byte-exact: {}", unit->source,
+                              describe_checks(program, broken));
+        auto receipt = commit_unit_change(project, change, origin, ChangeSubject{fn.name, fn.va, {}, {}});
+        if (!receipt && receipt.error().code == ErrorCode::conflict && attempt < 3) continue;  // another writer got there first
+        if (!receipt) return std::unexpected(receipt.error());
+        saved.receipt = std::move(*receipt);
+        saved.path = fs::from_utf8(unit->source);
+        saved.unit = std::move(change);
+        return saved;
+    }
+}
+
+Result<UnitChange> prepare_unit_change(const Project& project, const Program& program, const matching::MatchSetup& setup, const Unit& unit,
+                                       const std::vector<std::pair<const Symbol*, std::string>>& sources) {
+    UnitChange change;
+    change.unit = unit;
+    const auto path = project.root() / fs::from_utf8(unit.source);
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+        TRY_ASSIGN(change.base, fs::read_text(path));
+    }
+    matching::UnitSource source = matching::UnitSource::parse(change.base);
+    auto ordered = sources;
+    std::ranges::stable_sort(ordered, {}, [](const auto& p) { return p.first->va; });
+    for (const auto& [fn, text] : ordered)
+        if (auto r = matching::compose_function(source, fn->va, matching::definition_names(*fn), text); !r)
+            change.rejected.emplace_back(fn->va, r.error().message);
+    change.content = source.render();
+    for (const auto& f : source.functions) change.functions.push_back(f.va);
+    if (change.rejected.size() == sources.size() && !sources.empty()) {
+        change.verification.error = "nothing could be composed";  // no compile: the unit source is unchanged
+        return change;
+    }
+    TRY_ASSIGN(change.verification, matching::verify_unit(program, setup, change.content, unit.source, change.functions));
+    return change;
+}
+
+Result<WriteReceipt> commit_unit_change(const Project& project, const UnitChange& change, const ChangeOrigin& origin,
+                                        const ChangeSubject& subject) {
+    ChangeSubject s = subject;
+    s.unit = change.unit.name;
+    s.functions = change.functions;
+    return project.write_project_file(fs::from_utf8(change.unit.source), change.content, origin, s, change.base);
+}
+
+Result<std::vector<UnitVerificationReport>> verify_unit_sources(const Project& project, const Program& program,
+                                                               const matching::MatchSetup& setup, std::span<const std::string> names) {
+    TRY_ASSIGN(const auto units, load_units(project));
+    for (const auto& name : names)
+        if (std::ranges::find(units, name, &Unit::name) == units.end()) return make_error(ErrorCode::not_found, "no unit named '{}'", name);
+    std::vector<UnitVerificationReport> out;
+    for (const auto& unit : units) {
+        if (unit.kind != UnitKind::code || unit.source.empty()) continue;
+        if (!names.empty() && std::ranges::find(names, unit.name) == names.end()) continue;
+        const auto path = project.root() / fs::from_utf8(unit.source);
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) continue;
+        TRY_ASSIGN(const auto text, fs::read_text(path));
+        std::vector<u64> vas;
+        for (const auto& f : matching::UnitSource::parse(text).functions) vas.push_back(f.va);
+        UnitVerificationReport report;
+        report.unit = unit;
+        TRY_ASSIGN(report.verification, matching::verify_unit(program, setup, text, unit.source, vas));
+        out.push_back(std::move(report));
+    }
+    return out;
+}
+
+Result<EmitReport> emit_unit_sources(const Project& project, const Program& program, const matching::MatchSetup& setup,
+                                     const ChangeOrigin& origin, std::span<const std::string> names) {
+    TRY_ASSIGN(const auto units, load_units(project));
+    for (const auto& name : names)
+        if (std::ranges::find(units, name, &Unit::name) == units.end()) return make_error(ErrorCode::not_found, "no unit named '{}'", name);
+    const auto infos = project.function_infos();
+    std::map<std::string, std::vector<std::pair<const Symbol*, std::string>>> by_unit;
+    for (const Symbol* f : program.symbols().functions()) {
+        auto info = infos->find(f->va);
+        if (info == infos->end() || info->second.status != FunctionStatus::matched) continue;
+        const Unit* unit = source_unit(units, *f);
+        if (!unit || (!names.empty() && std::ranges::find(names, unit->name) == names.end())) continue;
+        auto text = fs::read_text(project.matched_source_path(*f));
+        if (text) by_unit[unit->name].emplace_back(f, std::move(*text));
+    }
+    EmitReport report;
+    for (auto& [name, sources] : by_unit) {
+        const Unit& unit = *std::ranges::find(units, name, &Unit::name);
+        EmitReport::UnitResult result;
+        result.name = name;
+        auto pending = sources;
+        auto keep = [&](u64 va, std::string why) {
+            result.kept.emplace_back(va, std::move(why));
+            std::erase_if(pending, [&](const auto& p) { return p.first->va == va; });
+        };
+        // Functions that do not compose or do not stay byte-exact are left out, and the rest tried again.
+        for (int round = 0; round < 8 && !pending.empty(); ++round) {
+            TRY_ASSIGN(auto change, prepare_unit_change(project, program, setup, unit, pending));
+            for (auto& [va, why] : change.rejected) keep(va, why);
+            if (!change.verification.error.empty()) {
+                std::string why = "the unit does not compile: " + change.verification.error;
+                for (const auto& d : change.verification.compile.diagnostics)
+                    if (d.severity.find("error") != std::string::npos) {
+                        why += std::format(" ({}: {})", d.line, d.message);
+                        break;
+                    }
+                while (!pending.empty()) keep(pending.front().first->va, why);
+                break;
+            }
+            std::vector<std::pair<u64, std::string>> failing;
+            for (const auto& check : change.verification.functions)
+                if (!check.byte_exact()) failing.emplace_back(check.va, check.diff ? matching::summary_line(*check.diff) : check.error);
+            if (failing.empty()) {
+                if (pending.empty()) break;
+                TRY(commit_unit_change(project, change, origin, ChangeSubject{}));
+                for (const auto& [fn, text] : pending) {
+                    std::error_code ec;
+                    const auto rel = std::filesystem::relative(project.matched_source_path(*fn), project.root(), ec);
+                    TRY(project.write_project_file(rel, std::nullopt, origin, ChangeSubject{fn->name, fn->va, name, {}}));
+                    result.emitted.push_back(fn->va);
+                }
+                pending.clear();
+                break;
+            }
+            bool existing = false;
+            for (const auto& [va, why] : failing)
+                if (std::ranges::find_if(pending, [&](const auto& p) { return p.first->va == va; }) == pending.end()) existing = true;
+            if (existing) {
+                while (!pending.empty())
+                    keep(pending.front().first->va, std::format("a function already in {} is not byte-exact there; `decomp units verify` shows it",
+                                                                unit.source));
+                break;
+            }
+            for (const auto& [va, why] : failing) keep(va, "not byte-exact in the unit source: " + why);
+        }
+        while (!pending.empty()) keep(pending.front().first->va, "gave up after several rounds");
+        report.units.push_back(std::move(result));
+    }
+    return report;
 }
 
 } // namespace decomp::project

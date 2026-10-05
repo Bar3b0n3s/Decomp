@@ -10,10 +10,9 @@ writes JSON with sorted keys and `symbols.txt` sorted by address, and it replace
 a temporary file plus rename, so a project diffs and merges cleanly. This document specifies each
 file, the function status values and the toolchain registry.
 
-Status: implemented in the first slice (step 9 of the [roadmap](roadmap.md#first-working-slice)) and
-extended in Phase 1 with locks, change logs and batch-run directories. Translation-unit organization
-replaces the one-file-per-function source layout in Phase 3. Anything marked *planned* does not exist
-yet.
+Status: implemented in the first slice (step 9 of the [roadmap](roadmap.md#first-working-slice)),
+extended in Phase 1 with locks, change logs and batch-run directories, and in Phase 3 with translation
+units: `units.txt` and one source per unit. Anything marked *planned* does not exist yet.
 
 ## Layout
 
@@ -23,7 +22,8 @@ yet.
     symbols.txt                 symbols: addresses, names, kinds, sizes, status   (committed)
     units.txt                   translation units in link order                   (committed)
     include/                    shared headers                                    (committed)
-    src/functions/              verified sources, one .cpp per function           (committed)
+    src/<unit source>           unit sources: a unit's matched functions          (committed)
+    src/functions/              verified sources of functions without one         (committed)
     .gitignore                  written by init: /.decomp/                        (committed)
     .decomp/                    working data                                      (gitignored)
         functions/<fn>/         attempts.jsonl, best.cpp, notes.md
@@ -213,7 +213,7 @@ Import:kernel32.dll kind=import origin=pdb
 |---|---|
 | name | The object as a link map names it: `player.obj`, `LIBCMT:printf.obj` for a member of `LIBCMT.lib` (a library match's `LIBCMT.LIB:printf.obj` is written so too), `kernel32:KERNEL32.dll` for an import library's member, `Import:KERNEL32.dll`, `* Linker *`. Quoted like a symbol name when it contains a space. |
 | `kind=` | `code` (the default; the program's own code), `library` (a static library's member), `import` (import stubs and descriptors) or `linker` (what the linker made) |
-| `source=` | A code unit's source file, relative to the project: the file the PDB's line information names for the module (`src/basic.cpp`), else the object's stem with `.c` when its functions all have C names and `.cpp` otherwise. Directories of the original path are added where two units would share a file name. |
+| `source=` | A code unit's source file, relative to the project: the file the PDB's line information names for the module (`src/basic.cpp`), else the object's stem with `.c` when its functions all have C names and `.cpp` otherwise. Directories of the original path are added where two units would share a file name (never a drive, `.` or `..`; characters other than letters, digits and `_-.+` and spaces become `_`). A source must be a C or C++ file (`.c`, `.cc`, `.cpp`, `.cxx`) under `src/` but not `src/functions/`, written with forward slashes and without `.` or `..`: `units.txt` with another is refused. |
 | `origin=` | Where the unit came from, in increasing order of trust: `analysis`, `map`, `pdb`, `user`. A line without `origin=` was written by hand (`user`). |
 
 Where the units come from, best first:
@@ -250,17 +250,80 @@ modification times ([matching.md](matching.md#compile-cache)). From Phase 3, the
 edits headers under the approval policy. From Phase 4, headers are the source of truth for types, and
 their layouts are checked against the PDB.
 
+## Unit sources
+
+A code unit's matched functions live in its source file (`source=` in `units.txt`, such as
+`src/basic.cpp`), as the original program's source file held them. A unit source is a prelude
+(directives, declarations, types, data) followed by the matched functions in address order, each after a
+marker line with its address:
+
+```cpp
+#define NOINLINE __declspec(noinline)
+extern int g_counter;
+int add(int a, int b);
+static int s_calls = 0;
+NOINLINE static int helper(int x);
+
+// FUNCTION: 0x00401060
+NOINLINE int add(int a, int b) { return a + b + g_counter; }
+
+// FUNCTION: 0x004010f0
+NOINLINE int dispatch(int op, int v) {
+    ...
+}
+
+// FUNCTION: 0x00401160
+NOINLINE static int helper(int x) {
+    ++s_calls;
+    return x * 3 + 1;
+}
+```
+
+A function joins its unit's source by composition: the translation unit that verified byte-exact for
+it gives its definition (with the `#pragma` and `#line` directives right before and after it) as the
+function's entry, and its other items join the prelude unless the unit has them already: the same
+item (comments and spacing aside), a definition of the same function, or a `static` declaration of a
+function the item declares without `static` (which would conflict). Conditional directives (`#if` ...
+`#endif`) always join. A definition another function's source brought into the prelude (a static helper
+its caller needs) gives way to the function's own entry and stays behind as a declaration, so the
+functions before it still see it. The definition must be at the top level of its source: a function
+defined inside a class or namespace block cannot be placed yet.
+
+The unit source is then compiled once, as its file name (`.c` compiles as C), and every function in it
+is diffed against the target. A unit source is written only when the functions it adds are byte-exact
+in it and every function that was byte-exact in it before still is: the unit source is the proof, since
+composing can change what a function compiles to (an earlier function's definition may now be visible
+to it, for example).
+
+Agent sessions and the GUI's Verify and save put a match into its unit's source when the unit is a
+code unit with a source path that the project trusts: it comes from a PDB or a map, the user wrote
+it, or its source file exists already ([agent.md](agent.md#translation-units)). The functions of a unit
+that the analysis only guessed go to `src/functions/` until `decomp units emit` (or the user) starts
+the unit's source. A session composes onto the unit source as it is on disk, and the write fails if
+another writer changed the file in between; the session then composes onto the new content and
+verifies again.
+
+- `decomp units verify [unit...]` compiles the unit sources and diffs every function they hold; the exit
+  code is 2 when one is not byte-exact.
+- `decomp units emit [unit...]` moves the verified sources of matched functions (`src/functions/`) into
+  their units' sources: per unit, in address order, for every code unit with a source path (guessed
+  ones too). Functions that do not compose, or are not byte-exact in the unit, keep their own files
+  and the rest is tried again without them. A unit source is written only when every function in it is
+  byte-exact. Each write and each removed file is recorded in `changes.jsonl`.
+
 ## `src/functions/`
 
-Verified sources, one `.cpp` per function in the slice, named `<fn>.cpp` (for example
-`src/functions/add_401060.cpp`). A file is written when the agent's `submit_result` is accepted (or
-when a session ends with a byte-exact attempt it did not submit), once the `write_source` approval
-policy lets it through ([agent.md](agent.md#approvals)), and it is **exactly** the translation unit
-that verified byte-exact. Decomp adds no banner or comment, because even a comment can shift
-`__LINE__`. Every write is recorded in [`.decomp/changes.jsonl`](#changesjsonl-and-blobs) and can be
-reverted. The history (session, attempts, scores) lives in `.decomp/`. `decomp diff --source` never writes here; a "verify and save" for hand-written sources is
-part of the Phase 1 GUI. Phase 3 groups functions into translation units, with one source per unit as
-in the original program.
+Verified sources of functions whose matches do not go into a unit source ([Unit sources](#unit-sources)):
+functions in no code unit with a source path, functions of guessed units whose source has not been
+started, and matched functions not yet emitted into their unit's source. There is one `.cpp` per
+function, named `<fn>.cpp` (for example `src/functions/add_401060.cpp`). A file is written when the
+agent's `submit_result` is accepted (or when a session ends with a byte-exact attempt it did not
+submit), or by the GUI's Verify and save, once the `write_source` approval policy lets it through
+([agent.md](agent.md#approvals)). It is **exactly** the translation unit that verified byte-exact.
+Decomp adds no banner or comment, because even a comment can shift `__LINE__`. Every write is
+recorded in [`.decomp/changes.jsonl`](#changesjsonl-and-blobs) and can be reverted. The history
+(session, attempts, scores) lives in `.decomp/`. `decomp diff --source` never writes here.
+`decomp units emit` moves these files into their units' sources.
 
 ## `.decomp/`
 
@@ -407,9 +470,9 @@ The `run.json` of the same run, with one queue entry:
 
 ### `changes.jsonl` and `blobs/`
 
-Every file Decomp writes into the project (today: verified sources in `src/functions/`) is recorded
-in `changes.jsonl`, one JSON object per write, and the content it replaced is kept in
-`blobs/<sha1 of that content>`, so any write can be undone:
+Every file Decomp writes into the project (today: verified sources, in unit sources and
+`src/functions/`) is recorded in `changes.jsonl`, one JSON object per write, and the content it
+replaced is kept in `blobs/<sha1 of that content>`, so any write can be undone:
 
 ```json
 {"function":"?scale@@YAMM@Z","path":"src/functions/scale_401180.cpp","previous_sha1":null,"reason":"verified match","session":"2026-10-04T14-14-16-df8f-401180","sha1":"e5f5b03613cdcf0060ce0290b4b5b0d5b3fab780","size":71,"source":"agent","time":"2026-10-04T14:14:17.022Z","va":4198784}
@@ -417,17 +480,20 @@ in `changes.jsonl`, one JSON object per write, and the content it replaced is ke
 
 | Field | Meaning |
 |---|---|
-| `path` | Relative to the project directory |
+| `path` | Relative to the project directory, with forward slashes. Decomp writes, and reverts, only paths inside the project and outside `.decomp/`. |
 | `sha1`, `size` | The content written (`sha1` is `null` when a revert removed the file) |
 | `previous_sha1` | The content replaced, kept in `blobs/`; `null` for a new file |
 | `source`, `session`, `reason` | Who wrote it: `agent` (with its session) or `user`, and why. A match saved after the supervisor's approval says so (`verified match, approved by user`). |
 | `function`, `va`, `time` | The function and when (UTC) |
+| `unit`, `functions` | For a unit source: the unit, and the addresses of the functions the written source holds |
 
+A record with `sha1: null` removed the file (`decomp units emit` removes the files it took in).
 Reverting a change (`Project::revert_change`, the GUI's Changes and approvals view) restores the
 content it replaced, or removes the file when there was none, and appends its own record with
 `reason: "revert"`; the reverted content goes to `blobs/` too. Only a file still holding the content
-of that change can be reverted, so later changes are reverted first. A function whose matched source
-is removed goes back to `nonmatching`; its attempts and best source stay.
+of that change can be reverted, so later changes are reverted first. A function of the change that no
+longer has a verified source, in its unit's source or its own file, goes back to `nonmatching`; its
+attempts and best source stay.
 
 ### `symbols.log.jsonl`
 
@@ -440,7 +506,7 @@ it did not exist). `symbols.txt` holds the result; the log holds the provenance.
 
 | File | Held | Purpose |
 |---|---|---|
-| `project.lock` | Exclusively while `symbols.txt`, the logs beside it, a function's history (attempts, best source, notes) or `src/functions/` are written | Workers and processes never interleave writes; each write starts from the latest `symbols.txt` on disk |
+| `project.lock` | Exclusively while `symbols.txt`, the logs beside it, a function's history (attempts, best source, notes) or a verified source under `src/` are written | Workers and processes never interleave writes; each write starts from the latest `symbols.txt` on disk, and a unit source write checks that the file still holds what the change was composed onto |
 | `active-run.lock` | By the process that runs agent sessions (`decomp agent`, `decomp run`, `decomp-gui` during a run) | One live run per project |
 | `runs/<id>/run.lock` | By the process running that batch run | Tells a live run from an interrupted one; a run is resumed by one process at a time |
 
@@ -466,7 +532,7 @@ when a process dies, so a crash never leaves a project locked. The lock files th
 | `unstarted` | No attempt has scored yet. This is the default, and it is not written to `symbols.txt`. | `init`; the runner, when a session ends without any scored attempt |
 | `in_progress` | An agent session is working on it | The runner announces it (a `status` event) when a session starts, but never writes it to `symbols.txt`, so a crash leaves nothing stale. An older project may still contain it; the next session's end replaces it. |
 | `nonmatching` | At least one attempt scored above 0%, none matched; the best percentage is in `best=` | The runner, when a session ends without a match, give-up or refusal (budget, turn limit, no result, stop, abort or error) |
-| `matched` | A verified byte-exact source is in `src/functions/` | `submit_result` verification. A matched function stays matched, whatever later sessions do. |
+| `matched` | A verified byte-exact source is in the project: in its unit's source, or in `src/functions/` | `submit_result` verification. A matched function stays matched, whatever later sessions do. |
 | `refused` | The model declined the request, including after fallbacks when they are enabled | The runner |
 | `gave_up` | The agent called `submit_result` with `give_up` | The agent |
 | `skipped` | Excluded from work | Editing `symbols.txt`. The default batch selection leaves it out. |
@@ -601,7 +667,7 @@ reads as extra command-line options (planned), so make sure they are not set whe
 
 ## Git-friendliness
 
-- **What to commit:** `decomp.json`, `symbols.txt`, `units.txt`, `include/` and `src/functions/`. `init` writes a
+- **What to commit:** `decomp.json`, `symbols.txt`, `units.txt`, `include/` and `src/`. `init` writes a
   `.gitignore` that excludes `.decomp/`. Keep the target binary out of the repository unless you are
   allowed to redistribute it.
 - **Deterministic output:** JSON with sorted keys and two-space indentation; `symbols.txt` sorted by

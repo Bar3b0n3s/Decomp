@@ -540,7 +540,7 @@ private:
         if (ImGui::BeginPopupModal("Change status###confirm_status", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::Text("Mark %zu function(s) %s?", confirm_vas_.size(), std::string(status_text(confirm_status_)).c_str());
             if (confirm_matched_ > 0)
-                colored_text(ctx.colors().warn, std::format("{} of them are matched; their verified sources stay in src/functions/.", confirm_matched_));
+                colored_text(ctx.colors().warn, std::format("{} of them are matched; their verified sources stay in the project (src/).", confirm_matched_));
             ImGui::TextDisabled("Attempts, best sources and notes are kept.");
             if (ImGui::Button("Change")) {
                 set_status(ctx, access, std::move(confirm_vas_), confirm_status_);

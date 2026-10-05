@@ -38,15 +38,28 @@ bool is_source_file(std::string_view path) {
 }
 
 // The directories of a path, outermost first ("C:\src\game\player.cpp" -> C:, src, game).
+// A file or directory name that is safe in a project path on every host: characters other than letters,
+// digits and "_-.+ " become '_', and a name of dots only becomes "_".
+std::string path_component(std::string_view name) {
+    std::string out;
+    for (char c : name)
+        out += std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.' || c == '+' || c == ' ' ? c : '_';
+    if (out.find_first_not_of('.') == std::string::npos) out = "_";
+    return out;
+}
+
+// The directories of a path, outermost first, without its file, drive, `.` and `..` (a unit source never
+// leaves src/).
 std::vector<std::string> directories(std::string_view path) {
     std::vector<std::string> out;
     usize start = 0;
     for (usize i = 0; i <= path.size(); ++i) {
         if (i < path.size() && path[i] != '/' && path[i] != '\\') continue;
-        if (i > start) out.emplace_back(path.substr(start, i - start));
+        const std::string_view part = path.substr(start, i - start);
+        if (i == path.size()) break;  // the file
+        if (!part.empty() && part != "." && part != ".." && part.find(':') == std::string_view::npos) out.push_back(path_component(part));
         start = i + 1;
     }
-    if (!out.empty()) out.pop_back();  // the file
     return out;
 }
 
@@ -395,7 +408,7 @@ void assign_sources(UnitLayout& layout, const SymbolDb& symbols, const std::map<
         Pending p;
         p.unit = &u;
         if (auto it = sources.find(u.name); it != sources.end()) {
-            p.file = std::string(file_name(it->second));
+            p.file = path_component(file_name(it->second));
             p.dirs = directories(it->second);
         } else {
             bool cpp = false, any = false;
@@ -403,7 +416,7 @@ void assign_sources(UnitLayout& layout, const SymbolDb& symbols, const std::map<
                 any = true;
                 cpp = cpp || f->name.starts_with('?');
             }
-            p.file = std::string(stem(u.name)) + (any && !cpp ? ".c" : ".cpp");
+            p.file = path_component(stem(file_name(u.name))) + (any && !cpp ? ".c" : ".cpp");
         }
         pending.push_back(std::move(p));
     }

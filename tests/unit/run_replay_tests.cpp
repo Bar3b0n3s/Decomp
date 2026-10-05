@@ -7,6 +7,8 @@
 #include "events/bus.hpp"
 #include "events/run_state.hpp"
 #include "llvm_fixture.hpp"
+#include "matching/unit_source.hpp"
+#include "project/units.hpp"
 #include "run/controller.hpp"
 #include "run/selection.hpp"
 #include "run/store.hpp"
@@ -76,13 +78,22 @@ TEST_CASE("run: the x86 fixture on 4 workers with scripted API responses") {
     CHECK(workers.size() > 1);  // the work spread over several workers
     // Every scripted match landed in the project.
     const std::set<std::string> matched = {"add", "read_counter", "sum_array", "message", "scale", "mix", "Player::Hit", "other_value"};
+    const auto units = project::load_units(project).value();
     for (const auto& name : matched) {
         const u64 va = *program->resolve(name);
         CAPTURE(name);
         CHECK(project.function_info(va).status == project::FunctionStatus::matched);
-        CHECK(std::filesystem::exists(project.matched_source_path(*program->symbols().at(va))));
+        CHECK(project::has_matched_source(project, *program->symbols().at(va), units));
     }
     CHECK(project.function_info(*program->resolve("dispatch")).status == project::FunctionStatus::gave_up);
+    // The fixture's PDB gives the functions their units: the four workers composed their matches into
+    // the two units' sources, which verify byte-exact as a whole.
+    const auto verified = project::verify_unit_sources(project, *program, test::clang_setup(Arch::x86, tools->clang_cl, dir.path() / "verify")).value();
+    REQUIRE(verified.size() == 2);
+    CHECK(verified[0].unit.source == "src/basic.cpp");
+    CHECK(verified[0].verification.functions.size() == 7);
+    CHECK(verified[1].verification.functions.size() == 1);
+    for (const auto& v : verified) CHECK(v.verification.all_byte_exact());
     CHECK(snap->files_written.size() == 8);
     CHECK(snap->compiles >= 16);  // a compile and a verification per match
     // The run's record: run.json, summary.json (= a replay of the log) and one transcript per session.

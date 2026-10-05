@@ -2,6 +2,7 @@
 // and save, hand back; and the Agent session and Diff viewer over a scripted run, live and past.
 
 #include "matching/toolchain.hpp"
+#include "project/units.hpp"
 #include "session_views_support.hpp"
 #include "viewmodel/attempts.hpp"
 #include "viewmodel/common.hpp"
@@ -9,6 +10,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <format>
 #include <mutex>
 
 using namespace decomp;
@@ -98,9 +100,16 @@ TEST_CASE("manual mode: edits recompile in the background, and verify and save w
     REQUIRE(app.actions().run("diff.verify_and_save"));
     REQUIRE(frames_until(gui, app, &ws, [&] { return !view->busy(); }));
     gui.frames(3, [&] { app.frame(); });
-    const auto path = ws.project()->matched_source_path(fn);
-    REQUIRE(std::filesystem::exists(path));
-    CHECK(fs::read_text(path).value() == kRight);
+    // The fixture's PDB gives add its unit, basic.obj: the source joins the unit's source.
+    const auto location = project::matched_source_location(*ws.project(), fn, project::load_units(*ws.project()).value());
+    REQUIRE(location);
+    const auto path = *location;
+    CHECK(path == ws.project()->root() / "src" / "basic.cpp");
+    const std::string unit_text = fs::read_text(path).value();
+    CHECK(unit_text == std::format("extern int g_counter;\n\n// FUNCTION: {:#010x}\n"
+                                   "__declspec(noinline) int add(int a, int b) {{ return a + b + g_counter; }}\n",
+                                   va));
+    CHECK_FALSE(std::filesystem::exists(ws.project()->matched_source_path(fn)));
     CHECK(ws.project()->function_info(va).status == project::FunctionStatus::matched);
     CHECK(ws.project()->function_info(va).best_match == 100.0);
     CHECK(ws.project()->function_info(va).attempts == 1);
@@ -125,7 +134,7 @@ TEST_CASE("manual mode: edits recompile in the background, and verify and save w
     view->verify_and_save(app.context());
     REQUIRE(frames_until(gui, app, &ws, [&] { return !view->busy(); }));
     CHECK(vm::parse_attempts(ws.project()->attempts(fn)).size() == 2);
-    CHECK(fs::read_text(path).value() == kRight);
+    CHECK(fs::read_text(path).value() == unit_text);
     CHECK(ws.project()->function_info(va).status == project::FunctionStatus::matched);
 
     // Hand back without a live run: a run on this function with the edited source as guidance.

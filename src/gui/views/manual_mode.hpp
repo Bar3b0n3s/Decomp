@@ -35,10 +35,11 @@ struct CompiledSource {
 CompiledSource compile_source(const std::shared_ptr<const Program>& program, const project::Project& project, u64 va, const std::string& source,
                               const CancelToken& token);
 
-// "Verify and save": the check submit_result makes (compile, diff, require byte_exact), recorded as an
-// attempt with origin "user" in `session`; when it passes, the source is written to src/functions/
-// (ChangeOrigin user, "verified by hand") and the function becomes matched. `project` is a copy (copies
-// share state), so a job may hold it.
+// "Verify and save": the check submit_result makes (compile, diff, require byte_exact; in the function's
+// unit source when it has one), recorded as an attempt with origin "user" in `session`; when it passes,
+// the source is saved (ChangeOrigin user, "verified by hand": into the unit source, which must keep its
+// other functions byte-exact, else to src/functions/) and the function becomes matched. `project` is a
+// copy (copies share state), so a job may hold it.
 struct VerifyResult {
     CompiledSource compiled;
     bool saved = false;
