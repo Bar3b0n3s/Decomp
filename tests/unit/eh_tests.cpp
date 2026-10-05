@@ -2,9 +2,11 @@
 // in its function (analysis/discovery.hpp). The fixture is the corpus's eh.cpp, seh.c and eh_rt.c built
 // with clang-cl; its PDB is the truth.
 
+#include "analysis/annotate.hpp"
 #include "analysis/bounds.hpp"
 #include "analysis/eh.hpp"
 #include "analysis/program.hpp"
+#include "formats/map.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
@@ -98,4 +100,46 @@ TEST_CASE("discovery keeps catch blocks, unwind code and __except blocks in thei
         CHECK(m.kind == BoundsMismatch::Kind::extra);
         CHECK(cxx_stub_funcinfo(p.image(), p.decoder(), m.start));
     }
+}
+
+TEST_CASE("listings say which code exceptions reach: catch clauses, __except and __finally blocks") {
+    const Program p = Program::open(test::fixture("x86/eh.exe")).value();
+    const auto caught = annotate_function(p, p.symbols().find("?eh_catch@@YAHH@Z")->va).value();
+    REQUIRE(caught.exception_handling.size() == 1);
+    const std::string& line = caught.exception_handling[0];
+    CHECK(line.find("handler stub __ehhandler$?eh_catch@@YAHH@Z") != std::string::npos);
+    CHECK(line.find("1 try block; catch (Failure&) at loc_") != std::string::npos);  // clang leaves out the const
+    CHECK(line.find("catch (int) at loc_") != std::string::npos);
+    CHECK(line.find("catch (...) at loc_") != std::string::npos);
+    const std::string text = to_text(caught);
+    CHECK(text.find("; eh:       C++ exception handling") != std::string::npos);
+    CHECK(text.find("; catch (int) (try block 0)") != std::string::npos);
+    CHECK(text.find("__ehhandler$?eh_catch@@YAHH@Z") != text.rfind("; eh:"));  // in the registration too
+
+    const auto nested = annotate_function(p, p.symbols().find("seh_nested")->va).value();
+    REQUIRE(nested.exception_handling.size() == 1);
+    CHECK(nested.exception_handling[0].starts_with("__try 0: __except at loc_"));
+    CHECK(nested.exception_handling[0].ends_with("filter at ?filt$0@0@seh_nested@@"));
+    CHECK(to_text(nested).find("__sehtable$_seh_nested") != std::string::npos);
+
+    // MSVC's layout (the idiom fixture): a catch (...) block in the function, nested __try blocks.
+    const Program idioms = Program::open(test::fixture("x86/idioms.exe")).value();
+    const auto m = map::load(test::fixture("x86/idioms.map")).value();
+    auto va_of = [&](std::string_view name) {
+        auto e = std::ranges::find(m.entries, std::string(name), &map::Entry::name);
+        REQUIRE(e != m.entries.end());
+        return e->va;
+    };
+    const auto catcher = annotate_function(idioms, va_of("_eh_catcher")).value();
+    REQUIRE(catcher.exception_handling.size() == 1);
+    CHECK(catcher.exception_handling[0].find("catch (...) at loc_") != std::string::npos);
+    const auto seh = annotate_function(idioms, va_of("_seh_user")).value();
+    REQUIRE(seh.exception_handling.size() == 2);
+    CHECK(seh.exception_handling[0].starts_with("__try 0: __except at loc_"));
+    CHECK(seh.exception_handling[1].starts_with("__try 1 in __try 0: __finally at loc_"));
+    CHECK(to_text(seh).find("; __finally block (__try 1)") != std::string::npos);
+
+    CatchHandler h;
+    h.type = 0;
+    CHECK(catch_clause(p.image(), h) == "catch (...)");
 }

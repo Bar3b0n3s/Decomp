@@ -45,6 +45,9 @@ struct AnnotatedFunction {
     std::vector<std::string> callers;  // readable names
     std::vector<JumpTable> jump_tables;
     std::vector<std::string> virtual_slots;  // where vftables hold the function (RTTI)
+    // x86 exception handling the function registers: its try blocks' catch clauses, its __try blocks'
+    // __except and __finally blocks, and where they are.
+    std::vector<std::string> exception_handling;
 };
 
 // What an address in the image refers to, for operands and comments.

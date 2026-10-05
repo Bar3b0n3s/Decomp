@@ -1,6 +1,9 @@
 #include "analysis/eh.hpp"
 
+#include "analysis/demangle.hpp"
+
 #include <algorithm>
+#include <format>
 
 namespace decomp {
 
@@ -70,10 +73,14 @@ std::optional<CxxFuncInfo> read_cxx_funcinfo(const BinaryImage& image, u64 va) {
         if (!data_at(image, handlers, handler_size * catches)) return std::nullopt;
         for (u32 c = 0; c < catches; ++c) {
             const u64 h = handlers + handler_size * c;
-            const u64 type = address_of(image, read32(image, h + 4));
-            const u64 code = address_of(image, read32(image, h + 12));
-            if ((type && !image.contains(type)) || !code_at(image, code)) return std::nullopt;
-            fi.catch_blocks.push_back(code);
+            CatchHandler handler;
+            handler.try_block = t;
+            handler.adjectives = read32(image, h);
+            handler.type = address_of(image, read32(image, h + 4));
+            handler.code = address_of(image, read32(image, h + 12));
+            if ((handler.type && !image.contains(handler.type)) || !code_at(image, handler.code)) return std::nullopt;
+            fi.catch_blocks.push_back(handler.code);
+            fi.handlers.push_back(handler);
         }
     }
     sort_unique(fi.unwind_actions);
@@ -100,6 +107,41 @@ std::optional<u64> cxx_stub_funcinfo(const BinaryImage& image, const x86::Decode
         at += ins->length;
     }
     return std::nullopt;
+}
+
+std::string catch_clause(const BinaryImage& image, const CatchHandler& handler) {
+    if (!handler.type || (handler.adjectives & 0x40)) return "catch (...)";
+    // The TypeDescriptor's name (".?AUFailure@@", ".H") is its symbol's (??_R0?AUFailure@@@8) without
+    // the prefix and suffix.
+    std::string type = "?";
+    if (const auto name = image.read_cstring(handler.type + 2 * pointer_size(image.arch()), 512); name && name->starts_with('.')) {
+        type = display_name("??_R0" + name->substr(1) + "@8");
+        if (const auto tag = type.find(" `RTTI Type Descriptor'"); tag != std::string::npos) type.erase(tag);
+        for (std::string_view kind : {"struct ", "class ", "union ", "enum "})
+            if (type.starts_with(kind)) type.erase(0, kind.size());
+    }
+    if (type.ends_with(" *")) type.erase(type.size() - 2, 1);  // "char *" -> "char*"
+    return std::format("catch ({}{}{}{})", handler.adjectives & 1 ? "const " : "", handler.adjectives & 2 ? "volatile " : "", type,
+                       handler.adjectives & 8 ? "&" : "");
+}
+
+FunctionEh function_eh(const BinaryImage& image, const x86::Decoder& decoder, std::span<const x86::Instruction> code) {
+    FunctionEh out;
+    if (image.arch() != Arch::x86) return out;
+    for (const auto& ins : code)
+        for (const auto& f : ins.fields) {
+            if (f.kind != x86::FieldKind::imm || f.size != 4) continue;
+            const u64 value = static_cast<u32>(f.raw);
+            if (!out.cxx && image.is_code(value)) {
+                if (const auto info = cxx_stub_funcinfo(image, decoder, value)) {
+                    out.cxx = read_cxx_funcinfo(image, *info);
+                    if (out.cxx) out.stub = value;
+                }
+            } else if (!out.seh && image.contains(value) && !image.is_code(value)) {
+                out.seh = read_scope_table(image, value);
+            }
+        }
+    return out;
 }
 
 std::optional<ScopeTable> read_scope_table(const BinaryImage& image, u64 va) {

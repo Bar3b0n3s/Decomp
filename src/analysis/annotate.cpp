@@ -1,6 +1,7 @@
 #include "analysis/annotate.hpp"
 
 #include "analysis/demangle.hpp"
+#include "analysis/eh.hpp"
 #include "core/strings.hpp"
 
 #include <algorithm>
@@ -116,12 +117,55 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
     // Branch targets inside the function get labels.
     std::set<u64> labelled;
     for (const auto& x : ins)
-        if (x.branch_target && ext.contains(*x.branch_target) && (x.flow == x86::Flow::jump || x.flow == x86::Flow::cond_jump))
+        if (x.branch_target && ext.contains(*x.branch_target) && *x.branch_target != ext.start &&
+            (x.flow == x86::Flow::jump || x.flow == x86::Flow::cond_jump || x.flow == x86::Flow::call))  // a call: a __finally block
             labelled.insert(*x.branch_target);
     for (const auto& t : ext.jump_tables)
         for (u64 target : t.targets)
             if (target) labelled.insert(target);
+    // So do the places whose address the code holds (where a catch block resumes).
+    for (const auto& x : ins)
+        for (const auto& f : x.fields)
+            if (f.kind != x86::FieldKind::rel && ext.contains(f.absolute) && f.absolute != ext.start && is_address_field(program, x, f) &&
+                std::ranges::none_of(ext.jump_tables, [&](const JumpTable& t) { return t.table_va == f.absolute || t.index_va == f.absolute; }))
+                labelled.insert(f.absolute);
     auto label_for = [](u64 va) { return std::format("loc_{:x}", va); };
+
+    // Code only exceptions reach: labelled, with what it is.
+    std::map<u64, std::vector<std::string>> eh_notes;
+    const FunctionEh eh = function_eh(program.image(), program.decoder(), ins);
+    auto where = [&](u64 va) { return ext.contains(va) ? label_for(va) : describe_reference(program, va).display; };
+    auto mark = [&](u64 va, std::string note) {
+        if (!ext.contains(va)) return;
+        labelled.insert(va);
+        eh_notes[va].push_back(std::move(note));
+    };
+    if (eh.cxx) {
+        for (const auto& h : eh.cxx->handlers) mark(h.code, std::format("{} (try block {})", catch_clause(program.image(), h), h.try_block));
+        for (u64 a : eh.cxx->unwind_actions) mark(a, "unwind code: destroys objects while an exception passes");
+        std::vector<std::string> clauses;
+        for (const auto& h : eh.cxx->handlers)
+            clauses.push_back(std::format("{} at {}", catch_clause(program.image(), h), where(h.code)));
+        const std::string stub = program.symbols().at(eh.stub) ? where(eh.stub) : std::format("__ehhandler${}", fn.name);
+        fn.exception_handling.push_back(std::format("C++ exception handling (handler stub {}): {} try block{}{}{}", stub,
+                                                    eh.cxx->try_blocks, eh.cxx->try_blocks == 1 ? "" : "s", clauses.empty() ? "" : "; ",
+                                                    join(clauses, ", ")));
+    }
+    if (eh.seh) {
+        for (usize i = 0; i < eh.seh->entries.size(); ++i) {
+            const ScopeEntry& e = eh.seh->entries[i];
+            const std::string within = e.enclosing >= 0 ? std::format(" in __try {}", e.enclosing) : "";
+            if (e.filter) {
+                mark(e.filter, std::format("__except filter (__try {})", i));
+                mark(e.handler, std::format("__except block (__try {})", i));
+                fn.exception_handling.push_back(
+                    std::format("__try {}{}: __except at {}, filter at {}", i, within, where(e.handler), where(e.filter)));
+            } else {
+                mark(e.handler, std::format("__finally block (__try {})", i));
+                fn.exception_handling.push_back(std::format("__try {}{}: __finally at {}", i, within, where(e.handler)));
+            }
+        }
+    }
 
     std::map<u64, Reference> callees, data_refs;
     const auto rva_fields = image_relative_fields(program.image(), ins);
@@ -172,6 +216,10 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
             if (ext.contains(f.absolute) && !std::ranges::any_of(ext.jump_tables, [&](const JumpTable& t) { return t.table_va == f.absolute; }))
                 return label_for(f.absolute);
             auto ref = describe_reference(program, f.absolute);
+            // The exception-handling registration, by MSVC's names for it, unless a symbol is there.
+            const Symbol* at = program.symbols().at(f.absolute);
+            if (!at && eh.cxx && f.absolute == eh.stub) return std::format("__ehhandler${}", fn.name);
+            if (!at && eh.seh && f.absolute == eh.seh->va) return std::format("__sehtable${}", fn.name);
             bool is_table = std::ranges::any_of(ext.jump_tables, [&](const JumpTable& t) { return t.table_va == f.absolute; });
             if (is_table) {
                 return std::format("switch_table_{:x}", f.absolute);
@@ -203,6 +251,7 @@ Result<AnnotatedFunction> annotate_function(const Program& program, u64 start, b
             for (u64 target : t.targets) targets.push_back(target ? label_for(target) : "none");
             notes.push_back(std::format("switch: {} cases -> {}", t.targets.size(), join(targets, ", ")));
         }
+        if (auto it = eh_notes.find(x.address); it != eh_notes.end()) notes.insert(notes.end(), it->second.begin(), it->second.end());
         const auto& block = cfg.blocks[line.block];
         if (block.first == i && block.loop_header) notes.push_back(std::format("loop header (depth {})", block.loop_depth));
         for (usize s : block.successors)
@@ -246,6 +295,7 @@ std::string to_text(const AnnotatedFunction& fn, bool with_bytes) {
                        fn.end - fn.start, fn.instruction_count, fn.block_count, fn.loop_count);
     if (!fn.callers.empty()) out += std::format("; callers:  {}\n", join(fn.callers, ", "));
     for (const auto& v : fn.virtual_slots) out += std::format("; virtual:  {}\n", v);
+    for (const auto& e : fn.exception_handling) out += std::format("; eh:       {}\n", e);
     for (const auto& c : fn.callees)
         out += std::format("; calls:    {} = {}\n", c.display, c.detail.empty() ? c.name : c.detail);
     for (const auto& d : fn.data_refs)
@@ -279,6 +329,7 @@ Json to_json(const AnnotatedFunction& fn) {
     j["loops"] = fn.loop_count;
     j["callers"] = fn.callers;
     j["virtual_slots"] = fn.virtual_slots;
+    j["exception_handling"] = fn.exception_handling;
     auto refs = [](const std::vector<Reference>& list) {
         Json arr = Json::array();
         for (const auto& r : list)
