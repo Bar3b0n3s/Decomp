@@ -178,3 +178,32 @@ TEST_CASE("Program::with_symbols shares the image and starts fresh analysis") {
     auto bare = Program::open(no_pdb_dir.path() / "basic.exe").value();
     CHECK(bare.pdb_status() == PdbStatus::absent);
 }
+
+TEST_CASE("modify_functions changes many functions in one write; save_notes replaces the notes") {
+    Fixture fx;
+    Project other = Project::load(fx.root).value();
+    REQUIRE(fx.project.update_function(0x401060, FunctionInfo{FunctionStatus::nonmatching, 62.5, 3, 0.25}));
+    const u64 before = fx.project.version();
+    const std::vector<u64> vas = {0x401060, 0x4010f0, 0x401000};
+    REQUIRE(fx.project.modify_functions(vas, [](u64, FunctionInfo& info) { info.status = FunctionStatus::skipped; }));
+    CHECK(fx.project.version() == before + 1);  // one rewrite of symbols.txt
+    const FunctionInfo kept = fx.project.function_info(0x401060);
+    CHECK(kept.status == FunctionStatus::skipped);
+    CHECK(kept.best_match == 62.5);  // history stays
+    CHECK(kept.attempts == 3);
+    // Another project object (another process) sees the change in the file.
+    CHECK(other.reload_if_changed().value());
+    for (u64 va : vas) CHECK(other.function_info(va).status == FunctionStatus::skipped);
+    CHECK(fx.project.modify_functions({}, [](u64, FunctionInfo&) {}));
+    CHECK(fx.project.version() == before + 1);  // nothing to write
+
+    const Program program = fx.project.open_program().value();
+    const Symbol& add = *program.symbols().at(0x401060);
+    REQUIRE(fx.project.append_note(add, "first"));
+    CHECK(fx.project.notes(add).find("first") != std::string::npos);
+    REQUIRE(fx.project.save_notes(add, "- edited by hand\n"));
+    CHECK(fx.project.notes(add) == "- edited by hand\n");
+    const Symbol& mix = *program.symbols().at(0x4011a0);
+    REQUIRE(fx.project.save_notes(mix, "new notes"));  // a function without notes yet
+    CHECK(fx.project.notes(mix) == "new notes");
+}

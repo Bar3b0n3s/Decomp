@@ -5,6 +5,7 @@
 #include "gui/fonts.hpp"
 #include "gui/layout.hpp"
 #include "gui/theme.hpp"
+#include "gui/views/palette_search.hpp"
 #include "gui/views/views.hpp"
 #include "gui/workspace.hpp"
 #include "run/store.hpp"
@@ -67,7 +68,7 @@ App::App(AppServices services, Settings& settings)
     ImGui::GetStyle().FontSizeBase = settings_.font_size;  // before the first frame: no _NextFrame hack needed
     apply_style();
     register_actions();
-    palette_.add_provider("search", [this](const PaletteQuery& q, ViewContext& ctx, std::vector<PaletteItem>& out) { search_.provide(q, ctx, out); });
+    add_palette_providers(palette_);  // functions, symbols and strings (gui/views/palette_search.hpp)
 }
 
 App::~App() { save_settings(); }
@@ -143,7 +144,6 @@ void App::open_project(const std::filesystem::path& root) {
 void App::poll_workspace() {
     Workspace* ws = services_.workspace;
     if (!ws) return;
-    search_.poll(jobs_, ws->project_state().phase == ProjectPhase::open ? ws->program() : nullptr);
     // The developer setting may change in Settings; new runs use the current value.
     if (fs::to_utf8(ws->replay_dir()) != settings_.developer.replay_dir) ws->set_replay_dir(fs::from_utf8(settings_.developer.replay_dir));
     ws->poll();

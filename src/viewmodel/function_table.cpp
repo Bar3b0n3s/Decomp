@@ -241,6 +241,8 @@ Result<std::vector<u32>> filter_and_sort(const std::vector<FunctionRow>& rows, c
         if (filter.min_size && r.size < *filter.min_size) continue;
         if (filter.max_size && r.size > *filter.max_size) continue;
         if (filter.refused && r.stored_status != FunctionStatus::refused) continue;
+        if (filter.min_best && r.best_match < *filter.min_best) continue;
+        if (filter.best_below && r.best_match >= *filter.best_below) continue;
         if (filter.unknown_callees && r.unknown_callees.value_or(0) == 0) continue;
         if (!needle.empty() && !icontains(r.name, needle) && !icontains(r.display, needle)) continue;
         if (pattern && !std::regex_search(r.name, *pattern) && !std::regex_search(r.display, *pattern)) continue;

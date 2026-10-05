@@ -395,6 +395,17 @@ Result<void> Project::update_function(u64 va, const FunctionInfo& info) {
     return {};
 }
 
+Result<void> Project::modify_functions(std::span<const u64> vas, const std::function<void(u64, FunctionInfo&)>& change) {
+    if (vas.empty()) return {};
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
+    TRY(reload_locked(*state_));
+    auto next = std::make_shared<std::map<u64, FunctionInfo>>(*state_->functions);
+    for (u64 va : vas) change(va, (*next)[va]);
+    state_->functions = std::move(next);
+    return write_symbols_locked(*state_);
+}
+
 Result<SymbolChange> Project::set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin) {
     if (edit.va == 0) return make_error(ErrorCode::invalid_argument, "set_symbol: no address");
     if (edit.name && trim(*edit.name).empty()) return make_error(ErrorCode::invalid_argument, "set_symbol: empty name");
@@ -490,6 +501,12 @@ Result<void> Project::append_note(const Symbol& fn, const std::string& note) con
     std::lock_guard lock(state_->mutex);
     TRY_ASSIGN(auto file_lock, lock_project());
     return fs::append_text(function_dir(fn) / "notes.md", std::format("- {:%Y-%m-%d %H:%M}: {}\n", now, note));
+}
+
+Result<void> Project::save_notes(const Symbol& fn, const std::string& text) const {
+    std::lock_guard lock(state_->mutex);
+    TRY_ASSIGN(auto file_lock, lock_project());
+    return fs::write_text(function_dir(fn) / "notes.md", text);
 }
 
 Result<WriteReceipt> Project::write_matched_source(const Symbol& fn, const std::string& source, const ChangeOrigin& origin) const {

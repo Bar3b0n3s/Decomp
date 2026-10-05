@@ -86,6 +86,9 @@ struct FunctionFilter {
     std::string name;
     bool unknown_callees = false;  // only functions with an unknown callee (rows not analyzed yet are left out)
     bool refused = false;          // only refused functions
+    // Best match in percent: at least min_best, and below best_below (the Dashboard's distribution bins
+    // are half-open, [50, 60) for instance).
+    std::optional<double> min_best = std::nullopt, best_below = std::nullopt;
 };
 
 // Indices of the rows that pass `filter`, ordered by `sort` (each key breaks the ties of the previous

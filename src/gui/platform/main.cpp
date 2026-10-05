@@ -91,6 +91,7 @@ struct Options {
     std::string config_dir;
     std::string theme;
     std::string replay_dir;
+    std::string function;
     bool run_all = false;
     bool exit_when_done = false;
     int frames = 0;
@@ -279,6 +280,7 @@ int run_app(const Options& opt) {
     int frame = 0;
     int settle = 3;
     bool run_requested = false;
+    bool function_selected = false;
     int frames_after_run = -1;  // --exit-when-done: frames rendered since the run ended
     while (exit_code == 0 && !app->wants_quit()) {
         // --run-all: once the project is loaded, start a run over the default selection.
@@ -296,6 +298,19 @@ int run_app(const Options& opt) {
             } else {
                 log::info("run {} started", *started);
             }
+        }
+        // --function: once the project is open, select the function in the --view view (or the Inspector).
+        if (!opt.function.empty() && !function_selected && workspace->project_state().phase == gui::ProjectPhase::open) {
+            function_selected = true;
+            const auto program = workspace->program();
+            const auto va = program ? program->resolve(opt.function) : std::nullopt;
+            if (!va) {
+                log::error("--function: the project has no function '{}'", opt.function);
+                exit_code = 2;
+                break;
+            }
+            const gui::View* shown = opt.view.empty() ? nullptr : app->find_view(opt.view);
+            app->context().open(std::string(shown ? shown->id() : "inspector"), gui::NavTarget{.va = *va});
         }
         if (opt.exit_when_done && run_requested && !workspace->run_live() && frames_after_run < 0) frames_after_run = 0;
         const bool last_frame = (opt.frames > 0 && frame + 1 == opt.frames) || frames_after_run == 10;
@@ -372,6 +387,8 @@ int main(int argc, char** argv) {
     cli.add_option("--config-dir", opt.config_dir, "Directory for gui.json, imgui.ini and the log (default: the user config directory)");
     cli.add_option("--replay-dir", opt.replay_dir,
                    "Scripted API responses per function instead of the live API (a developer setting, saved)");
+    cli.add_option("--function", opt.function,
+                   "Select a function (name or address) once the project is open, in the --view view or the Inspector (needs --project)");
     cli.add_flag("--run-all", opt.run_all, "Start a run over the default selection once the project is open (needs --project)");
     cli.add_flag("--exit-when-done", opt.exit_when_done, "With --run-all: exit when the run ends (after a screenshot, if asked)");
     cli.add_flag("-v,--verbose", opt.verbose, "More logging (repeat for trace)");
@@ -384,8 +401,8 @@ int main(int argc, char** argv) {
         std::fputs("error: --screenshot needs --frames or --exit-when-done\n", stderr);
         return 2;
     }
-    if ((opt.run_all || opt.exit_when_done) && opt.project.empty()) {
-        std::fputs("error: --run-all and --exit-when-done need --project\n", stderr);
+    if ((opt.run_all || opt.exit_when_done || !opt.function.empty()) && opt.project.empty()) {
+        std::fputs("error: --run-all, --exit-when-done and --function need --project\n", stderr);
         return 2;
     }
     return run_app(opt);

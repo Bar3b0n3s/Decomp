@@ -10,6 +10,7 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -128,6 +129,9 @@ public:
     // starting from the latest state on disk, and rewrites symbols.txt. Returns the new state.
     Result<FunctionInfo> modify_function(u64 va, const std::function<void(FunctionInfo&)>& change);
     Result<void> update_function(u64 va, const FunctionInfo& info);
+    // The same for many functions at once (the GUI's bulk status changes): one lock, one reload and one
+    // rewrite of symbols.txt for all of them.
+    Result<void> modify_functions(std::span<const u64> vas, const std::function<void(u64, FunctionInfo&)>& change);
     // Renames, creates, resizes or removes a symbol; recorded in .decomp/symbols.log.jsonl.
     Result<SymbolChange> set_symbol(const SymbolEdit& edit, const ChangeOrigin& origin);
     // The symbols as symbols.txt holds them.
@@ -146,6 +150,8 @@ public:
     Result<void> save_best_source(const Symbol& fn, const std::string& source) const;
     std::string notes(const Symbol& fn) const;
     Result<void> append_note(const Symbol& fn, const std::string& note) const;
+    // Replaces the notes (the GUI's note editor); empty text leaves an empty notes.md.
+    Result<void> save_notes(const Symbol& fn, const std::string& text) const;
     // Writes the verified source to src/functions/; the previous content is kept as a blob and the
     // write is recorded in .decomp/changes.jsonl.
     Result<WriteReceipt> write_matched_source(const Symbol& fn, const std::string& source, const ChangeOrigin& origin = {}) const;
