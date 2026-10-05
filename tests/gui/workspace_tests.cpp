@@ -7,6 +7,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -122,6 +123,45 @@ TEST_CASE("workspace: a project loads in the background and a run over it comple
     // The finished run stays on screen until another starts or it is closed.
     fx.workspace->close_run();
     CHECK_FALSE(fx.workspace->snapshot());
+}
+
+TEST_CASE("workspace: the code analysis runs in the background and orders the runs started here") {
+    Fixture fx;
+    fx.open();
+    CHECK_FALSE(fx.workspace->function_analysis());
+    const u64 serial = fx.workspace->analysis_serial();
+    fx.workspace->poll();  // starts it for the loaded program
+    fx.workspace->wait_analysis();
+    const auto analysis = fx.workspace->function_analysis();
+    REQUIRE(analysis);
+    CHECK(fx.workspace->analysis_serial() != serial);
+    CHECK_FALSE(fx.workspace->analysis_progress());
+    const auto program = fx.workspace->program();
+    CHECK(analysis->functions.size() == program->symbols().functions().size());
+    // Polling the same program again starts nothing.
+    fx.workspace->poll();
+    CHECK_FALSE(fx.workspace->analysis_progress());
+    CHECK(fx.workspace->function_analysis() == analysis);
+
+    // A run over every function: easy ones first, scored by the analysis.
+    fx.sessions.hold = true;
+    REQUIRE(fx.workspace->start_run({}));
+    const auto queue = fx.workspace->controller()->queue();
+    REQUIRE(queue.size() == 13);
+    CHECK(std::ranges::is_sorted(queue, {}, &run::QueueItem::difficulty));
+    for (const auto& item : queue) CHECK(item.difficulty == doctest::Approx(difficulty(*analysis->find(item.va))));
+    fx.workspace->end_run(true);
+    fx.sessions.release();
+    CHECK(fx.until([&] { return !fx.workspace->run_live(); }));
+
+    // New symbols, a new program generation: analyzed again. Closing the project drops the analysis.
+    fx.workspace->reload_symbols();
+    fx.workspace->poll();
+    fx.workspace->wait_analysis();
+    CHECK(fx.workspace->function_analysis() != analysis);
+    fx.workspace->close_run();
+    fx.workspace->close_project();
+    CHECK_FALSE(fx.workspace->function_analysis());
 }
 
 TEST_CASE("workspace: a stopped run reopens read-only and resumes where it stopped") {

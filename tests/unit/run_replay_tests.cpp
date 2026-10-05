@@ -34,12 +34,7 @@ TEST_CASE("run: the x86 fixture on 4 workers with scripted API responses") {
     const auto vas = run::select_functions(*program, &project, {}).value();
     REQUIRE(vas.size() == 13);  // every function but the ExitProcess import thunk
 
-    std::vector<run::QueueItem> items;
-    for (u64 va : vas) {
-        const Symbol* s = program->symbols().at(va);
-        items.push_back(run::QueueItem{.va = va, .name = s->name, .display = s->display.empty() ? s->name : s->display,
-                                       .difficulty = run::estimate_difficulty(*s)});
-    }
+    std::vector<run::QueueItem> items = run::make_queue_items(*program, vas, nullptr, false);
     const std::string run_id = "2026-10-04T13-00-00-replay";
     events::EventBus bus(run_id);
     events::RunStateStore state;

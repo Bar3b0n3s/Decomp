@@ -215,16 +215,9 @@ Result<int> run_run(const GlobalOptions& g, const RunArgs& a) {
             }
         TRY_ASSIGN(auto vas, run::select_functions(*program, &project, selection));
         if (vas.empty()) return make_error(ErrorCode::invalid_argument, "no functions match the selection");
-        for (u64 va : vas) {
-            const Symbol* s = program->symbols().at(va);
-            run::QueueItem item;
-            item.va = va;
-            item.name = s ? s->name : std::format("sub_{:x}", va);
-            item.display = s && !s->display.empty() ? s->display : item.name;
-            item.difficulty = s ? run::estimate_difficulty(*s) : 0;
-            items.push_back(std::move(item));
-        }
-        std::ranges::stable_sort(items, {}, &run::QueueItem::difficulty);
+        // Scored by their code (about a microsecond per instruction), easy ones first.
+        const FunctionAnalysis analysis = analyze_functions(*program, vas);
+        items = run::make_queue_items(*program, vas, &analysis, true);
         TRY_ASSIGN(auto created, run::RunStore::create(project.runs_dir(), events::new_run_id()));
         store = std::move(created);
     }

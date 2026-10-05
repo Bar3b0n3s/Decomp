@@ -7,12 +7,12 @@
 // background job with analyze_functions() + apply_analysis() for the analysis columns, and
 // filter_and_sort() as a background job whenever the filter, the sort or the rows change.
 
+#include "analysis/difficulty.hpp"
 #include "analysis/symbols.hpp"
 #include "core/result.hpp"
 #include "events/run_state.hpp"
 #include "project/project.hpp"
 #include "viewmodel/common.hpp"
-#include "viewmodel/difficulty.hpp"
 
 #include <functional>
 #include <map>

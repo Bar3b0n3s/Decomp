@@ -243,6 +243,11 @@ ISA-neutral decoder interface for other ISAs is planned (Phase 7).
   `/GR` build names, their bases and vftables (`Program::rtti()`, `decomp classes`).
 - Library functions (`analysis/signatures.hpp`, see [Library functions](#library-functions)): the
   functions of static libraries as masked byte signatures, matched against the target.
+- Difficulty (`analysis/difficulty.hpp`): features of a function's code (size, instructions, blocks,
+  loops and their depth, jump tables, calls, named and unnamed callees, callers) and a score built
+  from them. `analyze_functions()` computes them for many functions (about a microsecond per
+  instruction); runs queue their functions easiest first by the score (`run::make_queue_items()`), the
+  GUI's workspace keeps an analysis per program generation, and the Function browser shows it.
 - Translation units (`analysis/units.hpp`): the object files the program was linked from, in link
   order, and the unit of each function and global. `units_from_pdb()` takes them from the PDB's modules
   and section contributions, `units_from_objects()` from the object files a link map (or a library
@@ -492,7 +497,8 @@ Batch runs ([agent.md](agent.md#batch-runs) has the behavior):
 - `select_functions()` (`run/selection.hpp`): the default selection skips matched, refused, skipped
   and library functions, imports, linker thunks and functions without a size or recoverable extent.
 - `WorkQueue` (`run/queue.hpp`): pending functions in dispatch order, with pins, moves, removal and
-  requeueing.
+  requeueing. `make_queue_items()` makes a new run's items, each with its difficulty score, easiest
+  first for a selection.
 - `RunStore` (`run/store.hpp`): a run's directory (`run.json`, `summary.json`, `events.jsonl`,
   `sessions/`, `run.lock`), `list_runs()`, `find_run()` and `run_summary()`.
 - `RunController` (`run/controller.hpp`): N worker threads take functions from the queue and run one
@@ -529,7 +535,7 @@ background jobs; each header says what its functions cost.
 |---|---|
 | `progress.hpp` | Dashboard progress: `decomp status`'s numbers, status segments with the live overlay, the best-match distribution, progress over time from run summaries |
 | `treemap.hpp` | Squarified treemap layout, the treemap of the code by section, hit testing |
-| `difficulty.hpp`, `eta.hpp` | Code features and a difficulty score per function; session durations by size bucket and the queue's ETA |
+| `eta.hpp` | Session durations by size bucket and the queue's ETA |
 | `function_table.hpp` | Function browser rows, filter and multi-column sort (an index permutation) |
 | `series.hpp` | Chart series: throughput per minute, spend, cache-hit rate, scores per attempt, the worker timeline |
 | `cost.hpp` | Spend by run, day, model and function; per-match figures; the projection for the remaining functions |

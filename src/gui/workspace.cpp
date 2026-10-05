@@ -48,6 +48,7 @@ bool ready(const std::future<T>& f) {
 Workspace::Workspace(Options options) : options_(std::move(options)) {}
 
 Workspace::~Workspace() {
+    cancel_analysis();
     if (live_ && live_->controller) live_->controller->abort();
     live_.reset();
 }
@@ -86,6 +87,57 @@ void Workspace::poll() {
             error_ = std::format("cannot open the run: {}", loaded.error().message);
         }
     }
+    poll_analysis();
+}
+
+// ---- code analysis ------------------------------------------------------------------------------------
+
+void Workspace::poll_analysis() {
+    if (ready(analysis_result_)) {
+        if (auto result = analysis_result_.get()) {
+            analysis_ = std::move(result);
+            ++analysis_serial_;
+        }
+        analysis_job_.reset();
+    }
+    const auto current = program();
+    if (!current || analysis_result_.valid()) return;
+    if (!analyzed_.owner_before(current) && !current.owner_before(analyzed_) && !analyzed_.expired()) return;  // done or under way
+    analyzed_ = current;
+    auto job = std::make_shared<AnalysisJob>();
+    analysis_job_ = job;
+    analysis_result_ = std::async(std::launch::async, [current, job, this]() -> std::shared_ptr<const FunctionAnalysis> {
+        std::vector<u64> vas;
+        for (const Symbol* s : current->symbols().functions()) vas.push_back(s->va);
+        job->total = vas.size();
+        auto analysis = analyze_functions(
+            *current, vas, [&job] { return job->cancel.load(); },
+            [&job](usize done, usize total) {
+                job->done = done;
+                job->total = total;
+            });
+        notify_ui();
+        if (analysis.cancelled) return nullptr;
+        return std::make_shared<const FunctionAnalysis>(std::move(analysis));
+    });
+}
+
+void Workspace::cancel_analysis() {
+    if (analysis_job_) analysis_job_->cancel = true;
+    if (analysis_result_.valid()) analysis_result_.wait();
+    analysis_result_ = {};
+    analysis_job_.reset();
+}
+
+std::optional<std::pair<usize, usize>> Workspace::analysis_progress() const {
+    if (!analysis_job_) return std::nullopt;
+    return std::pair<usize, usize>(analysis_job_->done.load(), analysis_job_->total.load());
+}
+
+void Workspace::wait_analysis() {
+    poll_analysis();
+    if (analysis_result_.valid()) analysis_result_.wait();
+    poll_analysis();
 }
 
 // ---- project ----------------------------------------------------------------------------------------
@@ -122,6 +174,10 @@ void Workspace::close_project() {
     if (run_live()) return;
     if (project_load_.valid()) project_load_.wait();
     project_load_ = {};
+    cancel_analysis();
+    analysis_.reset();
+    analyzed_.reset();
+    ++analysis_serial_;
     close_run();
     project_.reset();
     {
@@ -255,17 +311,8 @@ Result<std::string> Workspace::start_run(const RunRequest& request) {
         vas = std::move(selected);
     }
     if (vas.empty()) return make_error(ErrorCode::invalid_argument, "nothing to run: every function is matched or set aside");
-    std::vector<run::QueueItem> items;
-    for (u64 va : vas) {
-        const Symbol* s = current->symbols().at(va);
-        run::QueueItem item;
-        item.va = va;
-        item.name = s ? s->name : std::format("sub_{:x}", va);
-        item.display = s && !s->display.empty() ? s->display : item.name;
-        item.difficulty = s ? run::estimate_difficulty(*s) : 0;
-        items.push_back(std::move(item));
-    }
-    if (!chosen) std::ranges::stable_sort(items, {}, &run::QueueItem::difficulty);  // easy functions first
+    // Easy functions first, unless the functions were chosen in an order.
+    auto items = run::make_queue_items(*current, vas, analysis_.get(), !chosen);
     options.selection = chosen ? Json{{"functions", vas}, {"from", "gui"}} : Json{{"all", true}, {"from", "gui"}};
     close_run();
     TRY_ASSIGN(auto store, run::RunStore::create(project_->runs_dir(), events::new_run_id()));
@@ -436,17 +483,7 @@ usize WorkspaceCommands::enqueue(std::vector<u64> functions) {
     auto* c = controller();
     auto program = workspace_.program();
     if (!c || !program) return 0;
-    std::vector<run::QueueItem> items;
-    for (u64 va : functions) {
-        const Symbol* s = program->symbols().at(va);
-        run::QueueItem item;
-        item.va = va;
-        item.name = s ? s->name : std::format("sub_{:x}", va);
-        item.display = s && !s->display.empty() ? s->display : item.name;
-        item.difficulty = s ? run::estimate_difficulty(*s) : 0;
-        items.push_back(std::move(item));
-    }
-    return c->enqueue(std::move(items));
+    return c->enqueue(run::make_queue_items(*program, functions, workspace_.function_analysis().get(), false));
 }
 bool WorkspaceCommands::remove(u64 va) {
     auto* c = controller();

@@ -1,4 +1,4 @@
-#include "viewmodel/difficulty.hpp"
+#include "analysis/difficulty.hpp"
 #include "viewmodel/function_table.hpp"
 #include "viewmodel_support.hpp"
 

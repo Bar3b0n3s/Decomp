@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 
 namespace decomp::run {
 
@@ -45,7 +46,28 @@ Result<QueueItem> QueueItem::from_json(const Json& j) {
     return item;
 }
 
-double estimate_difficulty(const Symbol& fn) { return std::log2(1.0 + static_cast<double>(fn.size)); }
+double queue_difficulty(const Program& program, u64 va, const FunctionAnalysis* analysis) {
+    if (analysis)
+        if (const FunctionFeatures* f = analysis->find(va)) return difficulty(*f);
+    const Symbol* s = program.symbols().at(va);
+    return s ? size_difficulty(*s) : 0;
+}
+
+std::vector<QueueItem> make_queue_items(const Program& program, std::span<const u64> vas, const FunctionAnalysis* analysis, bool easy_first) {
+    std::vector<QueueItem> items;
+    items.reserve(vas.size());
+    for (u64 va : vas) {
+        const Symbol* s = program.symbols().at(va);
+        QueueItem item;
+        item.va = va;
+        item.name = s ? s->name : std::format("sub_{:x}", va);
+        item.display = s && !s->display.empty() ? s->display : item.name;
+        item.difficulty = queue_difficulty(program, va, analysis);
+        items.push_back(std::move(item));
+    }
+    if (easy_first) std::ranges::stable_sort(items, {}, &QueueItem::difficulty);
+    return items;
+}
 
 usize WorkQueue::enqueue(std::vector<QueueItem> items) {
     usize added = 0;

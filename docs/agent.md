@@ -831,8 +831,11 @@ the controller adds the queue, the workers and the run-wide controls. So a `deco
 same run directory as a batch run: `decomp runs list` and the GUI list it, and a stopped one resumes
 with `decomp run --resume`.
 
-**Queue and workers.** The functions are queued in the order given, or for a selection by an estimate
-of difficulty (from the function's size), easiest first. N workers (`--workers`, `agent.workers`,
+**Queue and workers.** The functions are queued in the order given, or for a selection easiest first:
+by the difficulty score of their code (`analysis/difficulty.hpp`: size, blocks, loops, calls,
+callees nobody has named, jump tables), which `decomp run` computes for the selected functions before
+it starts (about a microsecond per instruction). The GUI takes the scores from the code analysis it
+keeps for the open program; a run started before that analysis is done is ordered by size. N workers (`--workers`, `agent.workers`,
 default 4, at most 64) each take the next pending function and run one session at a time. Pinned
 functions go first. Functions can be added, removed, moved, pinned, skipped (a running session stops
 after its turn with `skipped`) and requeued (a finished function runs again, with a new session)

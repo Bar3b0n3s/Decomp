@@ -186,11 +186,8 @@ Result<int> run_agent(const GlobalOptions& g, const AgentArgs& a) {
     live->controller = std::make_unique<run::RunController>(std::move(deps), live->bus);
 
     const Symbol* sym = program->symbols().at(va);
-    run::QueueItem item;
-    item.va = va;
-    item.name = sym ? sym->name : std::format("sub_{:x}", va);
-    item.display = sym && !sym->display.empty() ? sym->display : item.name;
-    item.difficulty = sym ? run::estimate_difficulty(*sym) : 0;
+    const FunctionAnalysis analysis = analyze_functions(*program, std::span<const u64>(&va, 1));
+    run::QueueItem item = run::make_queue_items(*program, std::span<const u64>(&va, 1), &analysis, false).front();
     run::RunOptions options;
     options.workers = 1;
     options.agent = config;

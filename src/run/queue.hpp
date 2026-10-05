@@ -2,12 +2,14 @@
 
 // The functions of a run and their dispatch order. Not thread-safe: the run controller guards it.
 
+#include "analysis/difficulty.hpp"
 #include "analysis/program.hpp"
 #include "core/json.hpp"
 #include "core/result.hpp"
 #include "core/types.hpp"
 
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,8 +41,13 @@ struct QueueItem {
     static Result<QueueItem> from_json(const Json& j);
 };
 
-// Rough effort estimate from the function's size (log2 of its bytes): easy functions go first.
-double estimate_difficulty(const Symbol& fn);
+// A function's difficulty score for the queue: difficulty() of its code's features from `analysis` when
+// that covers it, else size_difficulty() of its symbol (nothing is decoded).
+double queue_difficulty(const Program& program, u64 va, const FunctionAnalysis* analysis);
+// The items of a new run over `vas`, each with its name and queue_difficulty(). With `easy_first`, the
+// easy functions go first (a stable sort, so equal scores keep the order of `vas`); otherwise they keep
+// the order of `vas`.
+std::vector<QueueItem> make_queue_items(const Program& program, std::span<const u64> vas, const FunctionAnalysis* analysis, bool easy_first);
 
 // Outcomes after which a resumed run does not work on the function again (matched, gave up, refused,
 // out of its budget or turns, no result, skipped). Stopped, aborted and failed sessions run again.

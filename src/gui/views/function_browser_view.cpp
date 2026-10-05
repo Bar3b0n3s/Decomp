@@ -1,10 +1,12 @@
 // Function browser (docs/ui.md#function-browser-and-inspector): every function in a virtualized,
 // sortable, filterable table with the live overlay of the run, multi-selection and the actions on it:
 // run or queue the selection, mark it skipped or library, reset it, open a function elsewhere, edit
-// notes, export the list. Rows, the code analysis and the filtered order are background jobs.
+// notes, export the list. Rows and the filtered order are background jobs; the code analysis is the
+// workspace's.
 
 #include "gui/views/function_browser_view.hpp"
 
+#include "analysis/difficulty.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
 #include "gui/export.hpp"
@@ -13,7 +15,6 @@
 #include "gui/widgets.hpp"
 #include "gui/workspace.hpp"
 #include "viewmodel/browser.hpp"
-#include "viewmodel/difficulty.hpp"
 #include "viewmodel/exports.hpp"
 #include "viewmodel/function_table.hpp"
 #include "viewmodel/progress.hpp"
@@ -31,15 +32,6 @@ namespace {
 using project::FunctionStatus;
 
 using LastAttempts = std::map<u64, std::pair<int, std::optional<vm::TimePoint>>>;
-
-struct AnalysisKey {
-    std::weak_ptr<const Program> program;
-    bool operator==(const AnalysisKey& o) const { return !program.owner_before(o.program) && !o.program.owner_before(program); }
-};
-
-struct AnalysisProgress {
-    std::atomic<usize> done{0}, total{0};
-};
 
 struct RowsKey {
     ProjectInputs project;
@@ -136,7 +128,6 @@ private:
     // ---- jobs -----------------------------------------------------------------------------------------
 
     void update_jobs(ViewContext& ctx, const ProjectAccess& access) {
-        if (analysis_.poll()) ++analysis_generation_;
         if (rows_.poll()) ++rows_generation_;
         if (order_.poll()) ++order_generation_;
 
@@ -145,38 +136,18 @@ private:
         if (const std::string root = fs::to_utf8(project.root()); root != project_root_) {
             // Another project: nothing shown so far applies to it.
             project_root_ = root;
-            analysis_.reset();
             rows_.reset();
             order_.reset();
         }
-        // The code analysis (callers, callees, blocks, loops, difficulty): once per program generation; the
-        // previous generation's results stay applied (by address) until the new ones arrive.
-        if (const AnalysisKey key{program}; !analysis_.requested(key)) {
-            auto progress = std::make_shared<AnalysisProgress>();
-            analysis_progress_ = progress;
-            analysis_.update(ctx.jobs, key, [program, progress] {
-                return [program, progress](const CancelToken& token) {
-                    std::vector<u64> vas;
-                    for (const Symbol* s : program->symbols().functions()) vas.push_back(s->va);
-                    progress->total = vas.size();
-                    auto analysis = vm::analyze_functions(
-                        *program, vas, [&token] { return token.cancelled(); },
-                        [progress](usize done, usize total) {
-                            progress->done = done;
-                            progress->total = total;
-                        });
-                    return std::make_shared<const vm::FunctionAnalysis>(std::move(analysis));
-                };
-            });
-        }
-
+        // The code analysis (callers, callees, blocks, loops, difficulty) is the workspace's, once per program
+        // generation; the previous generation's results stay applied (by address) until the new ones arrive.
         const events::RunStateData* live = live_run(ctx);
         const std::shared_ptr<const events::RunStateData> live_snapshot = live ? ctx.snapshot : nullptr;
         const u64 overlay = live ? vm::live_overlay_digest(*live) : 0;
-        const auto analysis = analysis_.value() ? *analysis_.value() : nullptr;
+        const auto analysis = access.workspace->function_analysis();
         const auto previous = rows_.value() ? rows_.value()->attempts : nullptr;
         rows_.update(
-            ctx.jobs, RowsKey{project_inputs(access), overlay, analysis_generation_},
+            ctx.jobs, RowsKey{project_inputs(access), overlay, access.workspace->analysis_serial()},
             [&] {
                 return [=](const CancelToken& token) {
                     auto rows = vm::build_function_rows(program->symbols(), *project.function_infos(), live_snapshot.get());
@@ -432,9 +403,9 @@ private:
         } else {
             ImGui::TextDisabled("Listing the functions...");
         }
-        if (analysis_.busy() && analysis_progress_) {
+        if (const auto progress = access.workspace->analysis_progress()) {
             ImGui::SameLine();
-            const usize t = analysis_progress_->total.load(), d = analysis_progress_->done.load();
+            const auto [d, t] = *progress;
             ImGui::TextDisabled("analyzing the code: %zu%%", t ? d * 100 / t : 0);
         }
         busy_marker(ctx, rows_.busy() || order_.busy());
@@ -458,7 +429,7 @@ private:
     void draw_table(ViewContext& ctx, const ProjectAccess& access) {
         if (!order_.value() || !order_.value()->rows) return;
         const OrderData& d = *order_.value();
-        table_.set_analysis_pending(analysis_.busy() || !analysis_.value());
+        table_.set_analysis_pending(access.workspace->analysis_progress().has_value() || !access.workspace->function_analysis());
         const auto menu = [&](const vm::FunctionRow& row) { row_menu(ctx, access, row); };
         const FunctionTable::Events ev = table_.draw(ctx, *d.rows, d.order, ImVec2(0, 0), menu);
         if (ev.clicked) {
@@ -584,9 +555,6 @@ private:
     std::optional<u64> current_;
     std::string project_root_;
 
-    KeyedJob<AnalysisKey, std::shared_ptr<const vm::FunctionAnalysis>> analysis_;
-    std::shared_ptr<AnalysisProgress> analysis_progress_;
-    u64 analysis_generation_ = 0;
     KeyedJob<RowsKey, RowsData> rows_;
     u64 rows_generation_ = 0;
     KeyedJob<OrderKey, OrderData> order_;

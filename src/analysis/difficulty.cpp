@@ -1,4 +1,4 @@
-#include "viewmodel/difficulty.hpp"
+#include "analysis/difficulty.hpp"
 
 #include "analysis/cfg.hpp"
 
@@ -7,7 +7,7 @@
 #include <set>
 #include <unordered_map>
 
-namespace decomp::vm {
+namespace decomp {
 
 namespace {
 
@@ -118,6 +118,8 @@ double difficulty(const FunctionFeatures& f) {
            0.25 * std::min<u32>(f.callees, 20) + std::min<u32>(f.unknown_callees, 10) + 0.5 * std::min<u32>(f.jump_tables, 4);
 }
 
+double size_difficulty(const Symbol& fn) { return std::log2(1.0 + static_cast<double>(fn.size)); }
+
 std::string_view difficulty_label(double score) {
     if (score < 8) return "easy";
     if (score < 14) return "medium";
@@ -125,4 +127,4 @@ std::string_view difficulty_label(double score) {
     return "very hard";
 }
 
-} // namespace decomp::vm
+} // namespace decomp

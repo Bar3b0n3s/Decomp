@@ -169,9 +169,11 @@ the new one is ready.
   budget exhausted, idle) or that it retired after concurrency was lowered.
 - A plain-language live activity feed, for example "int __cdecl add(int, int): turn 2
   compile_and_diff -> compile: ok", with follow.
-- The queue, with order, difficulty estimate and ETA. The queue's difficulty estimate comes from the
-  function's size (the Function browser's difficulty column also weighs blocks, loops, calls and
-  unknown callees). The ETA uses this project's observed session durations by size bucket (the last
+- The queue, with order, difficulty estimate and ETA. The difficulty estimate is the score the
+  Function browser's difficulty column shows (size, blocks, loops, calls and unknown callees), and a
+  run started here queues its functions easiest first by it. The workspace computes the scores in the
+  background when the project opens and for each new program generation; a run started before they
+  are ready uses the size alone. The ETA uses this project's observed session durations by size bucket (the last
   ten runs and the live run). A large run's queue arrives as its first 500 functions plus the number
   pending.
 - A worker timeline: a Gantt chart of phases per worker, to spot bottlenecks such as long compile
@@ -349,8 +351,9 @@ a transcript of several megabytes scrolls smoothly. Links can open a session on 
 
 - `SymbolDb`; `symbols.txt` for status, best percentage, attempts, spend and source; the function's
   `attempts.jsonl` and `notes.md`.
-- The code analysis (`vm::analyze_functions`: callers, callees, unknown callees, blocks, loops and
-  difficulty), once per program generation, with its progress shown. The listing is
+- The code analysis (`analyze_functions()` in `analysis/difficulty.hpp`: callers, callees, unknown
+  callees, blocks, loops and difficulty), which the workspace computes once per program generation
+  and runs order their queue by, with its progress shown. The listing is
   `vm::build_listing` over `annotate_function`; cross-references are `vm::function_xrefs`
   (`Program::xrefs_to` and `xrefs_from`).
 - The status history: the `status_changed` events in every run's `events.jsonl`

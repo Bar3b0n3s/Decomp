@@ -1,6 +1,11 @@
+#include "analysis/difficulty.hpp"
 #include "run/queue.hpp"
+#include "run/selection.hpp"
+#include "test_util.hpp"
 
 #include <doctest/doctest.h>
+
+#include <algorithm>
 
 using namespace decomp;
 using namespace decomp::run;
@@ -87,9 +92,31 @@ TEST_CASE("queue items round-trip through JSON") {
     CHECK(back->outcome == "matched");
     CHECK(back->difficulty == doctest::Approx(4.2));
     CHECK_FALSE(QueueItem::from_json(Json{{"name", "no address"}}));
-    Symbol small;
-    small.size = 15;
-    Symbol large;
-    large.size = 4000;
-    CHECK(estimate_difficulty(small) < estimate_difficulty(large));
+}
+
+TEST_CASE("queue items: easy functions first, scored by their code") {
+    const Program p = Program::open(test::fixture("x86/basic.exe")).value();
+    const auto vas = select_functions(p, nullptr, {}).value();
+    REQUIRE(vas.size() == 13);
+    const FunctionAnalysis analysis = analyze_functions(p, vas);
+    const auto items = make_queue_items(p, vas, &analysis, true);
+    REQUIRE(items.size() == vas.size());
+    CHECK(std::ranges::is_sorted(items, {}, &QueueItem::difficulty));
+    auto item = [&](const char* name) { return *std::ranges::find(items, *p.resolve(name), &QueueItem::va); };
+    auto position = [&](const char* name) { return std::ranges::find(items, *p.resolve(name), &QueueItem::va) - items.begin(); };
+    // A 15-byte leaf goes before a switch with calls, and before the entry point that calls everything.
+    CHECK(position("add") < position("dispatch"));
+    CHECK(position("add") < position("entry"));
+    CHECK(item("add").display == "int __cdecl add(int, int)");
+    CHECK(item("add").state == ItemState::pending);
+    // The score is the code's: the entry point's calls weigh more than its size alone.
+    const QueueItem entry = item("entry");
+    CHECK(entry.difficulty == doctest::Approx(difficulty(*analysis.find(entry.va))));
+    CHECK(entry.difficulty > size_difficulty(*p.symbols().at(entry.va)) + 2);
+    // Without an analysis (a GUI run started before it is done), the size decides.
+    for (const auto& i : make_queue_items(p, vas, nullptr, true))
+        CHECK(i.difficulty == doctest::Approx(size_difficulty(*p.symbols().at(i.va))));
+    // Functions chosen in an order keep it.
+    const auto kept = make_queue_items(p, vas, &analysis, false);
+    CHECK(std::ranges::equal(kept, vas, {}, &QueueItem::va));
 }

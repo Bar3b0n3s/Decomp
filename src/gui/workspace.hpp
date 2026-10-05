@@ -10,6 +10,7 @@
 
 #include "agent/approvals.hpp"
 #include "agent/loop.hpp"
+#include "analysis/difficulty.hpp"
 #include "analysis/program.hpp"
 #include "events/bus.hpp"
 #include "events/run_state.hpp"
@@ -87,6 +88,18 @@ public:
     const std::optional<project::TargetStatus>& target_status() const { return target_status_; }
     // Symbols changed (set_symbol): later sessions see a new program generation.
     void reload_symbols();
+
+    // ---- code analysis ----
+    // The features and difficulty of every function of the program (analysis/difficulty.hpp), computed
+    // in the background once the project is open and again for each new program generation. Null until
+    // the first is done; an older generation's stays until the new one is done. Runs started here order
+    // their functions by it (by size while it is null), and the Function browser shows it.
+    std::shared_ptr<const FunctionAnalysis> function_analysis() const { return analysis_; }
+    u64 analysis_serial() const { return analysis_serial_; }  // changes whenever function_analysis() does
+    // While an analysis runs: the functions done and their total; nullopt otherwise.
+    std::optional<std::pair<usize, usize>> analysis_progress() const;
+    // Blocks until the running analysis is done and taken (tests).
+    void wait_analysis();
     void set_replay_dir(std::filesystem::path dir) { options_.replay_dir = std::move(dir); }
     const std::filesystem::path& replay_dir() const { return options_.replay_dir; }
 
@@ -153,6 +166,18 @@ private:
     std::optional<SymbolDb> derived_symbols_;
     std::optional<project::TargetStatus> target_status_;
     std::future<Result<LoadedProject>> project_load_;
+
+    struct AnalysisJob {
+        std::atomic<usize> done{0}, total{0};
+        std::atomic<bool> cancel{false};
+    };
+    void poll_analysis();
+    void cancel_analysis();
+    std::shared_ptr<const FunctionAnalysis> analysis_;
+    u64 analysis_serial_ = 0;
+    std::weak_ptr<const Program> analyzed_;  // the generation the latest job started on
+    std::shared_ptr<AnalysisJob> analysis_job_;
+    std::future<std::shared_ptr<const FunctionAnalysis>> analysis_result_;
 
     std::unique_ptr<LiveRun> live_;
     std::optional<PastRun> past_;

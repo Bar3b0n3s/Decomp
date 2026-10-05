@@ -1,8 +1,9 @@
 #pragma once
 
 // How hard a function looks before anyone has worked on it: features of its code (size, basic blocks,
-// loops, calls, callees nobody has named) and a score built from them. The Run monitor shows the score
-// with each queued function, the Function browser has it as a column, and runs can order by it.
+// loops, calls, callees nobody has named) and a score built from them. Runs dispatch the easy functions
+// first (run::make_queue_items()), the Run monitor shows the score with each queued function, and the
+// Function browser has it as a column.
 
 #include "analysis/program.hpp"
 #include "core/result.hpp"
@@ -12,7 +13,7 @@
 #include <string_view>
 #include <vector>
 
-namespace decomp::vm {
+namespace decomp {
 
 struct FunctionFeatures {
     u64 va = 0;
@@ -46,14 +47,15 @@ struct FunctionAnalysis {
 // complete caller counts). Callers are counted at the thunk's destination when a call goes through a
 // linker thunk, which Program::callers_of() does not do. Decodes each function once, single-threaded:
 // 1 to 1.5 microseconds per instruction in a Release build (a generated program of 38,000
-// instructions, one function of 15,000, took about 50 ms in tests/unit/viewmodel_eta_tests.cpp), so a
+// instructions, one function of 15,000, took about 50 ms in tests/unit/difficulty_tests.cpp), so a
 // target of 100,000 functions and 10 million instructions takes 10 to 15 seconds; run it as a
 // background job.
 // `cancelled` is polled between functions; `progress(done, total)` is called every 256 functions.
 FunctionAnalysis analyze_functions(const Program& program, std::span<const u64> vas, const std::function<bool()>& cancelled = {},
                                    const std::function<void(usize, usize)>& progress = {});
 
-// The difficulty score. It extends run::estimate_difficulty (log2 of the size) with the other features:
+// The difficulty score: log2 of the size, the estimate for a function that cannot be decoded
+// (size_difficulty()), extended with the other features:
 //   log2(1 + bytes) + 0.5 * log2(1 + blocks) + min(loops, 8) + 0.5 * min(max_loop_depth, 4)
 //   + 0.25 * min(callees, 20) + min(unknown_callees, 10) + 0.5 * min(jump_tables, 4)
 // Unknown callees weigh most after size: the agent must work out their signatures. On the test
@@ -61,7 +63,9 @@ FunctionAnalysis analyze_functions(const Program& program, std::span<const u64> 
 // or a switch, or for a 240-byte function making ten calls; a function of thousands of bytes with
 // many blocks and calls scores above 20. Pure arithmetic.
 double difficulty(const FunctionFeatures& features);
+// log2(1 + size): the score of a function known only by its symbol.
+double size_difficulty(const Symbol& fn);
 // "easy" below 8, "medium" below 14, "hard" below 20, then "very hard".
 std::string_view difficulty_label(double score);
 
-} // namespace decomp::vm
+} // namespace decomp

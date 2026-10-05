@@ -1,9 +1,9 @@
 #include "gui/views/function_table_widget.hpp"
 
+#include "analysis/difficulty.hpp"
 #include "core/strings.hpp"
 #include "gui/views/view_support.hpp"
 #include "viewmodel/common.hpp"
-#include "viewmodel/difficulty.hpp"
 
 #include <imgui_internal.h>
 
@@ -125,7 +125,7 @@ void FunctionTable::draw_cell(ViewContext& ctx, const vm::FunctionRow& r, vm::Co
     case vm::Column::loops: optional_number(r.loops, analysis_pending_); break;
     case vm::Column::difficulty:
         if (r.difficulty) {
-            *std::format_to_n(buf, sizeof buf - 1, "{:.1f} {}", *r.difficulty, vm::difficulty_label(*r.difficulty)).out = '\0';
+            *std::format_to_n(buf, sizeof buf - 1, "{:.1f} {}", *r.difficulty, difficulty_label(*r.difficulty)).out = '\0';
             ImGui::TextUnformatted(buf);
         } else {
             ImGui::TextUnformatted(analysis_pending_ ? "..." : "-");
