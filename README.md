@@ -132,6 +132,7 @@ decomp toolchain test vc6
 # symbols.txt (symbols from the PDB, exports and imports)
 mkdir game && cd game
 decomp init ../path/to/GAME.EXE --toolchain vc6 --flag /O2 --flag /Gy
+# (with the build's link map, if there is one: --map ../path/to/GAME.MAP, or later `decomp map import`)
 
 # Explore the target
 decomp funcs                                      # functions with address, size and symbol source

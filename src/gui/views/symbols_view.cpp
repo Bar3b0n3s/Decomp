@@ -57,7 +57,7 @@ struct RevertOutcome {
 
 constexpr std::array<SymbolKind, 7> kKinds = {SymbolKind::function, SymbolKind::data,  SymbolKind::string, SymbolKind::float_const,
                                               SymbolKind::import,   SymbolKind::label, SymbolKind::unknown};
-constexpr std::array<SymbolSource, 7> kSources = {SymbolSource::analysis, SymbolSource::import_table, SymbolSource::export_table, SymbolSource::pdb_public,
+constexpr std::array<SymbolSource, 8> kSources = {SymbolSource::analysis, SymbolSource::import_table, SymbolSource::export_table, SymbolSource::map, SymbolSource::pdb_public,
                                                   SymbolSource::pdb,      SymbolSource::agent,        SymbolSource::user};
 
 struct ColumnSpec {

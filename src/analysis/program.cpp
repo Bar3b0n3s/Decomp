@@ -5,6 +5,7 @@
 #include "core/strings.hpp"
 #include "analysis/demangle.hpp"
 #include "analysis/discovery.hpp"
+#include "formats/map.hpp"
 #include "formats/pdb.hpp"
 
 #include <algorithm>
@@ -142,8 +143,21 @@ Result<Program> Program::open(const std::filesystem::path& binary, const OpenOpt
     if (pdb_path && !reader) return make_error(ErrorCode::not_found, "PDB '{}' could not be used", fs::to_utf8(*pdb_path));
     p.symbols_ = SymbolDb::from_pe(*p.image_, reader.get());
     p.fold_linker_thunks();
+    if (options.map) {
+        TRY_ASSIGN(auto named, p.add_map(*options.map));
+        log::debug("map: {} symbols from '{}'", named, fs::to_utf8(*options.map));
+    }
     if (options.discover && p.pdb_status_ != PdbStatus::matched) p.add_discovered_functions();
     return p;
+}
+
+Result<usize> Program::add_map(const std::filesystem::path& map_path) {
+    TRY_ASSIGN(auto m, map::load(map_path));
+    if (auto ok = map::check_image(m, *image_); !ok) return make_error(ok.error().code, "{}: {}", fs::to_utf8(map_path), ok.error().message);
+    if (m.timestamp && *m.timestamp && image_->timestamp() && *m.timestamp != image_->timestamp())
+        log::warn("{}: written for a link at another time (timestamp {:08x}, the image's is {:08x})", fs::to_utf8(map_path), *m.timestamp,
+                  image_->timestamp());
+    return symbols_.add_map(m, *image_);
 }
 
 void Program::add_discovered_functions() {

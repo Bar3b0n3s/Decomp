@@ -60,6 +60,12 @@ Result<MapFile> parse(std::string_view text) {
             first = false;
             continue;
         }
+        if (trimmed.starts_with("Timestamp is")) {
+            const auto t = tokens(trimmed);
+            if (t.size() >= 3)
+                if (auto v = hex_value(t[2]); v && *v <= 0xFFFFFFFF) m.timestamp = static_cast<u32>(*v);
+            continue;
+        }
         if (trimmed.starts_with("Preferred load address is")) {
             if (auto v = hex_value(trim(trimmed.substr(25)))) m.preferred_base = *v;
             continue;
@@ -122,6 +128,21 @@ Result<MapFile> parse(std::string_view text) {
     if (m.module.empty()) return make_error(ErrorCode::parse, "not a linker map file (empty)");
     if (m.entries.empty() && m.sections.empty()) return make_error(ErrorCode::parse, "not a linker map file: no sections or symbols found");
     return m;
+}
+
+Result<void> check_image(const MapFile& m, const BinaryImage& image) {
+    if (!m.entry_point || m.entry_point->first == 0) return {};
+    const auto& sections = image.image_sections();
+    const auto [section, offset] = *m.entry_point;
+    if (section > sections.size())
+        return make_error(ErrorCode::invalid_argument, "the map file is not for this image: its entry point is in section {} and the image has {}",
+                          section, sections.size());
+    const u64 entry = sections[section - 1].va + offset;
+    if (entry != image.entry_point())
+        return make_error(ErrorCode::invalid_argument,
+                          "the map file is not for this image: its entry point is {:#x} ({:04x}:{:08x}) and the image's is {:#x}", entry,
+                          section, offset, image.entry_point());
+    return {};
 }
 
 Result<MapFile> load(const std::filesystem::path& path) {

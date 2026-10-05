@@ -102,9 +102,11 @@ public:
     // Searches `start` (or the current directory when empty) and its parents for decomp.json.
     static Result<Project> find(const std::string& start = {});
     static Result<Project> load(const std::filesystem::path& root);
-    // Creates a project for `binary` in `root`, importing its symbols into symbols.txt.
+    // Creates a project for `binary` in `root`, importing its symbols into symbols.txt: from the PDB,
+    // the build's link map (`map`) and the functions the analysis finds.
     static Result<Project> init(const std::filesystem::path& root, const std::filesystem::path& binary,
-                                const std::optional<std::filesystem::path>& pdb, const std::string& toolchain);
+                                const std::optional<std::filesystem::path>& pdb, const std::string& toolchain,
+                                const std::optional<std::filesystem::path>& map = std::nullopt);
     Project();  // an empty project; use find/load/init
 
     const std::filesystem::path& root() const { return root_; }

@@ -59,7 +59,8 @@ enum class PdbStatus : u8 {
 std::string_view to_string(PdbStatus status);
 
 struct OpenOptions {
-    std::optional<std::filesystem::path> pdb;  // this PDB instead of the one found next to the image
+    std::optional<std::filesystem::path> pdb = {};  // this PDB instead of the one found next to the image
+    std::optional<std::filesystem::path> map = {};  // the build's link map: names, object files, function starts
     bool use_pdb = true;  // false: open as if the image had no PDB (to measure the analysis against it)
     // Find the functions by analysis (discover_functions) when no usable PDB describes them. A project
     // opens without it: its symbols.txt lists the functions found when it was created.
@@ -88,6 +89,13 @@ public:
 
     // The same image with a different symbol database (fresh analysis caches).
     Program with_symbols(SymbolDb symbols) const;
+
+    // Adds the symbols of the build's link map (SymbolDb::add_map) once it is known to describe this
+    // image. Returns the number of symbols it added or renamed. Call before the analysis is queried.
+    Result<usize> add_map(const std::filesystem::path& map_path);
+    // Functions found by discover_functions() from the current symbols become symbols (named sub_<va>
+    // unless already named; import thunks after their import). Call before the analysis is queried.
+    void add_discovered_functions();
     Arch arch() const { return image_->arch(); }
 
     // "0x401000", "401000h", a decorated name, a readable name or a PDB name -> address.
@@ -120,8 +128,6 @@ public:
 
 private:
     void fold_linker_thunks();
-    // Functions found by discover_functions() become symbols (named sub_<va> unless already named).
-    void add_discovered_functions();
     std::optional<x86::Instruction> decode_at(u64 va) const;
     void build_xrefs() const;
     // A switch table dispatched by `jmp`; `before` holds the instructions that run before it, in order.

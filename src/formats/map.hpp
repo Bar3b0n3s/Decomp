@@ -10,6 +10,7 @@
 
 #include "core/result.hpp"
 #include "core/types.hpp"
+#include "formats/image.hpp"
 
 #include <filesystem>
 #include <optional>
@@ -39,6 +40,7 @@ struct Entry {
 
 struct MapFile {
     std::string module;
+    std::optional<u32> timestamp;  // the image's TimeDateStamp when it was linked (0 in reproducible builds)
     u64 preferred_base = 0;
     std::vector<Section> sections;
     std::vector<Entry> entries;  // publics, then statics, in file order
@@ -48,5 +50,9 @@ struct MapFile {
 
 Result<MapFile> parse(std::string_view text);
 Result<MapFile> load(const std::filesystem::path& path);
+
+// Whether the map was written for `image`: its entry point has to be the image's (a map of another build
+// would name the wrong code). The error says what differs.
+Result<void> check_image(const MapFile& map, const BinaryImage& image);
 
 } // namespace decomp::map

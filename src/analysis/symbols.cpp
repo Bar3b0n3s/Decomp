@@ -2,6 +2,7 @@
 
 #include "analysis/demangle.hpp"
 #include "core/strings.hpp"
+#include "formats/map.hpp"
 #include "formats/pdb.hpp"
 #include "formats/pe.hpp"
 
@@ -29,6 +30,7 @@ std::string_view to_string(SymbolSource source) {
     case SymbolSource::analysis: return "analysis";
     case SymbolSource::import_table: return "import";
     case SymbolSource::export_table: return "export";
+    case SymbolSource::map: return "map";
     case SymbolSource::pdb_public: return "pdb_public";
     case SymbolSource::pdb: return "pdb";
     case SymbolSource::agent: return "agent";
@@ -46,7 +48,7 @@ std::optional<SymbolKind> symbol_kind_from_string(std::string_view s) {
 }
 
 std::optional<SymbolSource> symbol_source_from_string(std::string_view s) {
-    for (auto k : {SymbolSource::analysis, SymbolSource::import_table, SymbolSource::export_table,
+    for (auto k : {SymbolSource::analysis, SymbolSource::import_table, SymbolSource::export_table, SymbolSource::map,
                    SymbolSource::pdb_public, SymbolSource::pdb, SymbolSource::agent, SymbolSource::user})
         if (to_string(k) == s) return k;
     return std::nullopt;
@@ -92,9 +94,19 @@ void SymbolDb::add(Symbol symbol) {
     }
     if (existing.size == 0) existing.size = symbol.size;
     if (existing.pdb_name.empty()) existing.pdb_name = symbol.pdb_name;
+    if (existing.object.empty()) existing.object = symbol.object;
     if (existing.kind == SymbolKind::unknown || (takes_over && symbol.kind != SymbolKind::unknown)) existing.kind = symbol.kind;
     existing.is_static = existing.is_static || symbol.is_static;
     index(existing);
+}
+
+void SymbolDb::add_alias(u64 va, const std::string& name) {
+    auto it = by_va_.find(va);
+    if (it == by_va_.end() || name.empty() || it->second.name == name) return;
+    Symbol& s = it->second;
+    if (std::ranges::find(s.aliases, name) != s.aliases.end()) return;
+    s.aliases.push_back(name);
+    index(s);
 }
 
 bool SymbolDb::remove(u64 va) {
@@ -168,6 +180,43 @@ SymbolKind kind_for_public(const pdb::PublicSymbol& p) {
 }
 
 } // namespace
+
+usize SymbolDb::add_map(const map::MapFile& m, const BinaryImage& image) {
+    const u64 delta = m.preferred_base ? image.image_base() - m.preferred_base : 0;
+    usize changed = 0;
+    for (const auto& e : m.entries) {
+        if (e.section == 0 || e.name.empty()) continue;  // absolute symbols
+        const u64 va = e.va + delta;
+        if (!image.contains(va)) continue;
+        Symbol s;
+        s.va = va;
+        s.name = e.name;
+        s.source = SymbolSource::map;
+        s.is_static = e.is_static;
+        s.object = e.object;
+        if (is_string_literal_symbol(e.name)) s.kind = SymbolKind::string;
+        else if (is_float_constant_symbol(e.name)) s.kind = SymbolKind::float_const;
+        else if (e.name.starts_with("__imp_")) s.kind = SymbolKind::import;
+        else if (!image.is_code(va)) s.kind = SymbolKind::data;
+        else if (m.has_function_flags && !e.function) s.kind = SymbolKind::label;
+        else s.kind = SymbolKind::function;
+        const Symbol* before = at(va);
+        if (s.kind == SymbolKind::label && before && before->kind == SymbolKind::function) {
+            // A label at a function's start is another name for it; a function keeps a name from the
+            // map or a better source.
+            if (before->source >= SymbolSource::map) {
+                add_alias(va, s.name);
+                continue;
+            }
+            s.kind = SymbolKind::function;
+        }
+        const std::string old_name = before ? before->name : std::string();
+        const bool existed = before != nullptr;
+        add(std::move(s));
+        if (!existed || at(va)->name != old_name) ++changed;
+    }
+    return changed;
+}
 
 SymbolDb SymbolDb::from_pe(const pe::Image& image, const pdb::Reader* pdb) {
     SymbolDb db;

@@ -154,6 +154,7 @@ std::string format_symbol_line(const Symbol& s, const FunctionInfo* info) {
     if (!s.pdb_name.empty() && s.pdb_name != s.name) line += " pdb=" + quote_if_needed(s.pdb_name);
     if (s.is_static) line += " static";
     line += std::format(" source={}", to_string(s.source));
+    if (!s.object.empty()) line += " obj=" + quote_if_needed(s.object);
     if (info && s.kind == SymbolKind::function) {
         if (info->status != FunctionStatus::unstarted) line += std::format(" status={}", to_string(info->status));
         if (info->best_match > 0) line += std::format(" best={:.1f}", info->best_match);
@@ -195,6 +196,8 @@ Result<std::pair<Symbol, std::optional<FunctionInfo>>> parse_symbol_line(std::st
             s.size = static_cast<u32>(*v);
         } else if (key == "pdb") {
             s.pdb_name = value;
+        } else if (key == "obj") {
+            s.object = value;
         } else if (key == "source") {
             auto src = symbol_source_from_string(value);
             if (!src) return make_error(ErrorCode::parse, "unknown source '{}'", value);
@@ -306,7 +309,7 @@ Result<void> Project::reload_locked(State& state) const {
 }
 
 Result<void> Project::write_symbols_locked(State& state) const {
-    std::string out = "# decomp symbols: <address> <kind> <name> [size=] [pdb=] [static] [source=] [status=] [best=] [attempts=] [cost=]\n";
+    std::string out = "# decomp symbols: <address> <kind> <name> [size=] [pdb=] [static] [source=] [obj=] [status=] [best=] [attempts=] [cost=]\n";
     for (const auto& [va, s] : state.symbols) {
         auto it = state.functions->find(va);
         out += format_symbol_line(s, it == state.functions->end() ? nullptr : &it->second) + "\n";
@@ -605,12 +608,13 @@ Result<std::optional<FileLock>> Project::try_lock_active_run() const {
 }
 
 Result<Project> Project::init(const std::filesystem::path& root, const std::filesystem::path& binary,
-                              const std::optional<std::filesystem::path>& pdb, const std::string& toolchain) {
+                              const std::optional<std::filesystem::path>& pdb, const std::string& toolchain,
+                              const std::optional<std::filesystem::path>& map) {
     std::error_code ec;
     if (std::filesystem::exists(root / kConfigFile, ec))
         return make_error(ErrorCode::invalid_argument, "'{}' already contains a {}", fs::to_utf8(root), kConfigFile);
+    TRY_ASSIGN(auto program, Program::open(binary, OpenOptions{.pdb = pdb, .map = map}));
     TRY(fs::create_directories(root));
-    TRY_ASSIGN(auto program, Program::open(binary, pdb));
 
     Project p;
     p.root_ = root;

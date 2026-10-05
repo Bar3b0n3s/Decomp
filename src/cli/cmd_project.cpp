@@ -1,5 +1,6 @@
 #include "cli/common.hpp"
 #include "core/fs.hpp"
+#include "project/analyze.hpp"
 #include "project/progress.hpp"
 #include "project/project.hpp"
 
@@ -15,19 +16,22 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
         auto binary = std::make_shared<std::string>();
         auto dir = std::make_shared<std::string>();
         auto pdb = std::make_shared<std::string>();
+        auto map = std::make_shared<std::string>();
         auto toolchain = std::make_shared<std::string>();
         auto flags = std::make_shared<std::vector<std::string>>();
         cmd->add_option("binary", *binary, "Target PE image")->required();
         cmd->add_option("--dir", *dir, "Project directory (default: -C, else the current directory)");
         cmd->add_option("--pdb", *pdb, "PDB for the target, if not next to it");
+        cmd->add_option("--map", *map, "The build's link map (link.exe /MAP): function names, starts and object files");
         cmd->add_option("--toolchain", *toolchain, "Toolchain name from the registry (see `decomp toolchain list`)");
         cmd->add_option("--flag", *flags, "Compiler flag the target was built with, e.g. /O2 (repeatable)")->allow_extra_args(false);
-        cmd->callback([&g, binary, dir, pdb, toolchain, flags] {
+        cmd->callback([&g, binary, dir, pdb, map, toolchain, flags] {
             throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
-                std::optional<std::filesystem::path> pdb_path;
+                std::optional<std::filesystem::path> pdb_path, map_path;
                 if (!pdb->empty()) pdb_path = fs::from_utf8(*pdb);
+                if (!map->empty()) map_path = fs::from_utf8(*map);
                 const std::string root = !dir->empty() ? *dir : !g.project.empty() ? g.project : std::string(".");
-                TRY_ASSIGN(auto p, project::Project::init(fs::from_utf8(root), fs::from_utf8(*binary), pdb_path, *toolchain));
+                TRY_ASSIGN(auto p, project::Project::init(fs::from_utf8(root), fs::from_utf8(*binary), pdb_path, *toolchain, map_path));
                 if (!flags->empty()) {
                     p.config().flags = *flags;
                     TRY(p.save_config());
@@ -46,6 +50,40 @@ void register_project_commands(CLI::App& app, GlobalOptions& g) {
                 }
                 return 0;
             }));
+        });
+    }
+    {
+        // decomp analyze and decomp map import: the same re-analysis, with or without a map.
+        auto analyze = [&g](const std::optional<std::filesystem::path>& map) -> Result<int> {
+            TRY_ASSIGN(auto p, project::Project::find(g.project));
+            TRY_ASSIGN(auto s, project::analyze(p, project::AnalyzeOptions{.map = map}));
+            if (g.json) {
+                print_json(project::to_json(s));
+                return 0;
+            }
+            if (map) std::println("map: {} symbols added or named", s.map_symbols);
+            std::println("functions: {} (was {}): {} added, {} removed, {} resized, {} renamed", s.functions, s.functions_before, s.added,
+                         s.removed, s.resized, s.renamed);
+            if (s.moved) std::println("moved {} work directories and matched sources with their renamed functions", s.moved);
+            return 0;
+        };
+        auto* cmd = app.add_subcommand("analyze", "Find the project's functions again, keeping named functions and recorded work");
+        auto map = std::make_shared<std::string>();
+        cmd->add_option("--map", *map, "The build's link map (link.exe /MAP): function names, starts and object files");
+        cmd->callback([&g, analyze, map] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> {
+                std::optional<std::filesystem::path> map_path;
+                if (!map->empty()) map_path = fs::from_utf8(*map);
+                return analyze(map_path);
+            }));
+        });
+        auto* map_cmd = app.add_subcommand("map", "Use the build's link map file");
+        map_cmd->require_subcommand(1);
+        auto* import = map_cmd->add_subcommand("import", "Name the project's functions from a link map and find their bounds again");
+        auto import_path = std::make_shared<std::string>();
+        import->add_option("file", *import_path, "The link map (link.exe /MAP or lld-link /map)")->required();
+        import->callback([&g, analyze, import_path] {
+            throw CLI::RuntimeError(run(g, [&]() -> Result<int> { return analyze(fs::from_utf8(*import_path)); }));
         });
     }
     {

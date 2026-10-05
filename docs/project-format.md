@@ -44,11 +44,33 @@ often not redistributable, and `target.sha1` lets every checkout confirm that it
 `decomp init <binary>` creates the project in the current directory, or in `--dir <dir>` (created if
 needed). It writes `decomp.json`, `symbols.txt` and `.gitignore`, creates the empty `include/` and
 `src/functions/` directories, and refuses to run where a `decomp.json` already exists. Its other
-options are `--toolchain <name>`, `--flag <flag>` (repeatable) and `--pdb <file>`. Every other command
+options are `--toolchain <name>`, `--flag <flag>` (repeatable), `--pdb <file>` and `--map <file>` (the
+build's link map, see [Link maps](#link-maps)). Every other command
 finds the project by searching upward from the current directory for `decomp.json`, or upward from
 the directory given with the global option `-C <dir>` (`--project <dir>`). Global options may come
 before or after the command name (`decomp -C game status` or `decomp status -C game`); `init` creates
 the project in `--dir`, else in the `-C` directory, else in the current directory.
+
+### Link maps
+
+A link map (`link.exe /MAP`, also written by `lld-link /map`) names every public and static symbol of
+the build with its address and object file. For a target without a usable PDB, VC6 games among
+them, it is the best source of names and function starts there is. `decomp init <binary> --map
+<file>` reads it when the project is created; `decomp map import <file>` reads it into an existing
+project. Either way the map must describe the target: its entry point has to be the image's (a map of
+another build is refused), and a different link timestamp gets a warning.
+
+- Every symbol takes the map's name unless a PDB, the agent or the user named it (`source=map`; the
+  map's name becomes an alias), and records its object file (`obj=`). Static symbols are marked
+  `static`. Symbols the map places in code are functions when the map flags them `f`, as link.exe
+  does; without the flag they are labels (assembly labels), which start no function. A map without
+  any flags (lld-link writes none) makes every symbol in code a function.
+- The map's function starts guide the analysis, which measures every function's size again.
+- `decomp map import` (and `decomp analyze`, which does the same without a map) refuses to run while
+  a run is active. Functions only the analysis knew, with no work recorded, are found again from
+  scratch; the others are kept. A function the map renames keeps its work: its directory under
+  `.decomp/functions/` and its matched source under `src/functions/` are renamed with it. Both
+  commands print what changed: functions added, removed, resized and renamed.
 
 ## `decomp.json`
 
@@ -109,7 +131,7 @@ here.
 One symbol per line, sorted by address, after a header comment that names the fields:
 
 ```
-# decomp symbols: <address> <kind> <name> [size=] [pdb=] [static] [source=] [status=] [best=] [attempts=] [cost=]
+# decomp symbols: <address> <kind> <name> [size=] [pdb=] [static] [source=] [obj=] [status=] [best=] [attempts=] [cost=]
 ```
 
 An excerpt of the file that `init` writes for the x86 test fixture, after one agent session matched
@@ -143,7 +165,8 @@ Addresses have at least eight hex digits, so x64 addresses are longer:
 | `size=` | Size in bytes, in hex; omitted when unknown |
 | `pdb=` | The undecorated name from the PDB's procedure or data record, when it differs from the name |
 | `static` | Internal linkage (`S_LPROC32` procedures and module-local data) |
-| `source=` | Where the name came from, in increasing order of trust: `analysis`, `import`, `export`, `pdb_public`, `pdb`, `agent`, `user`. A line without `source=` is read as `user`. |
+| `source=` | Where the name came from, in increasing order of trust: `analysis`, `import`, `export`, `map`, `pdb_public`, `pdb`, `agent`, `user`. A line without `source=` is read as `user`. |
+| `obj=` | The object file the symbol was linked from, as the link map names it (`main.obj`, `LIBC:printf.obj` for a library member) |
 | `status=` | For functions: a [function status](#function-status); omitted for `unstarted` |
 | `best=` | For functions: the best match percentage reached by agent sessions, one decimal |
 | `attempts=` | For functions: the number of compile attempts made by agent sessions |
@@ -151,10 +174,10 @@ Addresses have at least eight hex digits, so x64 addresses are longer:
 
 Notes:
 
-- `init` writes every symbol Decomp derives from the image, its PDB and the analysis: imports,
-  exports, PDB public symbols, procedures and data, `.pdata` entries on x64 (functions without any
-  other name are called `sub_<hex address>`), `__ImageBase`, and the entry point (`entry` when it
-  has no other name). Exports and the entry point that land on incremental-linking thunks are moved
+- `init` writes every symbol Decomp derives from the image, its PDB, its link map and the analysis:
+  imports, exports, PDB public symbols, procedures and data, the map's symbols, the functions the
+  analysis finds without a PDB, `.pdata` entries on x64 (functions without any other name are called
+  `sub_<hex address>`), `__ImageBase`, and the entry point (`entry` when it has no other name). Exports and the entry point that land on incremental-linking thunks are moved
   to the functions behind them ([matching.md](matching.md#incremental-linking-and-import-thunks)).
 - When a project loads, its lines are applied on top of the symbols derived from the image and PDB.
   A line takes over the name at its address when its source is at least as trusted as the derived
