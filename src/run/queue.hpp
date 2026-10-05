@@ -42,6 +42,10 @@ struct QueueItem {
 // Rough effort estimate from the function's size (log2 of its bytes): easy functions go first.
 double estimate_difficulty(const Symbol& fn);
 
+// Outcomes after which a resumed run does not work on the function again (matched, gave up, refused,
+// out of its budget or turns, no result, skipped). Stopped, aborted and failed sessions run again.
+bool is_final_outcome(std::string_view outcome);
+
 // A run's items. Pending items are dispatched pinned first, then in list order.
 class WorkQueue {
 public:

@@ -390,6 +390,7 @@ TEST_CASE("run controller: stop leaves pending work for a resume, which continue
     auto info = read_run_info(h.run_dir());
     REQUIRE(info);
     CHECK(info->status == "stopped");
+    CHECK(info->done == static_cast<usize>(12 - pending - 2));  // the two stopped functions run again on resume: not done
 
     // A new process resumes it.
     h.controller.reset();

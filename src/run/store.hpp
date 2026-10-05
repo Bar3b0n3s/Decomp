@@ -33,7 +33,8 @@ struct RunInfo {
     std::string created, updated;
     std::string model, effort;
     int workers = 0;
-    usize functions = 0, done = 0, matched = 0;
+    usize functions = 0, matched = 0;
+    usize done = 0;  // worked on for good (is_final_outcome) or skipped; a stopped function is not done
     double spent_usd = 0;
     bool replay = false;
     Json run;  // the whole run.json

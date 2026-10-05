@@ -15,12 +15,6 @@ namespace {
 
 std::string now_iso() { return std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now())); }
 
-// Outcomes after which a resumed run does not work on the function again.
-bool final_outcome(std::string_view outcome) {
-    return outcome == "matched" || outcome == "gave_up" || outcome == "refused" || outcome == "budget_exhausted" ||
-           outcome == "max_turns" || outcome == "no_result" || outcome == "skipped";
-}
-
 Json limits_json(const agent::LoopLimits& l) {
     return Json{{"max_turns", l.max_turns}, {"max_usd", l.max_cost_usd}, {"max_tokens", l.max_total_tokens}, {"max_seconds", l.max_wall.count()}};
 }
@@ -170,7 +164,7 @@ Result<void> RunController::resume(RunStore store, RunOptions options) {
             item.state = ItemState::skipped;
             continue;
         }
-        item.state = final_outcome(item.outcome) ? ItemState::done : ItemState::pending;
+        item.state = is_final_outcome(item.outcome) ? ItemState::done : ItemState::pending;
         // A function matched since (by hand, or by another run) needs no session.
         if (item.state == ItemState::pending && deps_.project &&
             deps_.project->function_info(item.va).status == project::FunctionStatus::matched) {

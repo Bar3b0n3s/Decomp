@@ -59,6 +59,11 @@ usize WorkQueue::enqueue(std::vector<QueueItem> items) {
     return added;
 }
 
+bool is_final_outcome(std::string_view outcome) {
+    return outcome == "matched" || outcome == "gave_up" || outcome == "refused" || outcome == "budget_exhausted" ||
+           outcome == "max_turns" || outcome == "no_result" || outcome == "skipped";
+}
+
 std::vector<const QueueItem*> WorkQueue::pending() const {
     std::vector<const QueueItem*> out;
     for (const auto& item : items_)

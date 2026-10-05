@@ -2,6 +2,7 @@
 
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "run/queue.hpp"
 
 #include <algorithm>
 #include <format>
@@ -85,7 +86,8 @@ Result<RunInfo> read_run_info(const std::filesystem::path& dir) {
         info.functions = q->size();
         for (const auto& item : *q) {
             const std::string state = json_string_or(item, "state", "");
-            if (state == "done" || state == "skipped") ++info.done;
+            // Done: worked on for good (a stopped or failed function runs again when the run resumes).
+            if (state == "skipped" || (state == "done" && is_final_outcome(json_string_or(item, "outcome", "")))) ++info.done;
             if (json_string_or(item, "outcome", "") == "matched") ++info.matched;
         }
     }
