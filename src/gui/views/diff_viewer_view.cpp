@@ -158,6 +158,7 @@ private:
         editing_ = false;
         table_.clear();
         seen_signal_ = ~u64{0};
+        reload_attempts_ = false;
         load_attempts(ctx);
     }
 
@@ -251,8 +252,13 @@ private:
             for (const auto& [id, w] : ctx.snapshot->workers)
                 if (const auto* s = w.session.empty() ? nullptr : ctx.snapshot->session(w.session); s && s->va == *va_)
                     signal += static_cast<u64>(s->compiles) + s->scores.size() + 1;
-            if (seen_signal_ != ~u64{0} && signal != seen_signal_ && attempts_loaded_ && !attempts_job_.valid()) load_attempts(ctx);
+            if (seen_signal_ != ~u64{0} && signal != seen_signal_) reload_attempts_ = true;
             seen_signal_ = signal;
+        }
+        // A change noticed while the history loads is read once that load has landed.
+        if (reload_attempts_ && attempts_loaded_ && !attempts_job_.valid()) {
+            reload_attempts_ = false;
+            load_attempts(ctx);
         }
         try {
             if (auto loaded = attempts_job_.take()) {
@@ -328,6 +334,8 @@ private:
             compile_attempt(ctx, best_ ? *best_ : attempts_.size() - 1);
         } else if (was_latest && !attempts_.empty() && !editing_) {
             compile_attempt(ctx, attempts_.size() - 1);  // following the run's newest attempt
+        } else if (!attempt_ && !attempts_.empty() && !editing_) {
+            compile_attempt(ctx, best_ ? *best_ : attempts_.size() - 1);  // the first attempts of a function shown without any
         }
         if (first && attempts_.empty() && loaded.best_source && !editing_) {
             // A best source without a history (an older project): show it all the same.
@@ -924,6 +932,7 @@ private:
     bool attempts_loaded_ = false;
     std::optional<usize> best_, attempt_;
     u64 signal_seq_ = ~u64{0}, seen_signal_ = ~u64{0};
+    bool reload_attempts_ = false;
 
     LatestWins<CompiledSource> attempt_compile_;
     bool attempt_pending_ = false;  // a compile of the chosen attempt has not been shown yet

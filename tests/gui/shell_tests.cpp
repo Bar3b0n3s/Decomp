@@ -63,6 +63,7 @@ std::string dock_lines(const std::string& ini) {
 
 TEST_CASE("the harness turns ImGui assertions into exceptions") {
     HeadlessContext gui;
+    ImGui::GetIO().ConfigErrorRecoveryEnableDebugLog = false;  // the error is intended: keep it out of the test output
     CHECK_THROWS_AS(gui.frame([] { ImGui::End(); }), AssertionFailure);  // End() without Begin()
 }
 

@@ -150,6 +150,13 @@ inline bool frames_until(HeadlessContext& gui, App& app, Workspace* ws, const st
     return false;
 }
 
+// Every notification so far, one per line (shown when a check fails).
+inline std::string notification_log(App& app) {
+    std::string out;
+    for (const auto& n : app.notifications().history()) out += n.text + "\n";
+    return out;
+}
+
 inline AgentSessionControl* session_control(App& app) { return dynamic_cast<AgentSessionControl*>(app.find_view("agent_session")); }
 inline DiffViewerControl* diff_control(App& app) { return dynamic_cast<DiffViewerControl*>(app.find_view("diff_viewer")); }
 

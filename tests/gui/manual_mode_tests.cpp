@@ -194,6 +194,8 @@ TEST_CASE("a scripted run in the Agent session and the Diff viewer, live and pas
             app.context().open("diff_viewer", {.va = va});
             REQUIRE(frames_until(gui, app, &ws, [&] { return diff_view->function() == va && !diff_view->busy(); }));
             gui.frames(3, [&] { app.frame(); });
+            const std::string notifications = notification_log(app);
+            CAPTURE(notifications);
             if (va == functions.back()) {
                 CHECK(diff_view->attempt_count() == 0);  // dispatch's script gives up without compiling
                 CHECK(diff_view->shown_summary().empty());
@@ -226,4 +228,42 @@ TEST_CASE("a scripted run in the Agent session and the Diff viewer, live and pas
     CHECK(diff_view->shown_summary().find("MATCHING (byte-exact)") != std::string::npos);  // add's best attempt matched
     gui.frames(3, [&] { app.frame(); });
     CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());
+}
+
+TEST_CASE("the Diff viewer shows a function's first attempts as a live run records them") {
+    if (!have_clang_cl()) return;
+    FixtureProject fx;
+    Workspace::Options options;
+    options.stagger = 0ms;
+    options.replay_dir = decomp::test::source_dir() / "tests" / "replay" / "run";
+    Workspace ws(std::move(options));
+    REQUIRE(ws.open_project(fx.root));
+    ws.wait_loaded();
+    const u64 add = *ws.program()->resolve("add");
+    const u64 sum_array = *ws.program()->resolve("sum_array");
+
+    HeadlessContext gui;
+    Settings settings;
+    settings.developer.replay_dir = fs::to_utf8(decomp::test::source_dir() / "tests" / "replay" / "run");
+    App app(ws.services(), settings);
+    DiffViewerControl* diff_view = diff_control(app);
+    REQUIRE(diff_view);
+    // Shown before the run starts: no attempt yet.
+    app.context().open("diff_viewer", {.va = add});
+    REQUIRE(frames_until(gui, app, &ws, [&] { return diff_view->function() == add && !diff_view->busy(); }));
+    CHECK(diff_view->attempt_count() == 0);
+    CHECK(diff_view->shown_summary().empty());
+
+    RunRequest request;
+    request.functions = {sum_array, add};  // add's session starts once sum_array's ends
+    request.workers = 1;
+    const auto started = ws.start_run(request);
+    REQUIRE_MESSAGE(started, (started ? std::string() : started.error().message));
+    REQUIRE(frames_until(gui, app, &ws, [&] { return !ws.run_live(); }, 6000));
+    REQUIRE(frames_until(gui, app, &ws, [&] { return diff_view->attempt_count() > 0 && !diff_view->busy(); }));
+    gui.frames(3, [&] { app.frame(); });
+    const std::string notifications = notification_log(app);
+    CAPTURE(notifications);
+    CHECK(diff_view->function() == add);
+    CHECK(diff_view->shown_summary().find("MATCHING (byte-exact)") != std::string::npos);
 }

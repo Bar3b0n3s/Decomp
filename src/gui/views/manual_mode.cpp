@@ -36,7 +36,14 @@ CompiledSource compile_source(const std::shared_ptr<const Program>& program, con
         return out;
     }
     setup->cancelled = [token] { return token.cancelled(); };
-    auto result = matching::compile_and_diff(*program, *setup, va, source);
+    Result<matching::CandidateResult> result = make_error(ErrorCode::internal, "not compiled");
+    try {
+        result = matching::compile_and_diff(*program, *setup, va, source);
+    } catch (const std::exception& e) {
+        // Shown in place of the diff, so the view says what went wrong instead of staying empty.
+        out.summary = std::format("the compile failed: {}", e.what());
+        return out;
+    }
     if (!result) {
         out.summary = result.error().message;
         return out;
