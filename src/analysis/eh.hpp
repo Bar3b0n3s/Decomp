@@ -70,6 +70,11 @@ struct ScopeTable {
 // recorded: entries are read while they look like entries (at most 64).
 std::optional<ScopeTable> read_scope_table(const BinaryImage& image, u64 va);
 
+// Whether x86 code registers an exception frame for the scope table at `table`: it links the frame into
+// fs:[0] itself, or pushes the table right before calling the compiler's helper that does
+// (__SEH_prolog: `push size; push offset table; call __SEH_prolog4`).
+bool registers_seh_frame(std::span<const x86::Instruction> code, u64 table);
+
 // The tables an x86 function's code registers: the FuncInfo of the handler stub it stores, the scope
 // table it pushes. Nothing on x64 (the unwind data names a function's handler there).
 struct FunctionEh {

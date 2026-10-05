@@ -71,6 +71,7 @@ struct Insn {
     u64 target = 0;    // branch target, or the memory operand's absolute address
     u64 code_ref = 0;  // a code address held in an operand (`push offset f`, `lea rcx, [rip+f]`)
     u64 data_ref = 0;  // x86: a data address held in an immediate (`push offset table`)
+    bool fs_zero = false;  // x86: reads or writes fs:[0], the exception-frame chain
     u8 length = 0;
     x86::Flow flow = x86::Flow::none;
     bool has_branch = false;
@@ -92,6 +93,7 @@ struct Body {
     std::vector<u64> cond_targets;  // the conditional ones among them
     std::vector<u64> code_refs;     // code addresses held in operands
     std::vector<u64> data_refs;     // data addresses held in immediates (x86)
+    bool links_frame = false;       // x86: links an exception frame into fs:[0]
     std::vector<u64> instructions;  // starts
     std::vector<std::pair<u64, u64>> data;  // switch tables in the window
     bool unbounded_table = false;           // a table read without a bound (may shrink as more tables are known)
@@ -227,7 +229,13 @@ private:
                         out.target = *ins->memory_target;
                     }
                     if (const u64 ref = code_reference(*ins)) out.code_ref = through_ilt(ref);
-                    if (image_.arch() == Arch::x86) out.data_ref = data_reference(*ins);
+                    if (image_.arch() == Arch::x86) {
+                        out.data_ref = data_reference(*ins);
+                        for (const auto& op : ins->operands)
+                            if (op.kind == x86::OperandKind::mem && op.mem.segment == "fs" && op.mem.base.empty() && op.mem.index.empty() &&
+                                op.mem.disp == 0)
+                                out.fs_zero = true;
+                    }
                 }
         }
         auto [it, inserted] = cache_.emplace(va, out);
@@ -391,6 +399,7 @@ private:
                 if (!padding) body.end = std::max(body.end, a + i->length);
                 if (i->code_ref) body.code_refs.push_back(i->code_ref);
                 if (i->data_ref) body.data_refs.push_back(i->data_ref);
+                if (i->fs_zero) body.links_frame = true;
                 bool stop = false;
                 switch (i->flow) {
                 case x86::Flow::call:
@@ -525,7 +534,7 @@ private:
                 if (!msvc_code_) loose.insert(info->unwind_actions.begin(), info->unwind_actions.end());
             }
         for (u64 ref : fn.body.data_refs)
-            if (const ScopeTable* table = scope_table_at(ref))
+            if (const ScopeTable* table = scope_table_at(ref); table && (fn.body.links_frame || pushed_before_call(fn.body, ref)))
                 for (const auto& e : table->entries) {
                     if (e.filter) {
                         loose.insert(e.handler);
@@ -577,6 +586,18 @@ private:
         fn.eh_roots = std::move(roots);
         fn.body = std::move(body);
         dirty_.erase(start);  // removing the starts marked it; it is traced with them already
+    }
+
+    // `push offset table` right before a call: the frame is set up by the compiler's helper
+    // (__SEH_prolog4), which links it into fs:[0].
+    bool pushed_before_call(const Body& body, u64 table) {
+        for (u64 a : body.instructions) {
+            const Insn* i = insn(a);
+            if (!i || i->data_ref != table) continue;
+            const Insn* next = insn(a + i->length);
+            if (next && next->flow == x86::Flow::call) return true;
+        }
+        return false;
     }
 
     const CxxFuncInfo* funcinfo_of_stub(u64 stub) {

@@ -143,3 +143,18 @@ TEST_CASE("listings say which code exceptions reach: catch clauses, __except and
     h.type = 0;
     CHECK(catch_clause(p.image(), h) == "catch (...)");
 }
+
+TEST_CASE("a scope table counts only when the code registers an exception frame") {
+    const x86::Decoder decoder(Arch::x86);
+    auto decode = [&](std::vector<u8> bytes) {
+        std::vector<std::byte> b(bytes.size());
+        std::ranges::transform(bytes, b.begin(), [](u8 v) { return std::byte{v}; });
+        return decoder.decode_all(ByteSpan(b), 0x401000);
+    };
+    // push 0x10; push offset table; call __SEH_prolog4
+    CHECK(registers_seh_frame(decode({0x6A, 0x10, 0x68, 0x00, 0x20, 0x40, 0x00, 0xE8, 0x00, 0x00, 0x00, 0x00}), 0x402000));
+    // mov eax, fs:[0]
+    CHECK(registers_seh_frame(decode({0x64, 0xA1, 0x00, 0x00, 0x00, 0x00}), 0x402000));
+    // The table pushed as an argument of something else: push offset table; nop
+    CHECK_FALSE(registers_seh_frame(decode({0x68, 0x00, 0x20, 0x40, 0x00, 0x90}), 0x402000));
+}

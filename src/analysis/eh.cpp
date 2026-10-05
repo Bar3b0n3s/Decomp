@@ -125,6 +125,18 @@ std::string catch_clause(const BinaryImage& image, const CatchHandler& handler) 
                        handler.adjectives & 8 ? "&" : "");
 }
 
+bool registers_seh_frame(std::span<const x86::Instruction> code, u64 table) {
+    for (usize i = 0; i < code.size(); ++i) {
+        for (const auto& op : code[i].operands)
+            if (op.kind == x86::OperandKind::mem && op.mem.segment == "fs" && op.mem.base.empty() && op.mem.index.empty() && op.mem.disp == 0)
+                return true;
+        if (code[i].mnemonic == "push" && !code[i].operands.empty() && code[i].operands[0].kind == x86::OperandKind::imm &&
+            static_cast<u32>(code[i].operands[0].imm) == table && i + 1 < code.size() && code[i + 1].flow == x86::Flow::call)
+            return true;
+    }
+    return false;
+}
+
 FunctionEh function_eh(const BinaryImage& image, const x86::Decoder& decoder, std::span<const x86::Instruction> code) {
     FunctionEh out;
     if (image.arch() != Arch::x86) return out;
@@ -137,7 +149,7 @@ FunctionEh function_eh(const BinaryImage& image, const x86::Decoder& decoder, st
                     out.cxx = read_cxx_funcinfo(image, *info);
                     if (out.cxx) out.stub = value;
                 }
-            } else if (!out.seh && image.contains(value) && !image.is_code(value)) {
+            } else if (!out.seh && image.contains(value) && !image.is_code(value) && registers_seh_frame(code, value)) {
                 out.seh = read_scope_table(image, value);
             }
         }
