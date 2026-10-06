@@ -75,10 +75,11 @@ ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image);
 // directory and its records, base relocations, import thunks) is cut out as `linker`.
 ImageLayout layout_from_units(const Program& program, const UnitLayout& units);
 
-// x64: the exception table's entries that the linker holds (link.exe's PDBs give the table to the linker
-// or to no module) go back to the units of the functions they describe, one 12-byte .pdata contribution
-// each, a COMDAT when its function's code is one, as compilers write them; lld-link's PDBs already give
-// them to their units. layout_from_pdb() does this.
+// x64: the exception table's entries that the linker or no unit holds (link.exe's PDBs give the table to
+// the linker or to no module; without a PDB no symbol is in it) go back to the units of the functions
+// they describe, one 12-byte .pdata contribution each, a COMDAT when its function's code is one, as
+// compilers write them; lld-link's PDBs already give them to their units. layout_from_pdb() and
+// layout_from_units() do this.
 void attribute_exception_table(ImageLayout& layout, const pe::Image& image);
 
 // Gives each contribution the name of its input section, as far as the image tells: the POGO record's

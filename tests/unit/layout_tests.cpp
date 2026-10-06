@@ -157,31 +157,39 @@ TEST_CASE("layout: x64 .pdata the linker holds goes back to the units of its fun
 }
 
 TEST_CASE("layout: without a PDB, cut by the units of the symbols and the linker's own tables") {
-    auto program = Program::open(test::fixture("x86/basic.exe"));
-    REQUIRE(program);
-    auto reader = pdb::Reader::load(*program->pdb_path());
-    REQUIRE(reader);
-    const auto units = units_from_pdb(*reader, program->image(), program->symbols());
-    const auto truth = layout_from_pdb(*reader, program->image());
-    const auto guessed = layout_from_units(*program, units);
-    CHECK(guessed.source == LayoutSource::symbols);
-    // Every byte the PDB gives a unit's object, the guess gives the same unit (padding may go either way).
-    for (const auto& c : truth.contributions) {
-        if (c.linker || c.size == 0) continue;
-        CAPTURE(c.unit);
-        CAPTURE(c.rva);
-        const auto* g = guessed.at(c.rva);
-        REQUIRE(g);
-        CHECK(g->unit == c.unit);
-        CHECK_FALSE(g->linker);
-    }
-    // The import thunk, the debug directory and the import tables are the linker's.
-    for (const auto& c : truth.contributions) {
-        if (!c.linker || c.section == ".reloc" || c.size == 0) continue;
-        CAPTURE(c.rva);
-        const auto* g = guessed.at(c.rva);
-        REQUIRE(g);
-        CHECK(g->linker);
+    for (const char* arch : {"x86", "x64"}) {
+        CAPTURE(arch);
+        auto program = Program::open(test::fixture(std::string(arch) + "/basic.exe"));
+        REQUIRE(program);
+        auto reader = pdb::Reader::load(*program->pdb_path());
+        REQUIRE(reader);
+        const auto units = units_from_pdb(*reader, program->image(), program->symbols());
+        const auto truth = layout_from_pdb(*reader, program->image());
+        const auto guessed = layout_from_units(*program, units);
+        CHECK(guessed.source == LayoutSource::symbols);
+        // Every byte the PDB gives a unit's object, the guess gives the same unit (padding may go either
+        // way): x64 unwind data and each .pdata entry with the function they describe.
+        for (const auto& c : truth.contributions) {
+            if (c.linker || c.size == 0) continue;
+            CAPTURE(c.unit);
+            CAPTURE(c.rva);
+            const auto* g = guessed.at(c.rva);
+            REQUIRE(g);
+            CHECK(g->unit == c.unit);
+            CHECK_FALSE(g->linker);
+            if (c.name == ".pdata") {
+                CHECK(g->name == ".pdata");
+                CHECK(g->size == 12);
+            }
+        }
+        // The import thunk, the debug directory and the import tables are the linker's.
+        for (const auto& c : truth.contributions) {
+            if (!c.linker || c.section == ".reloc" || c.size == 0) continue;
+            CAPTURE(c.rva);
+            const auto* g = guessed.at(c.rva);
+            REQUIRE(g);
+            CHECK(g->linker);
+        }
     }
 }
 
