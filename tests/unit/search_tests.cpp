@@ -7,7 +7,9 @@
 #include "search/evaluate.hpp"
 #include "search/flags.hpp"
 #include "search/probes.hpp"
+#include "search/runner.hpp"
 #include "search/runs.hpp"
+#include "project/project.hpp"
 #include "test_util.hpp"
 
 #include <doctest/doctest.h>
@@ -266,4 +268,62 @@ TEST_CASE("flag search recovers the fixture's flags from a candidate set") {
         CHECK(r.equivalent[0] == std::vector<usize>{2});  // the optimization level is decided
         CHECK(choice_label(options.groups, r.choice) == "/O2 /GS-");
     }
+}
+
+TEST_CASE("search runs end to end: probes, the search of its kind, the run kept in the project") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    auto tmp = fs::TempDir::create("decomp-search-runner").value();
+    auto project = project::Project::init(tmp.path() / "project", test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86").value();
+    auto program = project.open_program().value();
+    auto setup = test::clang_setup(Arch::x86, tools->clang_cl, tmp.path() / "work", tmp.path() / "cache");
+    setup.flags = {"/Od", "/Gy", "/GR-", "/EHs-c-"};
+
+    SearchRequest request;
+    request.kind = SearchKind::flags;
+    request.probes.sources = {test::fixture("src/basic.cpp")};
+    request.groups = {"optimization: /Od | /O1 | /O2", "security checks: none | /GS-"};
+    std::vector<std::string> started;
+    usize candidates = 0;
+    SearchCallbacks callbacks;
+    callbacks.started = [&](const Probes& p) { started.push_back(p.target); };
+    callbacks.candidate = [&](const LogEntry&) { ++candidates; };
+    auto flags = run_search(&project, program, setup, request, callbacks).value();
+    CHECK(started == std::vector<std::string>{"basic.cpp"});
+    CHECK(candidates == 6);
+    CHECK(flags.score.complete());
+    CHECK(flags.headline() == "12/12 byte-exact, distance 0, 100.0% with /Gy /GR- /EHs-c- /O2 /GS-");
+    REQUIRE(flags.run);
+    CHECK(flags.run->status == RunStatus::done);
+    CHECK(flags.run->settings["groups"].size() == 2);
+    CHECK(load_run(flags.run_dir).value().result["flags"].size() == 5);
+    CHECK(load_log(flags.run_dir).size() == 6);
+
+    // Not kept without a project, or when asked not to.
+    request.record = false;
+    auto unrecorded = run_search(&project, program, setup, request).value();
+    CHECK_FALSE(unrecorded.run);
+    CHECK(list_runs(search_dir(project)).size() == 1);
+
+    // A permutation keeps its start and best sources with the run.
+    SearchRequest permute;
+    permute.kind = SearchKind::permute;
+    permute.probes.sources = {test::fixture("src/other.cpp")};
+    setup.flags = test::fixture_flags();
+    auto permuted = run_search(&project, program, setup, permute).value();
+    REQUIRE(permuted.run);
+    CHECK(fs::read_text(permuted.run_dir / "start-other.cpp").value() == fs::read_text(test::fixture("src/other.cpp")).value());
+    CHECK(std::filesystem::exists(permuted.run_dir / "best-other.cpp"));
+    // other_value is byte-exact as it is: nothing to search.
+    CHECK(permuted.score.complete());
+    CHECK(permuted.headline().starts_with("nothing better than the start"));
+
+    // Asking for what a kind does not take fails before searching.
+    permute.probes.verified = true;
+    CHECK_FALSE(run_search(&project, program, setup, permute));
+    SearchRequest none;
+    CHECK_FALSE(run_search(&project, program, setup, none));
 }
