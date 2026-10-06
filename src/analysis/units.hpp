@@ -64,6 +64,10 @@ std::string normalize_unit_name(std::string_view name);
 // `Import:` descriptor `import`, the linker's own `linker`, anything else `code`.
 UnitKind unit_kind_of(std::string_view name);
 
+// The unit name of each of the PDB's modules, in module order: unit_name(), with "#2", "#3"... added to
+// later modules of the same name.
+std::vector<std::string> pdb_unit_names(const pdb::Reader& pdb);
+
 // One unit per module of the PDB, in module (link) order. Each function and data symbol goes to the
 // module whose section contribution holds its address. Code units get sources (assign_sources()) from
 // the source files the modules name.

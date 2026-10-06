@@ -149,15 +149,24 @@ UnitKind unit_kind_of(std::string_view name) {
     return UnitKind::code;
 }
 
-UnitLayout units_from_pdb(const pdb::Reader& pdb, const pe::Image& image, const SymbolDb& symbols) {
-    UnitLayout layout;
+std::vector<std::string> pdb_unit_names(const pdb::Reader& pdb) {
     std::vector<std::string> names;
     std::map<std::string, int> seen;
-    std::map<std::string, std::string> sources;
     for (const auto& module : pdb.modules()) {
         std::string name = unit_name(module);
         if (const int n = ++seen[name]; n > 1) name += std::format("#{}", n);
-        names.push_back(name);
+        names.push_back(std::move(name));
+    }
+    return names;
+}
+
+UnitLayout units_from_pdb(const pdb::Reader& pdb, const pe::Image& image, const SymbolDb& symbols) {
+    UnitLayout layout;
+    const std::vector<std::string> names = pdb_unit_names(pdb);
+    std::map<std::string, std::string> sources;
+    for (usize i = 0; i < pdb.modules().size(); ++i) {
+        const auto& module = pdb.modules()[i];
+        const std::string& name = names[i];
         layout.units.push_back(Unit{name, unit_kind_of(name), {}, UnitOrigin::pdb});
         if (layout.units.back().kind != UnitKind::code) continue;
         std::string source = main_source(module);
