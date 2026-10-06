@@ -14,7 +14,7 @@ phasing.
 Status: the backbone (typed events, the serialized `EventBus`, the `RunState` reducer and its
 snapshots, the JSONL event log and its replay, the CLI progress view) and the `RunController` are
 implemented ([Architecture](#architecture)). `decomp-gui` has the chrome, projects, live and past runs,
-and every Phase 1 view below. Parts that later phases add are marked as such. Data sources name event
+and every view below but the Phase 6 one. Parts that later phases add are marked as such. Data sources name event
 types ([Events](#events) lists them).
 
 ## Principles
@@ -533,6 +533,49 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 - What the actions write goes through `.decomp/changes.jsonl` like any project file, and shows in
   Changes.
 
+### Relink
+
+**Shows**
+
+- The last relink ([project-format.md](project-format.md#relinking)): whether it is identical to the
+  target, or how many bytes differ and where the first one is: its place (`.data+0x0`), its address,
+  the unit whose contribution holds it and the symbol there. When it was made, how many units came from
+  their sources, from split objects and from the linker, and whether the linker is the one that made
+  the target (in warning colors when it is another version). The relink's notes.
+- The units in link order: how each was linked (`source`, `split`, `linker`), its bytes, its source's
+  check (`complete`, or what does not match) and why it was linked that way. Before the first relink,
+  the units of `units.txt`.
+- Comparison: the SHA-1s of the target and the relinked image (and of the image as the linker wrote it),
+  the target's and the relinked image's bytes around the first difference side by side with the
+  differing bytes highlighted, the sections with differing bytes (how many, the first, its unit,
+  whether the section's size or place differs), the header fields that differ, and the fields taken
+  over from the target (timestamps, the PDB's GUID and age, the checksum) with both values.
+- Unit, for the selected unit: how it was linked and why, and its source's check section by section
+  (the object's section, its symbol, where it was placed, its size, whether it is equal, differs,
+  unplaced, or pooled or folded into another unit's or function), the unit's functions the source does
+  not have, its contributions nothing fills, the problems the check found, and the compiler's output.
+- Link: how long the link took, the linker's version line, the import libraries written, the command
+  and the linker's output.
+
+**Actions**
+
+- Relink (`decomp relink`) in the background, with its current step shown, and cancel it. Every unit
+  split (`--all-split`) tests the relink itself.
+- Per unit, what the next relink does with it: as its check decides, from its source even when the
+  check fails (`--source`), or from its original bytes (`--split`).
+- Check units (`decomp units check`): compile every unit source and place it in the image, without
+  linking; the units' checks show the result.
+- Links: the first difference's address to the Binary explorer, a unit to its details or to Units, a
+  function the source lacks to the Inspector.
+- Refresh, after `decomp relink` ran outside the GUI.
+
+**Data sources**
+
+- `.decomp/relink/result.json` (`vm::read_relink_report()`), and the relinked image in
+  `.decomp/relink/out/` with the fields taken over put back (`vm::load_stamped_relink()`) for the bytes
+  around the difference (`vm::hex_compare()`); reread when the project changes or a relink ends.
+- `units.txt` before the first relink; the unit checks of Check units, which replace the relink's own.
+
 ### Cost and usage
 
 **Shows**
@@ -640,7 +683,6 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
 | View | Phase | Shows |
 |---|---|---|
-| Data matching and relink | 5 | Per-section data comparison, split objects, the relink result, and SHA-1 comparison with the first differing bytes |
 | Permuter and flag search | 6 | Search runs, candidates tried, best score over time, and the winning flags or permutations |
 
 ## Interactions
@@ -840,6 +882,7 @@ past run.
 | Dashboard | `decomp status`: functions and code bytes matched, status buckets, spend (the sum of the functions' `cost=` in `symbols.txt`), and per unit: functions and bytes matched and spend (`units` in its JSON) |
 | Units | `decomp units` (every unit with its kind, progress, spend and source; `derive`, `verify`, `emit`), `decomp run --unit <name>` |
 | Types | `decomp types` (the headers' types and whether the PDB agrees; `--pdb` for the PDB's), `decomp types show <name>`, `decomp types check`, `decomp types import`, `decomp types skeletons`; uses of a type's fields are a GUI feature, and `decomp disasm` names the fields in a listing |
+| Relink | `decomp relink` (`--source`, `--split`, `--all-split`; the result in `.decomp/relink/result.json`, `--json` prints it), `decomp units check`, `decomp units compose`; the bytes around the first difference side by side are a GUI feature |
 | Run monitor | `decomp run` and `decomp agent <func>`: a live progress view on stderr, on by default (`--no-progress` hides it, `--progress` keeps it with `--json` or `-q`). On a terminal it is a block redrawn in place: a run header (run ID, status, model and effort, elapsed time, spend, cache-hit rate, functions matched), the queue length, one line per worker (function, turn, phase, best score, spend, elapsed time; at most twelve) and the last four activity lines. Otherwise it prints the activity lines as they happen. `decomp run --interactive` takes the run controls on stdin. |
 | Agent session | Steering with `--interactive` (guidance lines and `:pause`, `:resume`, `:stop`, `:abort` for `decomp agent`; `:guide <fn> <text>` and the run controls for `decomp run`) and `--guidance`; Ctrl+C to stop, twice to abort; the transcript in `.decomp/runs/<run-id>/sessions/<fn>.jsonl` |
 | Diff viewer | `decomp diff <func> --source <file>` or `--obj <file>` (with `--compact`, `--context`, `--bytes`) |
@@ -1013,7 +1056,7 @@ which `events.jsonl` omits and the transcript holds in full.
 | Binary explorer enrichment (full cross-reference index, Rich-header compiler names, RTTI class names) | Phase 2 |
 | Units view; approvals for `set_symbol` and `define_type` | Phase 3 |
 | Types view; field names in listings | Phase 4 |
-| Data matching and relink view | Phase 5 |
+| Relink view | Phase 5 |
 | Permuter and flag-search view | Phase 6 |
 
 Phase 1 is done when, on Windows and Linux, a user can open a project, run 20 or more functions on 4

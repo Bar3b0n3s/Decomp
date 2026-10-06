@@ -92,6 +92,7 @@ struct Options {
     std::string theme;
     std::string replay_dir;
     std::string function;
+    std::string anchor;
     bool run_all = false;
     bool exit_when_done = false;
     int frames = 0;
@@ -281,6 +282,7 @@ int run_app(const Options& opt) {
     int settle = 3;
     bool run_requested = false;
     bool function_selected = false;
+    bool anchor_opened = false;
     int frames_after_run = -1;  // --exit-when-done: frames rendered since the run ended
     while (exit_code == 0 && !app->wants_quit()) {
         // --run-all: once the project is loaded, start a run over the default selection.
@@ -311,6 +313,11 @@ int run_app(const Options& opt) {
             }
             const gui::View* shown = opt.view.empty() ? nullptr : app->find_view(opt.view);
             app->context().open(std::string(shown ? shown->id() : "inspector"), gui::NavTarget{.va = *va});
+        }
+        // --anchor: once the project is open, take the --view view to a place of its own (a unit, a type).
+        if (!opt.anchor.empty() && !anchor_opened && workspace->project_state().phase == gui::ProjectPhase::open) {
+            anchor_opened = true;
+            if (const gui::View* shown = app->find_view(opt.view)) app->context().open(std::string(shown->id()), gui::NavTarget{.anchor = opt.anchor});
         }
         if (opt.exit_when_done && run_requested && !workspace->run_live() && frames_after_run < 0) frames_after_run = 0;
         const bool last_frame = (opt.frames > 0 && frame + 1 == opt.frames) || frames_after_run == 10;
@@ -389,6 +396,9 @@ int main(int argc, char** argv) {
                    "Scripted API responses per function instead of the live API (a developer setting, saved)");
     cli.add_option("--function", opt.function,
                    "Select a function (name or address) once the project is open, in the --view view or the Inspector (needs --project)");
+    cli.add_option("--anchor", opt.anchor,
+                   "Take the --view view to a place of its own once the project is open: a unit in Units or Relink, a type in Types "
+                   "(needs --project and --view)");
     cli.add_flag("--run-all", opt.run_all, "Start a run over the default selection once the project is open (needs --project)");
     cli.add_flag("--exit-when-done", opt.exit_when_done, "With --run-all: exit when the run ends (after a screenshot, if asked)");
     cli.add_flag("-v,--verbose", opt.verbose, "More logging (repeat for trace)");
@@ -401,8 +411,12 @@ int main(int argc, char** argv) {
         std::fputs("error: --screenshot needs --frames or --exit-when-done\n", stderr);
         return 2;
     }
-    if ((opt.run_all || opt.exit_when_done || !opt.function.empty()) && opt.project.empty()) {
-        std::fputs("error: --run-all, --exit-when-done and --function need --project\n", stderr);
+    if ((opt.run_all || opt.exit_when_done || !opt.function.empty() || !opt.anchor.empty()) && opt.project.empty()) {
+        std::fputs("error: --run-all, --exit-when-done, --function and --anchor need --project\n", stderr);
+        return 2;
+    }
+    if (!opt.anchor.empty() && opt.view.empty()) {
+        std::fputs("error: --anchor needs --view\n", stderr);
         return 2;
     }
     return run_app(opt);

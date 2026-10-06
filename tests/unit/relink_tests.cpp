@@ -14,6 +14,7 @@
 #include "relink/compare.hpp"
 #include "relink/linker.hpp"
 #include "test_util.hpp"
+#include "viewmodel/relink.hpp"
 
 #include <doctest/doctest.h>
 
@@ -268,6 +269,21 @@ TEST_CASE("relink: units built from their sources, the rest from split objects")
         CHECK(r.result.comparison->first->unit == "basic.obj");
         CHECK(r.result.comparison->first->where.starts_with(".data"));
         CHECK(r.result.comparison->first->symbol.find("g_counter") != std::string::npos);
+        // What the Relink view shows from result.json: the first differing bytes, the target's 3 where the
+        // relink has 4, in basic.obj.
+        const auto report = vm::read_relink_report(*project::last_relink(p));
+        CHECK_FALSE(report.identical);
+        REQUIRE(report.first);
+        CHECK(report.first->unit == "basic.obj");
+        CHECK(report.headline().find("in basic.obj") != std::string::npos);
+        auto relinked = vm::load_stamped_relink(p.root() / fs::from_utf8(report.image), report.stamped);
+        REQUIRE(relinked);
+        const auto rows = vm::hex_compare(program.image(), *relinked, *report.first->rva, 0, 1);
+        REQUIRE(rows.size() == 1);
+        const usize at = *report.first->rva - rows[0].rva;
+        CHECK(rows[0].differs[at]);
+        CHECK(rows[0].original[at] == 3);
+        CHECK(rows[0].relinked[at] == 4);
     }
 }
 

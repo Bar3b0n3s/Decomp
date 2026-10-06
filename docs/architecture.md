@@ -678,6 +678,7 @@ background jobs; each header says what its functions cost.
 | `line_diff.hpp` | Myers line diffs, unified hunks and side-by-side rows |
 | `notification_rules.hpp` | The [notifications](ui.md#notifications), each posted once |
 | `exports.hpp` | Progress, cost, function list and diff exports (Markdown, JSON, CSV) |
+| `relink.hpp` | A relink's `result.json` read into the Relink view's rows (units, checks, comparison, first difference), and the target's and the relinked image's bytes side by side |
 
 ### gui
 

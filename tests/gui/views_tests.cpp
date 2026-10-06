@@ -1,13 +1,19 @@
-// The Dashboard, Function browser, Inspector, Binary explorer, Symbols, Units and Types views against a real project
-// (the x86 fixture): with no run, a live run, a past run; their background jobs run to the end. Plus the
-// Function browser's table with 100,000 rows (frame time) and the Dashboard's treemap of 100,000
-// functions.
+// The Dashboard, Function browser, Inspector, Binary explorer, Symbols, Units, Types and Relink views against a
+// real project (the x86 fixture): with no run, a live run, a past run; their background jobs run to the end.
+// The Relink view with a relink's result. Plus the Function browser's table with 100,000 rows (frame time)
+// and the Dashboard's treemap of 100,000 functions.
 
+#include "analysis/layout.hpp"
+#include "core/bytes.hpp"
 #include "core/fs.hpp"
+#include "formats/pdb.hpp"
 #include "gui/views/function_table_widget.hpp"
 #include "gui/views/treemap_widget.hpp"
 #include "gui/workspace.hpp"
 #include "harness.hpp"
+#include "project/relink.hpp"
+#include "project/units.hpp"
+#include "relink/compare.hpp"
 #include "test_util.hpp"
 #include "viewmodel/browser.hpp"
 #include "viewmodel/treemap.hpp"
@@ -28,7 +34,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols", "units", "types"};
+const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols", "units", "types", "relink"};
 
 // Sessions that finish at once (every other one matches) unless held.
 struct HeldSessions {
@@ -136,6 +142,11 @@ void render_my_views(HeadlessContext& gui, App& app, ProjectFixture& fx, const c
         app.context().open("types", {.anchor = type});
         settle(gui, app);
     }
+    // Relink before any relink: the units and their tabs.
+    for (const char* anchor : {"basic.obj", "tab:comparison", "tab:link"}) {
+        app.context().open("relink", {.anchor = anchor});
+        settle(gui, app);
+    }
     CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());
 }
 
@@ -175,6 +186,86 @@ TEST_CASE("the project views render with a project and no run, a live run and a 
     REQUIRE(fx.workspace->open_run(*id));
     fx.workspace->wait_loaded();
     render_my_views(gui, app, fx, "past run");
+}
+
+TEST_CASE("the Relink view shows a relink: its units, the first difference and the bytes there, a unit's check, the link") {
+    ProjectFixture fx;
+    auto* project = fx.workspace->project();
+    auto program = fx.workspace->program();
+    const auto& image = program->image();
+    // A relink as relink_project() writes it, of an image with one byte of add() changed and another link time.
+    auto relinked = std::vector<std::byte>(image.data().begin(), image.data().end());
+    const u32 rva = static_cast<u32>(fx.va("add") - image.image_base() + 2);
+    const u32 offset = image.rva_to_offset(rva).value();
+    relinked[offset] = static_cast<std::byte>(static_cast<u8>(relinked[offset]) ^ 0xFF);
+    write_le<u32>(relinked, image.pe_offset() + 8, 0x12345678);
+    project::RelinkResult result;
+    result.time = "2026-10-06T01:00:00Z";
+    const auto units = project::load_units(*project).value();
+    for (const auto& unit : units) {
+        project::UnitLink link;
+        link.unit = unit;
+        link.mode = unit.kind == UnitKind::code ? project::LinkMode::split : project::LinkMode::linker;
+        link.reason = unit.kind == UnitKind::code ? "no source" : "made by the linker";
+        if (unit.name == "basic.obj") {
+            link.mode = project::LinkMode::source;
+            link.reason = "from its source on request";
+            project::UnitSourceCheck check;
+            check.unit = unit;
+            check.functions = {fx.va("add")};
+            check.missing_functions = {fx.va("dispatch")};
+            check.check = matching::UnitCheckResult{};
+            matching::PlacedSection text;
+            text.name = ".text$mn";
+            text.symbol = "?add@@YAHHH@Z";
+            text.size = 16;
+            text.rva = rva - 2;
+            text.state = matching::PlacementState::differs;
+            text.first_difference = 2;
+            text.differing_bytes = 1;
+            check.check->sections.push_back(text);
+            matching::PlacedSection folded = text;
+            folded.symbol = "?add_again@@YAHHH@Z";
+            folded.state = matching::PlacementState::discarded;
+            folded.folded_into = "?add@@YAHHH@Z";
+            check.check->sections.push_back(folded);
+            Contribution missing;
+            missing.rva = 0x3000;
+            missing.size = 4;
+            missing.section = ".data";
+            check.check->missing.push_back(missing);
+            check.check->problems.push_back("a gap before .text$mn ?dispatch@@YAHHH@Z");
+            check.compile.output = "basic.cpp(3): warning: something";
+            link.check = std::move(check);
+        }
+        result.units.push_back(std::move(link));
+    }
+    result.notes = {"a note"};
+    result.libraries = {"libs/kernel32.lib"};
+    result.linker = relink::linker_fit(relink::OriginalLinker{relink::LinkerKind::lld, 18, 1, 3}, relink::LinkerKind::lld, "LLD 20.1.8");
+    result.link.ok = true;
+    result.link.command = {"lld-link", "/nologo", "/out:basic.exe"};
+    result.link.output = "lld-link: warning: something";
+    result.image = ".decomp/relink/out/basic.exe";
+    REQUIRE(fs::create_directories(fx.root / ".decomp" / "relink" / "out"));
+    REQUIRE(fs::write_file(fx.root / result.image, relinked));
+    const auto reader = pdb::Reader::load(*program->pdb_path()).value();
+    auto compared = relinked;
+    result.comparison = relink::compare_images(image, compared, layout_from_pdb(reader, image), program->symbols());
+    REQUIRE(fs::write_text(project::relink_dir(*project) / "result.json", project::to_json(result).dump(2)));
+
+    HeadlessContext gui;
+    Settings settings;
+    App app(fx.workspace->services(), settings);
+    REQUIRE(app.focus_view("relink"));
+    settle(gui, app);
+    CHECK(app.view_visible("relink"));
+    for (const char* anchor : {"tab:comparison", "basic.obj", "other.obj", "* Linker *", "no_such.obj", "tab:link"}) {
+        CAPTURE(anchor);
+        app.context().open("relink", {.anchor = anchor});
+        settle(gui, app);
+    }
+    CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());
 }
 
 TEST_CASE("the Dashboard's buckets open the Function browser filtered, and the filter persists per project") {
