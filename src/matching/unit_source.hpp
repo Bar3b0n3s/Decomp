@@ -2,7 +2,8 @@
 
 // Unit sources (docs/project-format.md#unit-sources): one source file per translation unit, holding its
 // matched functions as the original source file held them. A unit source is a prelude (includes,
-// macros, declarations) followed by the matched functions in address order, each after a marker line
+// macros, declarations) followed by the matched functions in address order (or in the order of the
+// translation unit they were composed from: project::compose_unit_source()), each after a marker line
 // `// FUNCTION: 0x00401060`. A function is added by composing the translation unit a session verified
 // it with into the unit source; verify_unit() compiles the result once and diffs every function in it.
 
@@ -29,7 +30,7 @@ struct UnitSource {
         std::string name;  // the defined function's name ("Player::Hit"); empty when none was found
         bool is_static = false;
     };
-    std::vector<Function> functions;  // address order
+    std::vector<Function> functions;  // address order, or the translation unit's
 
     // Parses a unit source: the text before the first marker line is the prelude, and each marker line
     // starts a function that runs to the next one.

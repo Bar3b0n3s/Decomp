@@ -128,6 +128,13 @@ Result<ComposedUnit> compose_unit_source(const Project& project, const Program& 
         if (auto r = matching::compose_function(composed, va, matching::definition_names(*f), source); !r)
             out.rejected.emplace_back(va, r.error().message);
     }
+    // In the order the translation unit defines them: a compiler lays out what it does not give sections of
+    // their own in that order (cl.exe without /Gw puts the functions' static data in one .rdata), though
+    // the functions themselves may be in another (cl.exe's /Gy COMDATs are in the order of their names).
+    std::ranges::stable_sort(composed.functions, {}, [&](const matching::UnitSource::Function& f) {
+        const auto at = source.find(f.text);
+        return at == std::string_view::npos ? source.size() : at;
+    });
     out.content = composed.render();
     TRY_ASSIGN(const auto layout, project_image_layout(program, units));
     TRY_ASSIGN(out.check, check_unit_text(program, setup, layout, *unit, out.content));

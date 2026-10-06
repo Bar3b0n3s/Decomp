@@ -319,8 +319,8 @@ which is not read; Visual C++ before 7.0 writes 16-bit type indices, which are n
 
 A code unit's matched functions live in its source file (`source=` in `units.txt`, such as
 `src/basic.cpp`), as the original program's source file held them. A unit source is a prelude
-(directives, declarations, types, data) followed by the matched functions in address order, each after a
-marker line with its address:
+(directives, declarations, types, data) followed by the matched functions in address order (or, composed
+from a whole translation unit, in its order), each after a marker line with its address:
 
 ```cpp
 #define NOINLINE __declspec(noinline)
@@ -385,7 +385,10 @@ verifies again.
   original source had them. The exit code is 2 when a unit is not complete.
 - `decomp units compose <unit> <file> [--dry-run]` makes a unit's source from a whole translation unit
   (an original source file, one written by hand): each function of the unit is composed from it after
-  its marker and the rest becomes the prelude. The result is checked like `units check`, written
+  its marker, in the order the file defines them, and the rest becomes the prelude. (The order matters:
+  a compiler lays out what it does not put in sections of their own, such as the functions' static data
+  in cl.exe's one `.rdata` without `/Gw`, in the order of the source, though cl.exe orders its `/Gy`
+  functions by name.) The result is checked like `units check`, written
   (recorded in `changes.jsonl`), and when the unit is complete its functions are marked matched.
 
 ## Relinking

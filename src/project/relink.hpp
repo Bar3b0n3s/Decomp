@@ -50,8 +50,8 @@ Result<std::vector<UnitSourceCheck>> check_unit_sources(const Project& project, 
 Json to_json(const UnitSourceCheck& check);
 
 // A unit source made from a whole translation unit (an original source file, one written by hand): every
-// function of the unit composed from it (matching::compose_function) after its marker, the rest of it the
-// prelude; checked like the unit's source, not written.
+// function of the unit composed from it (matching::compose_function) after its marker, in the order the
+// translation unit defines them, the rest of it the prelude; checked like the unit's source, not written.
 struct ComposedUnit {
     Unit unit;
     std::string content;

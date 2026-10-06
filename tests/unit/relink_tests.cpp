@@ -255,6 +255,41 @@ TEST_CASE("relink: C common symbols the linker allocated") {
     }
 }
 
+TEST_CASE("relink: a unit composed from a translation unit keeps its order") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    // helper() is static: clang emits it when the end of the translation unit finds it used, after later()
+    // and entry(), which the source defines after it. The composed unit keeps the source's order, which
+    // is what a compiler lays out what it does not give sections of their own by (cl.exe's static data).
+    auto tmp = fs::TempDir::create("decomp-relink-order").value();
+    const std::string source = "#define NOINLINE __declspec(noinline)\n"
+                               "NOINLINE static int helper(int x) { return x * 3; }\n"
+                               "NOINLINE int later(int x) { return helper(x) + 1; }\n"
+                               "extern \"C\" void entry() { later(2); }\n";
+    REQUIRE(fs::write_text(tmp.path() / "order.cpp", source));
+    const auto exe = test::build_program(Arch::x64, *tools, tmp.path() / "target", {tmp.path() / "order.cpp"}, "order");
+    REQUIRE(exe);
+    auto p = project::Project::init(tmp.path() / "p", *exe, std::nullopt, "clang-cl-x64").value();
+    p.config().flags = test::fixture_flags();
+    REQUIRE(p.save_config());
+    auto program = p.open_program().value();
+    REQUIRE(program.resolve("?later@@YAHH@Z").value() < program.symbols().find("?helper@@YAHH@Z")->va);
+    const auto setup = test::clang_setup(Arch::x64, tools->clang_cl, tmp.path() / "work", tmp.path() / "cache");
+    auto composed = project::compose_unit_source(p, program, setup, "order.obj", source);
+    REQUIRE(composed);
+    CHECK(composed->rejected.empty());
+    CHECK_MESSAGE(composed->check.complete(), composed->check.summary());
+    // The definitions, in the source's order (the prelude declares helper() for the functions before it
+    // in address order).
+    const auto& text = composed->content;
+    REQUIRE(text.find("helper(int x) {") != std::string::npos);
+    CHECK(text.find("helper(int x) {") < text.find("later(int x) {"));
+    CHECK(text.find("later(int x) {") < text.find("entry() {"));
+}
+
 TEST_CASE("relink: comparing images takes the build's identity over and finds the first difference") {
     auto program = Program::open(test::fixture("x86/basic.exe")).value();
     auto reader = pdb::Reader::load(*program.pdb_path()).value();
