@@ -2,6 +2,7 @@
 
 #include "core/fs.hpp"
 #include "core/process.hpp"
+#include "core/strings.hpp"
 #include "matching/toolchain.hpp"
 #include "test_util.hpp"
 
@@ -78,6 +79,53 @@ std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& t
 
 std::optional<std::filesystem::path> build_fixture_program(Arch arch, const LlvmTools& tools, const std::filesystem::path& dir) {
     return build_program(arch, tools, dir, {fixture("src/basic.cpp"), fixture("src/other.cpp")}, "basic");
+}
+
+std::optional<std::string> find_mingw_gcc() {
+#ifdef _WIN32
+    const std::string file = "x86_64-w64-mingw32-gcc.exe";
+#else
+    const std::string file = "x86_64-w64-mingw32-gcc";
+#endif
+    if (auto path = get_env("PATH"))
+        for (auto dir : split(*path, path_list_separator())) {
+            std::error_code ec;
+            const auto candidate = fs::from_utf8(dir) / file;
+            if (!dir.empty() && std::filesystem::is_regular_file(candidate, ec)) return fs::to_utf8(candidate);
+        }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> build_gcc_program(const std::string& gcc, const LlvmTools& tools, const std::filesystem::path& dir,
+                                                       const std::vector<std::filesystem::path>& sources, const std::string& name,
+                                                       const std::vector<std::string>& flags) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    std::vector<std::string> objs;
+    for (const auto& source : sources) {
+        auto obj = fs::to_utf8(dir / (fs::to_utf8(source.stem()) + ".o"));
+        ProcessSpec cc;
+        cc.argv = {gcc, "-c"};
+        cc.argv.insert(cc.argv.end(), flags.begin(), flags.end());
+        cc.argv.insert(cc.argv.end(), {fs::to_utf8(source), "-o", obj});
+        auto r = run_process(cc);
+        if (!r || !r->ok()) {
+            MESSAGE("gcc failed: " << (r ? r->out + r->err : r.error().message));
+            return std::nullopt;
+        }
+        objs.push_back(obj);
+    }
+    auto exe = dir / (name + ".exe");
+    ProcessSpec ld;
+    ld.argv = {tools.lld_link, "/nologo", "/nodefaultlib", "/entry:entry", "/subsystem:console", "/debug", "/Brepro",
+               "/out:" + fs::to_utf8(exe), "/pdb:" + fs::to_utf8(dir / (name + ".pdb"))};
+    ld.argv.insert(ld.argv.end(), objs.begin(), objs.end());
+    auto r = run_process(ld);
+    if (!r || !r->ok()) {
+        MESSAGE("lld-link failed: " << (r ? r->out + r->err : r.error().message));
+        return std::nullopt;
+    }
+    return exe;
 }
 
 } // namespace decomp::test

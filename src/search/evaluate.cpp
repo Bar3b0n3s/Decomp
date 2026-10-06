@@ -86,7 +86,8 @@ Evaluation evaluate(const Program& program, const matching::MatchSetup& setup, c
             }
         };
         auto v = matching::verify_unit(program, s, probe.source, probe.file_name, probe.functions);
-        if (!v) {
+        if (!v) {  // the compiler did not run
+            if (out.compile_error.empty()) out.compile_error = v.error().message;
             missing(v.error().message);
             continue;
         }

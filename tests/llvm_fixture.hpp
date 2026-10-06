@@ -33,4 +33,13 @@ std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& t
                                                    const std::vector<std::string>& extra_link_flags = {},
                                                    const std::vector<std::string>& extra_compile_flags = {});
 
+// MinGW-w64 GCC for x64 (x86_64-w64-mingw32-gcc on the PATH), when installed.
+std::optional<std::string> find_mingw_gcc();
+
+// Compiles `sources` with GCC (-c -O2 and `flags`) and links them with lld-link into <dir>/<name>.exe + .pdb
+// (entry point `entry`, no libraries). Returns the exe path.
+std::optional<std::filesystem::path> build_gcc_program(const std::string& gcc, const LlvmTools& tools, const std::filesystem::path& dir,
+                                                       const std::vector<std::filesystem::path>& sources, const std::string& name,
+                                                       const std::vector<std::string>& flags = {"-O2"});
+
 } // namespace decomp::test

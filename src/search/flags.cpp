@@ -33,41 +33,46 @@ std::string normalized(std::string_view flag, bool msvc_style) {
 }
 
 struct PresetGroup {
-    bool full;  // only in the "full" preset
+    int presets;  // kBasic | kCommon | kFull: the presets it is in
     bool msvc_style;
-    int arch;   // 0: any, 32: x86, 64: x64
+    int arch;     // 0: any, 32: x86, 64: x64
     std::string_view text;
 };
+
+constexpr int kBasic = 1, kCommon = 2, kFull = 4;
 
 // The first alternative listed of equivalent ones wins a tie, so the defaults come first.
 constexpr PresetGroup kPresetGroups[] = {
     // cl.exe and clang-cl
-    {false, true, 0, "optimization: /Od | /O1 | /O2 | /Ox"},
-    {false, true, 32, "frame pointers: none | /Oy-"},
-    {false, true, 0, "inlining: none | /Ob0 | /Ob1 | /Ob2"},
-    {false, true, 0, "security checks: none | /GS-"},
-    {false, true, 0, "floating point: none | /fp:fast | /fp:strict"},
-    {false, true, 32, "instruction set: none | /arch:IA32 | /arch:SSE | /arch:SSE2 | /arch:AVX | /arch:AVX2"},
-    {false, true, 64, "instruction set: none | /arch:AVX | /arch:AVX2"},
-    {true, true, 0, "intrinsics: none | /Oi | /Oi-"},
-    {true, true, 0, "size or speed: none | /Os | /Ot"},
-    {true, true, 0, "exceptions: none | /EHsc | /EHs | /EHa"},
-    {true, true, 0, "char: none | /J"},
-    {true, true, 0, "packing: none | /Zp1 | /Zp2 | /Zp4 | /Zp16"},
-    {true, true, 0, "hot patching: none | /hotpatch"},
-    {true, true, 64, "tuning: none | /favor:INTEL64 | /favor:AMD64"},
+    {kBasic, true, 0, "optimization: /Od | /O1 | /O2"},
+    {kCommon | kFull, true, 0, "optimization: /Od | /O1 | /O2 | /Ox"},
+    {kBasic | kCommon | kFull, true, 32, "frame pointers: none | /Oy-"},
+    {kCommon | kFull, true, 0, "inlining: none | /Ob0 | /Ob1 | /Ob2"},
+    {kBasic | kCommon | kFull, true, 0, "security checks: none | /GS-"},
+    {kCommon | kFull, true, 0, "floating point: none | /fp:fast | /fp:strict"},
+    {kCommon | kFull, true, 32, "instruction set: none | /arch:IA32 | /arch:SSE | /arch:SSE2 | /arch:AVX | /arch:AVX2"},
+    {kCommon | kFull, true, 64, "instruction set: none | /arch:AVX | /arch:AVX2"},
+    {kFull, true, 0, "intrinsics: none | /Oi | /Oi-"},
+    {kFull, true, 0, "size or speed: none | /Os | /Ot"},
+    {kFull, true, 0, "exceptions: none | /EHsc | /EHs | /EHa"},
+    {kFull, true, 0, "char: none | /J"},
+    {kFull, true, 0, "packing: none | /Zp1 | /Zp2 | /Zp4 | /Zp16"},
+    {kFull, true, 0, "hot patching: none | /hotpatch"},
+    {kFull, true, 64, "tuning: none | /favor:INTEL64 | /favor:AMD64"},
     // gcc and clang
-    {false, false, 0, "optimization: -O0 | -Og | -O1 | -O2 | -O3 | -Os"},
-    {false, false, 0, "frame pointers: none | -fomit-frame-pointer | -fno-omit-frame-pointer"},
-    {false, false, 0, "inlining: none | -fno-inline | -fno-inline-small-functions | -finline-functions"},
-    {false, false, 32, "instruction set: none | -march=i386 | -march=i686 | -march=pentium4 | -march=core2"},
-    {false, false, 64, "instruction set: none | -march=x86-64-v2 | -march=x86-64-v3"},
-    {true, false, 32, "x87 or SSE: none | -mfpmath=387 | -mfpmath=sse"},
-    {true, false, 0, "aliasing: none | -fno-strict-aliasing"},
-    {true, false, 0, "loops: none | -funroll-loops"},
-    {true, false, 0, "floating point: none | -ffast-math"},
-    {true, false, 0, "vectorization: none | -fno-tree-vectorize"},
-    {true, false, 0, "char: none | -funsigned-char"},
+    {kBasic, false, 0, "optimization: -O0 | -O1 | -O2 | -O3 | -Os"},
+    {kCommon | kFull, false, 0, "optimization: -O0 | -Og | -O1 | -O2 | -O3 | -Os"},
+    {kBasic, false, 0, "frame pointers: none | -fno-omit-frame-pointer"},
+    {kCommon | kFull, false, 0, "frame pointers: none | -fomit-frame-pointer | -fno-omit-frame-pointer"},
+    {kCommon | kFull, false, 0, "inlining: none | -fno-inline | -fno-inline-small-functions | -finline-functions"},
+    {kCommon | kFull, false, 32, "instruction set: none | -march=i386 | -march=i686 | -march=pentium4 | -march=core2"},
+    {kCommon | kFull, false, 64, "instruction set: none | -march=x86-64-v2 | -march=x86-64-v3"},
+    {kFull, false, 32, "x87 or SSE: none | -mfpmath=387 | -mfpmath=sse"},
+    {kFull, false, 0, "aliasing: none | -fno-strict-aliasing"},
+    {kFull, false, 0, "loops: none | -funroll-loops"},
+    {kFull, false, 0, "floating point: none | -ffast-math"},
+    {kFull, false, 0, "vectorization: none | -fno-tree-vectorize"},
+    {kFull, false, 0, "char: none | -funsigned-char"},
 };
 
 using Choice = std::vector<usize>;
@@ -196,17 +201,16 @@ std::string to_string(const FlagGroup& group) {
     return (group.name.empty() ? "" : group.name + ": ") + join(parts, " | ");
 }
 
-std::vector<std::string> flag_presets() { return {"common", "full", "none"}; }
+std::vector<std::string> flag_presets() { return {"basic", "common", "full", "none"}; }
 
 Result<std::vector<FlagGroup>> preset_groups(std::string_view preset, matching::ToolchainKind kind, Arch arch) {
-    if (preset != "common" && preset != "full" && preset != "none")
-        return make_error(ErrorCode::invalid_argument, "unknown flag preset '{}' (common, full or none)", preset);
+    const int mask = preset == "basic" ? kBasic : preset == "common" ? kCommon : preset == "full" ? kFull : 0;
+    if (mask == 0 && preset != "none") return make_error(ErrorCode::invalid_argument, "unknown flag preset '{}' (basic, common, full or none)", preset);
     std::vector<FlagGroup> out;
-    if (preset == "none") return out;
     const bool msvc_style = kind == matching::ToolchainKind::msvc || kind == matching::ToolchainKind::clang_cl;
     const int bits = arch == Arch::x86 ? 32 : 64;
     for (const auto& p : kPresetGroups) {
-        if (p.msvc_style != msvc_style || (p.full && preset != "full") || (p.arch != 0 && p.arch != bits)) continue;
+        if (p.msvc_style != msvc_style || (p.presets & mask) == 0 || (p.arch != 0 && p.arch != bits)) continue;
         TRY_ASSIGN(auto g, parse_flag_group(p.text));
         out.push_back(std::move(g));
     }

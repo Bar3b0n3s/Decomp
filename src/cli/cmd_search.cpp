@@ -10,6 +10,7 @@
 #include "viewmodel/line_diff.hpp"
 #include "search/apply.hpp"
 #include "search/flags.hpp"
+#include "search/identify.hpp"
 #include "search/permute.hpp"
 #include "search/probes.hpp"
 #include "search/runs.hpp"
@@ -45,6 +46,12 @@ void add_probe_options(CLI::App* cmd, ProbeArgs& a) {
 std::string function_label(const Program& program, u64 va) {
     const Symbol* s = program.symbols().at(va);
     return s ? qualified_name(s->name) : std::format("{:#x}", va);
+}
+
+// The first line of a compiler's output.
+std::string snippet_line(std::string_view text) {
+    const auto line = trim(text.substr(0, text.find('\n')));
+    return std::string(line.size() > 100 ? line.substr(0, 97) : line) + (line.size() > 100 ? "..." : "");
 }
 
 struct Probes {
@@ -320,6 +327,108 @@ Result<int> search_permute_command(const GlobalOptions& g, const PermuteArgs& a)
     return result.score.complete() ? 0 : 2;
 }
 
+struct IdentifyArgs {
+    ProbeArgs probes;
+    std::vector<std::string> candidates;
+    std::string preset = "basic";
+    usize limit = 64;
+    int threads = 0;
+    bool apply = false, no_record = false;
+};
+
+Result<int> search_identify_command(const GlobalOptions& g, const IdentifyArgs& a) {
+    auto project = command_project(g, a.probes);
+    TRY_ASSIGN(auto program, open_program(g, a.probes.binary));
+    TRY_ASSIGN(auto registry, matching::ToolchainRegistry::load());
+    // The candidates: the toolchains named, else every one that compiles for the target's architecture
+    // (or does not say which).
+    std::vector<matching::Toolchain> candidates;
+    if (!a.candidates.empty()) {
+        for (const auto& list : a.candidates)
+            for (auto name : split(list, ',')) {
+                const matching::Toolchain* t = registry.find(trim(name));
+                if (!t) return make_error(ErrorCode::not_found, "unknown toolchain '{}' (see `decomp toolchain list`)", trim(name));
+                candidates.push_back(*t);
+            }
+    } else {
+        for (const auto& t : registry.toolchains())
+            if (auto arch = search::toolchain_arch(t); !arch || *arch == program.arch()) candidates.push_back(t);
+    }
+    if (candidates.empty()) return make_error(ErrorCode::not_found, "no toolchain to try: add some with `decomp toolchain add`");
+    // Work directories and include paths from the project; its toolchain, when it has one, says which
+    // style the flags given are in.
+    const bool has_toolchain = !a.probes.toolchain.empty() || (project && !project->config().toolchain.empty());
+    TRY_ASSIGN(auto setup, make_match_setup(g, has_toolchain ? a.probes.toolchain : candidates.front().name, a.probes.flags));
+    TRY_ASSIGN(auto probes, make_probes(a.probes, project ? &*project : nullptr, program));
+
+    search::IdentifyOptions options;
+    options.preset = a.preset;
+    options.start = setup.flags;
+    options.max_per_toolchain = a.limit;
+    options.threads = a.threads;
+    auto stop = std::make_shared<std::atomic<bool>>(false);
+    options.cancelled = [stop] { return stop->load(); };
+
+    Json names = Json::array();
+    for (const auto& t : candidates) names.push_back(t.name);
+    const Json settings{{"toolchains", names}, {"preset", a.preset}, {"start", setup.flags}, {"limit", a.limit}};
+    std::unique_ptr<search::RunWriter> writer;
+    if (project && !a.no_record) {
+        TRY_ASSIGN(writer, search::RunWriter::create(search::search_dir(*project), search::SearchKind::identify, probes.target, probes.functions, settings));
+    }
+    const bool show = !g.json && !g.quiet;
+    if (show)
+        std::println("identifying the compiler with {} ({} function{}): {} toolchain{}", probes.target, probes.functions.size(),
+                     probes.functions.size() == 1 ? "" : "s", candidates.size(), candidates.size() == 1 ? "" : "s");
+    search::CandidateLog log(writer.get(), [show](const search::LogEntry& e) {
+        if (show && e.best) std::println("  #{:<5} {}  {}", e.index, e.score.text(), e.label);
+    });
+    options.log = &log;
+
+    search::IdentifyResult result;
+    {
+        InterruptWatcher watcher([stop](int) {
+            log::warn("stopping: the configurations being compiled finish first");
+            stop->store(true);
+        });
+        result = search::identify(program, setup, probes.probes, candidates, options);
+    }
+    const Json result_json = search::to_json(result);
+    if (writer) TRY(writer->finish(result.cancelled ? search::RunStatus::cancelled : search::RunStatus::done, result_json));
+
+    std::string applied;
+    if (a.apply) {
+        if (!project) return make_error(ErrorCode::invalid_argument, "--apply needs a project");
+        if (result.decided()) {
+            const auto& best = result.ranking.front();
+            TRY(search::apply_configuration(*project, best.flags, best.toolchain));
+            applied = std::format("decomp.json: toolchain {}, flags {}", best.toolchain, join(best.flags, " "));
+        } else {
+            applied = "no toolchain comes out ahead: nothing applied";
+        }
+    }
+    if (g.json) {
+        Json j = result_json;
+        if (writer) j["run"] = writer->record().id;
+        if (!applied.empty()) j["applied"] = applied;
+        print_json(j);
+    } else {
+        usize width = 0;
+        for (const auto& t : result.ranking) width = std::max(width, t.toolchain.size());
+        for (usize i = 0; i < result.ranking.size(); ++i) {
+            const auto& t = result.ranking[i];
+            if (!t.error.empty()) std::println("  {}. {:<{}}  could not compile the probes: {}", i + 1, t.toolchain, width, snippet_line(t.error));
+            else std::println("  {}. {:<{}}  {}  {}", i + 1, t.toolchain, width, t.score.text(), join(t.flags, " "));
+        }
+        if (result.decided()) std::println("best: {} with {}", result.ranking.front().toolchain, join(result.ranking.front().flags, " "));
+        else std::println("no toolchain comes out ahead");
+        if (writer) std::println("run: {}", writer->record().id);
+        if (!applied.empty()) std::println("{}", applied);
+        else if (result.decided() && project) std::println("--apply sets it as the project's toolchain and flags");
+    }
+    return result.decided() && result.ranking.front().score.complete() ? 0 : 2;
+}
+
 Result<int> search_list(const GlobalOptions& g) {
     TRY_ASSIGN(auto project, project::Project::find(g.project));
     const auto runs = search::list_runs(search::search_dir(project));
@@ -377,7 +486,7 @@ void register_search_commands(CLI::App& app, GlobalOptions& g) {
         auto a = std::make_shared<FlagArgs>();
         add_probe_options(cmd, a->probes);
         cmd->add_option("--group", a->groups, "A group of alternatives, e.g. \"opt: /Od | /O1 | /O2\" or \"none | /Oy-\" (repeatable)");
-        cmd->add_option("--preset", a->preset, "Groups to start from: common, full or none (default: common, or none with --group)");
+        cmd->add_option("--preset", a->preset, "Groups to start from: basic, common, full or none (default: common, or none with --group)");
         cmd->add_option("--limit", a->limit, "Configurations to compile, at most");
         cmd->add_option("--exhaustive-limit", a->exhaustive_limit, "Try every combination when there are at most this many");
         cmd->add_option("--restarts", a->restarts, "Local searches from random starts after the first");
@@ -401,6 +510,19 @@ void register_search_commands(CLI::App& app, GlobalOptions& g) {
         cmd->add_flag("--apply", a->apply, "Keep the best source: verified when byte-exact, else as the function's best attempt");
         cmd->add_flag("--no-record", a->no_record, "Do not keep the run under .decomp/search/");
         cmd->callback([&g, a] { throw CLI::RuntimeError(run(g, [&] { return search_permute_command(g, *a); })); });
+    }
+    {
+        auto* cmd = search->add_subcommand("identify", "Rank toolchains by how close they compile the sources to the target's bytes, each with "
+                                                       "a small flag search (exit code 0 = one ahead, every function byte-exact)");
+        auto a = std::make_shared<IdentifyArgs>();
+        add_probe_options(cmd, a->probes);
+        cmd->add_option("--candidates", a->candidates, "Toolchains to try, comma-separated (default: every one for the target's architecture)");
+        cmd->add_option("--preset", a->preset, "Flag groups each toolchain is searched with: basic, common, full or none");
+        cmd->add_option("--limit", a->limit, "Configurations to compile per toolchain, at most");
+        cmd->add_option("--threads", a->threads, "Configurations compiled at once (default: as many as compiles may run)");
+        cmd->add_flag("--apply", a->apply, "Set the best toolchain and its flags as the project's (when one comes out ahead)");
+        cmd->add_flag("--no-record", a->no_record, "Do not keep the run under .decomp/search/");
+        cmd->callback([&g, a] { throw CLI::RuntimeError(run(g, [&] { return search_identify_command(g, *a); })); });
     }
     search->add_subcommand("list", "List the project's searches, newest first")->callback([&g] {
         throw CLI::RuntimeError(run(g, [&] { return search_list(g); }));

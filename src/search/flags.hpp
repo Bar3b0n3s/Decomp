@@ -34,9 +34,9 @@ std::string to_string(const FlagGroup& group);
 // An alternative's flags as text ("none" when it has none).
 std::string alternative_text(std::span<const std::string> flags);
 
-// Named sets of groups for a toolchain kind and architecture: "common" (the optimization level and the
-// flags that most often differ between builds) and "full" (also packing, signedness, hot patching and
-// more).
+// Named sets of groups for a toolchain kind and architecture: "basic" (the optimization level, frame
+// pointers and security checks: what tells toolchains apart), "common" (also the flags that most often
+// differ between builds) and "full" (also packing, signedness, hot patching and more).
 std::vector<std::string> flag_presets();
 Result<std::vector<FlagGroup>> preset_groups(std::string_view preset, matching::ToolchainKind kind, Arch arch);
 

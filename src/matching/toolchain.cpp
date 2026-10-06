@@ -293,9 +293,12 @@ std::vector<std::string> Compiler::command_line(const CompileRequest& request, c
     return cmd;
 }
 
-// Candidates are always compiled with /Gy: every function gets its own COMDAT section, so it can be
-// cut out of the object exactly (no padding, calls to neighbours carry relocations). /Gy changes
-// packaging only, not the code generated for a function, so targets built without it still match.
+// Candidates of MSVC-style compilers are always compiled with /Gy: every function gets its own COMDAT
+// section, so it can be cut out of the object exactly (no padding, calls to neighbours carry
+// relocations). /Gy changes packaging only, not the code generated for a function, so targets built
+// without it still match. Not so -ffunction-sections: the GNU assembler resolves a call or a jump to a
+// function in the same section itself, with a shorter jump when it can, so GCC-style candidates keep
+// the flags given (the diff reads those direct references as the functions they reach).
 bool Compiler::needs_function_sections(const CompileRequest& request) const {
     if (!toolchain_.msvc_style()) return false;
     std::optional<bool> gy;

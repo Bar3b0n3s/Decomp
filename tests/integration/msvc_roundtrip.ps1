@@ -77,11 +77,11 @@ Write-Host "MSVC relink ($Arch): identical to the original"
 
 # Flag search with cl.exe: from /Od, a search over the common groups finds flags that make every verified
 # function byte-exact again, the fixture's own among the equally good ones in every group.
-& python "$root\tests\integration\flag_search.py" set-flags (Join-Path $project "decomp.json") /Od /Gy /GR- /EHs-c-
+& python "$root\tests\integration\search_checks.py" set-flags (Join-Path $project "decomp.json") /Od /Gy /GR- /EHs-c-
 if ($LASTEXITCODE -ne 0) { throw "could not set the project's flags" }
 & $decomp -C $project --json search flags --verified | Set-Content (Join-Path $out "flags.json")
 if ($LASTEXITCODE -ne 0) { Get-Content (Join-Path $out "flags.json"); throw "flag search did not make every function byte-exact with cl.exe ($Arch)" }
-& python "$root\tests\integration\flag_search.py" check (Join-Path $out "flags.json") /O2 /Gy /GS- /GR- /EHs-c-
+& python "$root\tests\integration\search_checks.py" flags (Join-Path $out "flags.json") /O2 /Gy /GS- /GR- /EHs-c-
 if ($LASTEXITCODE -ne 0) { throw "flag search did not find the fixture's flags with cl.exe ($Arch)" }
 & $decomp -C $project search flags --verified --apply
 & $decomp -C $project units verify

@@ -398,6 +398,17 @@ const coff::Symbol* defined_symbol_at(const coff::Object& obj, i32 section_numbe
     return best;
 }
 
+// The named symbol of a data section whose bytes hold `offset`: the last one at or before it (a section
+// symbol and labels name no variable).
+const coff::Symbol* symbol_holding(const coff::Object& obj, i32 section_number, u32 offset) {
+    const coff::Symbol* best = nullptr;
+    for (const auto* s : obj.section_symbols(section_number)) {
+        if (s->value > offset || s->is_section_symbol() || s->storage_class == coff::storage::label) continue;
+        if (!best || s->value > best->value || (s->value == best->value && s->is_external() && !best->is_external())) best = s;
+    }
+    return best;
+}
+
 Ref candidate_reloc_ref(const CandidateContext& ctx, const coff::Relocation& reloc, i64 addend) {
     const auto& obj = ctx.obj;
     Ref r;
@@ -524,6 +535,15 @@ Ref candidate_reloc_ref(const CandidateContext& ctx, const coff::Relocation& rel
         r.display = short_symbol(named->name, 0);
         return r;
     }
+    // Inside a variable, through its section (GCC refers to static data as `.data+0x14`): the variable
+    // and the offset into it, as the target's reference reads.
+    if (auto holder = symbol_holding(obj, sym->section_number, static_cast<u32>(off))) {
+        r.kind = RefKind::symbol;
+        r.key = holder->name;
+        r.offset = off - static_cast<i64>(holder->value);
+        r.display = short_symbol(holder->name, r.offset);
+        return r;
+    }
     r.kind = RefKind::unknown;
     r.key = std::format("{}+{:#x}", tsec->name, off);
     r.display = r.key;
@@ -618,9 +638,21 @@ Result<Side> build_candidate_side(const coff::Object& obj, const coff::Symbol& f
             if (const coff::Relocation* rel = reloc_at(*sec, static_cast<u32>(ins.address + field.offset))) {
                 si.refs[f] = own_companions(candidate_reloc_ref(ctx, *rel, field_addend(obj, *rel, ins, field)), ctx.function);
             } else if (field.kind == x86::FieldKind::rel || field.rip_relative) {
-                // Resolved by the assembler: a place in the same section (x64 funclets load their
-                // function's continuation address, `lea rax, [rip + $ehgcr_3_7]`).
-                si.refs[f] = label_ref(ctx.index_of, field.absolute, start);
+                // Resolved by the assembler: a place in the same section. In the function (x64 funclets
+                // load their function's continuation address, `lea rax, [rip + $ehgcr_3_7]`), or another
+                // function there: GCC without -ffunction-sections calls and jumps to its neighbours directly.
+                const coff::Symbol* other = field.absolute < start || field.absolute >= end
+                                                ? defined_symbol_at(obj, function.section_number, static_cast<u32>(field.absolute))
+                                                : nullptr;
+                if (other) {
+                    Ref r;
+                    r.kind = RefKind::symbol;
+                    r.key = other->name;
+                    r.display = short_symbol(other->name, 0);
+                    si.refs[f] = std::move(r);
+                } else {
+                    si.refs[f] = label_ref(ctx.index_of, field.absolute, start);
+                }
             }
         }
         si.ins = std::move(ins);

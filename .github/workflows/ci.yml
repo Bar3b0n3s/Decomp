@@ -21,7 +21,7 @@ jobs:
       - name: Install compilers and libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-14 libcurl4-openssl-dev clang-18 lld-18 llvm-18 \
+          sudo apt-get install -y g++-14 libcurl4-openssl-dev clang-18 lld-18 llvm-18 gcc-mingw-w64-x86-64 \
             libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev xvfb
 
       - name: Install premake
@@ -166,9 +166,9 @@ jobs:
               --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
             ./bin/Release/decomp -C "$p" units compose basic.obj tests/fixtures/src/basic.cpp
             ./bin/Release/decomp -C "$p" units compose other.obj tests/fixtures/src/other.cpp
-            python3 tests/integration/flag_search.py set-flags "$p/decomp.json" /Od /Gy /GR- /EHs-c-
+            python3 tests/integration/search_checks.py set-flags "$p/decomp.json" /Od /Gy /GR- /EHs-c-
             ./bin/Release/decomp -C "$p" --json search flags --verified > "$p/flags.json"
-            python3 tests/integration/flag_search.py check "$p/flags.json" /O2 /Gy /GS- /GR- /EHs-c-
+            python3 tests/integration/search_checks.py flags "$p/flags.json" /O2 /Gy /GS- /GR- /EHs-c-
             ./bin/Release/decomp -C "$p" search flags Player::Hit --whole --apply
             ./bin/Release/decomp -C "$p" units verify
             ./bin/Release/decomp -C "$p" search list
@@ -188,6 +188,21 @@ jobs:
             ./bin/Release/decomp -C "$d/project" search permute Player::Hit --source tests/fixtures/src/permute_perturbed.cpp --apply
             ./bin/Release/decomp -C "$d/project" units verify
             ./bin/Release/decomp -C "$d/project" search list
+          done
+          # Compiler identification: ident.c built by clang-cl and by MinGW-w64 GCC (both linked by lld-link). For each
+          # program the toolchain that built it ranks first, every function byte-exact (Windows adds cl.exe).
+          d="$(mktemp -d)"
+          export DECOMP_TOOLCHAINS="$d/toolchains.json"
+          ./bin/Release/decomp toolchain add gcc-x64 --kind gcc --compiler x86_64-w64-mingw32-gcc
+          /usr/lib/llvm-18/bin/clang-cl --target=x86_64-pc-windows-msvc /nologo /c /O2 /GS- /Zl /Z7 /Brepro tests/fixtures/src/ident.c "/Fo$d/clang.obj"
+          /usr/lib/llvm-18/bin/lld-link /nologo /nodefaultlib /entry:entry /subsystem:console /debug /Brepro "/out:$d/clang.exe" "$d/clang.obj"
+          x86_64-w64-mingw32-gcc -c -O2 tests/fixtures/src/ident.c -o "$d/gcc.o"
+          /usr/lib/llvm-18/bin/lld-link /nologo /nodefaultlib /entry:entry /subsystem:console /debug /Brepro "/out:$d/gcc.exe" "$d/gcc.o"
+          for pair in clang:clang-cl-x64 gcc:gcc-x64; do
+            ./bin/Release/decomp search identify --binary "$d/${pair%%:*}.exe" --source tests/fixtures/src/ident.c --candidates clang-cl-x64,gcc-x64
+            ./bin/Release/decomp --json search identify --binary "$d/${pair%%:*}.exe" --source tests/fixtures/src/ident.c \
+              --candidates clang-cl-x64,gcc-x64 > "$d/${pair%%:*}.json"
+            python3 tests/integration/search_checks.py identify "$d/${pair%%:*}.json" "${pair#*:}"
           done
 
       - name: Function bounds corpus (clang-cl)
@@ -292,6 +307,10 @@ jobs:
       - if: ${{ !cancelled() }}
         shell: pwsh
         run: tests\integration\msvc_roundtrip.ps1 -Arch x64
+      - name: Compiler identification (cl.exe, clang-cl, MinGW-w64 GCC)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: tests\integration\identify.ps1
       - name: Function bounds corpus (MSVC x64)
         if: ${{ !cancelled() }}
         shell: pwsh
