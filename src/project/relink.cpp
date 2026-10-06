@@ -433,6 +433,15 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
             if (const auto name = leader_name(c.rva); !name.empty()) define(c.unit, c.rva, name);
         }
     }
+    // And the rest of a split unit's public names, as its original object defined them: nothing needs them,
+    // but the linker looks some up itself (link.exe the security cookie). The names the PDB or a link map
+    // gives; another name at the same address (identical COMDAT folding's) stays out, as above.
+    for (const auto& [va, s] : program.symbols()) {
+        if (va < base || s.is_static || s.name.empty() || s.kind == SymbolKind::label || s.kind == SymbolKind::import) continue;
+        if (s.source != SymbolSource::pdb_public && s.source != SymbolSource::pdb && s.source != SymbolSource::map) continue;
+        const u32 rva = static_cast<u32>(va - base);
+        if (const auto* c = owner(rva); c && !c->linker && mode_of(c->unit) == LinkMode::split) define(c->unit, rva, s.name);
+    }
     // The entry point.
     std::string entry;
     if (const u32 rva = image.entry_rva()) {

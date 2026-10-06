@@ -771,7 +771,9 @@ contains no matching or agent logic of its own:
 3. What the objects need from each other: the names compiled objects reference are defined by the
    split objects that hold their addresses (or tied to a compiled object's own name with
    `/ALTERNATENAME`); a pooled COMDAT a compiled unit repeats is defined by the split unit that has it,
-   so the linker keeps that copy; the entry point, the exports, the TLS and load configuration
+   so the linker keeps that copy; a split object defines the rest of its unit's public names too (the
+   PDB's or the link map's), as its original did, since a linker can look some up itself (link.exe the
+   security cookie); the entry point, the exports, the TLS and load configuration
    directories' symbols, and x86 SAFESEH handlers (from the load configuration's table, or the table
    the linker wrote without one) are provided the same way; C common symbols the linker allocated in
    `.bss` are declared again; every import is pulled in with `/INCLUDE` (on the command line when no

@@ -321,7 +321,9 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
     };
 
     // A section nothing refers to (x64 .pdata) is found by its relocations: where the image holds, at the
-    // same offsets, the values its placed targets give. Image sections are indexed by their aligned values.
+    // same offsets, the values its placed targets give, if only one place does (x64 chained unwind records
+    // of one function hold the same copy of its .pdata entry; the entries that point at them place them).
+    // Image sections are indexed by their aligned values.
     std::map<std::string, std::unordered_multimap<u32, u32>> value_index;  // image section -> value -> rva
     auto values_of = [&](const pe::SectionHeader& s) -> const std::unordered_multimap<u32, u32>& {
         auto [it, inserted] = value_index.try_emplace(s.name);
@@ -354,6 +356,7 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
         for (const auto& c : layout.contributions)
             if (c.name == sec->name) outputs.insert(c.section);
         if (outputs.empty()) outputs.insert(sec->name.substr(0, sec->name.find('$')));
+        std::optional<u32> found;
         for (const auto& s : image.sections()) {
             if (!outputs.contains(s.name)) continue;
             const auto& values = values_of(s);
@@ -372,13 +375,14 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
                         break;
                     }
                 }
-                if (all) {
-                    anchor(i, start, "the values its relocations give");
-                    return true;
-                }
+                if (!all) continue;
+                if (found && *found != start) return false;
+                found = start;
             }
         }
-        return false;
+        if (!found) return false;
+        anchor(i, *found, "the values its relocations give");
+        return true;
     };
 
     // Relocations of placed sections anchor their targets; repeat until nothing new is placed.

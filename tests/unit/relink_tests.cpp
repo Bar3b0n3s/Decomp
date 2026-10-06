@@ -190,6 +190,39 @@ TEST_CASE("relink: split x64 .pdata says which function and unwind data each ent
     CHECK(entries == 3);
 }
 
+TEST_CASE("relink: split objects define their units' public names") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("lld-link not found; skipping");
+        return;
+    }
+    // As the original objects did: nothing refers to g_counter by name in a relink of split objects, but a
+    // linker looks some names up itself (link.exe the security cookie).
+    auto tmp = fs::TempDir::create("decomp-relink-names").value();
+    auto p = project::Project::init(tmp.path() / "p", test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86").value();
+    auto program = p.open_program().value();
+    const auto setup = test::clang_setup(program.arch(), tools->clang_cl, tmp.path() / "work", tmp.path() / "cache");
+    project::RelinkOptions options;
+    options.all_split = true;
+    const auto r = relink_and_compare(p, program, setup, options);
+    const auto basic = std::ranges::find_if(r.result.units, [](const project::UnitLink& u) { return u.unit.name == "basic.obj"; });
+    REQUIRE(basic != r.result.units.end());
+    const auto object = coff::Object::load(project::relink_dir(p) / basic->object).value();
+    const auto* counter = object.find_defined("?g_counter@@3HA");
+    REQUIRE(counter);
+    CHECK(counter->is_external());
+    CHECK(object.section(counter->section_number)->name == ".data");
+    CHECK(object.find_defined("?add@@YAHHH@Z"));
+    // A static name stays out: another unit can have one of the same name.
+    int statics = 0;
+    for (const auto& [va, s] : program.symbols()) {
+        if (!s.is_static || s.name.empty()) continue;
+        ++statics;
+        CHECK_FALSE(object.find_defined(s.name));
+    }
+    CHECK(statics > 0);
+}
+
 TEST_CASE("relink: comparing images takes the build's identity over and finds the first difference") {
     auto program = Program::open(test::fixture("x86/basic.exe")).value();
     auto reader = pdb::Reader::load(*program.pdb_path()).value();
