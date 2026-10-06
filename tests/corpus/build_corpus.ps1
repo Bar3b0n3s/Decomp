@@ -90,12 +90,36 @@ function Test-Links {
     $command = (Get-Content "$project\.decomp\relink\result.json" -Raw | ConvertFrom-Json).link.command
     $relinkFlags = @($command | Select-Object -Skip 1 | Where-Object { $_ -like "/*" -and $_ -notlike "/out:*" -and $_ -notlike "/pdb:*" })
     $libraries = @($command | Where-Object { $_ -like "*.lib" })
+    # Copies of the original objects with sections renamed and marked for removal, so link.exe neither reads
+    # nor keeps them: which of them makes it write volatile metadata and define the load configuration itself.
+    function Copy-Objects([string]$variant, [string[]]$sections) {
+        $dir = Join-Path $exp $variant
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        foreach ($object in $objects) {
+            $bytes = [System.IO.File]::ReadAllBytes($object)
+            $count = [BitConverter]::ToUInt16($bytes, 2)
+            $table = 20 + [BitConverter]::ToUInt16($bytes, 16)
+            for ($i = 0; $i -lt $count; $i++) {
+                $at = $table + 40 * $i
+                $name = [System.Text.Encoding]::ASCII.GetString($bytes, $at, 8).TrimEnd([char]0)
+                if ($sections -notcontains $name) { continue }
+                $bytes[$at + 1] = [byte][char]'z'
+                $flags = [BitConverter]::ToUInt32($bytes, $at + 36) -bor 0x800
+                [BitConverter]::GetBytes([uint32]$flags).CopyTo($bytes, $at + 36)
+            }
+            [System.IO.File]::WriteAllBytes((Join-Path $dir (Split-Path -Leaf $object)), $bytes)
+        }
+        Get-ChildItem "$dir\*.obj" | ForEach-Object FullName
+    }
     $runs = [ordered]@{
         "original-again" = $original + $objects
         "original-safeseh-no" = $original + "/safeseh:no" + $objects
-        "original-objects-relink-flags" = $relinkFlags + $objects
         "split-objects-original-flags" = $original + $split + $libraries
         "split-objects-verbose" = $relinkFlags + "/verbose:safeseh" + $split + $libraries
+        "original-without-chks64" = $original + (Copy-Objects "no-chks64" @(".chks64"))
+        "original-without-debug-s" = $original + (Copy-Objects "no-debug-s" @(".debug`$S"))
+        "original-without-debug-t" = $original + (Copy-Objects "no-debug-t" @(".debug`$T"))
+        "original-without-debug" = $original + (Copy-Objects "no-debug" @(".debug`$S", ".debug`$T", ".debug`$F", ".chks64"))
     }
     foreach ($name in $runs.Keys) {
         $output = & link.exe @($runs[$name]) "/out:$exp\$name.exe" "/pdb:$exp\$name.pdb" "/map:$exp\$name.map" 2>&1 | Out-String

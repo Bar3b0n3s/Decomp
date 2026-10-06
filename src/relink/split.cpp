@@ -37,6 +37,17 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
     const u64 base = image.image_base();
     const std::string image_base = image_base_symbol(image);
     std::vector<std::string> keep;  // COMDAT names to keep
+    struct Placed {
+        const Contribution* contribution;
+        u32 section;
+        bool comdat;
+    };
+    std::vector<Placed> placed;  // the sections written so far
+    auto placed_at = [&](u32 rva) -> const Placed* {
+        for (const auto& p : placed)
+            if (p.contribution->contains(rva)) return &p;
+        return nullptr;
+    };
 
     for (const auto* c : spec.contributions) {
         const u32 characteristics = (c->characteristics & kKeptCharacteristics) | alignment_flags_for(*c);
@@ -61,10 +72,18 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
                 if (it->first == c->rva && !at_start) at_start = handle;
             }
         }
+        // x64 .pdata (a function's RUNTIME_FUNCTION entries) goes with the function it describes, as compilers
+        // write it: link.exe builds the exception directory from the .pdata of the functions it keeps.
+        const bool pdata = x64 && c->section == ".pdata" && !c->uninitialized();
+        std::optional<u32> function_section;
+        if (pdata && c->size >= 12)
+            if (const auto* p = placed_at(read_le<u32>(w.data(section), 0).value_or(0)); p && p->comdat) function_section = p->section;
         // What was a COMDAT stays one, named or not: linkers order an object's COMDATs and its other
         // sections differently (lld-link takes the others first). Each is kept by an /INCLUDE of its name:
         // nothing refers to it by name, and /OPT:REF would drop it.
-        if (c->characteristics & pe::scn::lnk_comdat) {
+        if ((c->characteristics & pe::scn::lnk_comdat) && function_section && !at_start) {
+            w.set_comdat(section, coff::comdat_select::associative, std::nullopt, *function_section);
+        } else if (c->characteristics & pe::scn::lnk_comdat) {
             if (!at_start) {
                 at_start = w.add_symbol(std::format("__decomp_{:x}", c->rva), 0, static_cast<i32>(section), coff::storage::external, code ? 0x20 : 0);
                 ++local.symbols;
@@ -72,7 +91,30 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
             w.set_comdat(section, coff::comdat_select::any, at_start);
             keep.push_back(w.symbol_name(*at_start));
         }
+        placed.push_back({c, section, (c->characteristics & pe::scn::lnk_comdat) != 0});
         if (c->uninitialized()) continue;
+
+        // .pdata's addresses are RVAs, which no base relocation covers: each becomes a relocation against
+        // the section that holds it (the function's code, its unwind data), so link.exe sees which function
+        // each entry belongs to, as in a compiler's object.
+        if (pdata) {
+            auto& entries = w.data(section);
+            for (u32 offset = 0; offset + 4 <= entries.size(); offset += 4) {
+                const u32 rva = read_le<u32>(entries, offset).value_or(0);
+                if (!rva) continue;
+                // An end address is just past its function.
+                const Placed* target = placed_at(offset % 12 == 4 ? rva - 1 : rva);
+                u32 symbol = 0;
+                if (target) {
+                    symbol = w.section_symbol(target->section);
+                    write_le<u32>(entries, offset, rva - target->contribution->rva);
+                } else {
+                    symbol = w.undefined(image_base);
+                }
+                w.add_relocation(section, offset, symbol, coff::reloc_amd64::addr32nb);
+                ++local.relocations;
+            }
+        }
 
         // Base relocations: the same values, and the linker writes their base relocations again.
         auto& data = w.data(section);
