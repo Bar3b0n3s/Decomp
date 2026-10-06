@@ -623,14 +623,9 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
         link.object = file;
         inputs.push_back(fs::to_utf8(dir / fs::from_utf8(file)));
     }
-    if (!directives_placed && !directives.empty()) {
-        // Everything is compiled: the directives go in an object of their own, first.
-        relink::SplitObjectSpec spec;
-        spec.directives = directives;
-        TRY_ASSIGN(auto bytes, relink::write_split_object(image, spec));
-        TRY(fs::write_file(dir / "objects" / "directives.obj", bytes));
-        inputs.insert(inputs.begin(), fs::to_utf8(dir / "objects" / "directives.obj"));
-    }
+    // Everything is compiled: the directives go on the command line. (An object of their own would be one
+    // more object link.exe counts, in the Rich header and in its feature counts.)
+    const std::vector<std::string> command_line_directives = directives_placed ? std::vector<std::string>{} : directives;
 
     // Libraries: the configured ones, then import libraries for the DLLs they do not cover.
     std::set<std::string> covered;
@@ -685,6 +680,7 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     relink::LinkRequest request;
     request.inputs = inputs;
     request.flags = relink::image_link_flags(image, entry);
+    request.flags.insert(request.flags.end(), command_line_directives.begin(), command_line_directives.end());
     // A compiled unit's function the image has folded into another (identical COMDAT folding): the
     // original link folded, so this one must (unless decomp.json says how to optimize).
     const auto& configured = project.config().link.flags;
