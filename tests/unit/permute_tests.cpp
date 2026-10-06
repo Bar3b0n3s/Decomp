@@ -140,7 +140,8 @@ TEST_CASE("permuter: declarators, operands, comparisons, branches and increments
 }
 
 TEST_CASE("permuter: random edits are deterministic for a seed") {
-    const std::string s = fs::read_text(test::fixture("src/permute_perturbed.cpp")).value();
+    std::string s = fs::read_text(test::fixture("src/permute_perturbed.cpp")).value();
+    std::erase(s, '\r');  // a checkout with CRLF line endings
     const auto targets = names({"Player::Hit", "two_buffers", "set_all", "weigh"});
     auto sequence = [&](u64 seed) {
         std::mt19937_64 rng(seed);

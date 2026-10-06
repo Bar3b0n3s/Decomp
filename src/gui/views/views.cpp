@@ -12,6 +12,7 @@
 #include "gui/views/placeholder.hpp"
 #include "gui/views/relink_view.hpp"
 #include "gui/views/run_monitor_view.hpp"
+#include "gui/views/search_view.hpp"
 #include "gui/views/settings_view.hpp"
 #include "gui/views/symbols_view.hpp"
 #include "gui/views/toolchains_view.hpp"
@@ -34,6 +35,7 @@ std::vector<std::unique_ptr<View>> make_all_views() {
     views.push_back(make_units_view());  // after the views with a Ctrl+digit shortcut, which keep theirs
     views.push_back(make_types_view());
     views.push_back(make_relink_view());
+    views.push_back(make_search_view());
     views.push_back(make_cost_view());
     views.push_back(make_toolchains_view());
     views.push_back(make_logs_view());

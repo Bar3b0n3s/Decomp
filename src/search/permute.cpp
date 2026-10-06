@@ -431,10 +431,11 @@ void declaration_edits(const Parsed& p, const Stmt& st, std::vector<Edit>& out) 
         e.description = std::format("swap `{}` and `{}` in `{}`", snippet(parts[k]), snippet(parts[k + 1]), snippet(whole));
         out.push_back(std::move(e));
     }
-    // One declaration a line, indented like this one.
+    // One declaration a line, indented like this one (and with its line ending).
     const std::string_view lead = p.source().substr(p.lead(st.first), p.begin(st.first) - p.lead(st.first));
     const usize nl = lead.rfind('\n');
-    const std::string separator = nl == std::string_view::npos ? std::string(" ") : "\n" + std::string(lead.substr(nl + 1));
+    const std::string newline = nl != std::string_view::npos && nl > 0 && lead[nl - 1] == '\r' ? "\r\n" : "\n";
+    const std::string separator = nl == std::string_view::npos ? std::string(" ") : newline + std::string(lead.substr(nl + 1));
     Edit e;
     e.kind = MutationKind::split_declaration;
     e.begin = p.begin(st.first);

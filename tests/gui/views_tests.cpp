@@ -14,6 +14,10 @@
 #include "project/relink.hpp"
 #include "project/units.hpp"
 #include "relink/compare.hpp"
+#include "matching/toolchain.hpp"
+#include "project/setup.hpp"
+#include "search/runner.hpp"
+#include "search/runs.hpp"
 #include "test_util.hpp"
 #include "viewmodel/browser.hpp"
 #include "viewmodel/treemap.hpp"
@@ -34,7 +38,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols", "units", "types", "relink"};
+const std::vector<std::string> kMyViews = {"dashboard", "function_browser", "inspector", "binary_explorer", "symbols", "units", "types", "relink", "search"};
 
 // Sessions that finish at once (every other one matches) unless held.
 struct HeldSessions {
@@ -145,6 +149,11 @@ void render_my_views(HeadlessContext& gui, App& app, ProjectFixture& fx, const c
     // Relink before any relink: the units and their tabs.
     for (const char* anchor : {"basic.obj", "tab:comparison", "tab:link"}) {
         app.context().open("relink", {.anchor = anchor});
+        settle(gui, app);
+    }
+    // Search, with each kind's form.
+    for (const char* anchor : {"flags", "permute", "identify", "run:no-such-search"}) {
+        app.context().open("search", {.va = fx.va("add"), .anchor = anchor});
         settle(gui, app);
     }
     CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());
@@ -458,5 +467,77 @@ TEST_CASE("the palette finds the project's functions, symbols and strings") {
     hello->run();
     settle(gui, app);
     CHECK(app.view_visible("binary_explorer"));
+    CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());
+}
+
+TEST_CASE("the Search view runs a flag search, shows it as it goes and after, and keeps its flags") {
+    if (!matching::find_clang_cl()) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    ProjectFixture fx;
+    auto* project = fx.workspace->project();
+    HeadlessContext gui;
+    Settings settings;
+    App app(fx.workspace->services(), settings);
+    // basic.cpp's functions, from no flags, over two groups (a navigation a frame).
+    for (const std::string& anchor : {std::string("flags"), "file:" + fs::to_utf8(decomp::test::fixture("src/basic.cpp")), std::string("preset:none"),
+                                     std::string("group:optimization: /Od | /O1 | /O2"), std::string("group:security checks: none | /GS-")}) {
+        app.context().open("search", {.va = fx.va("add"), .anchor = anchor});
+        settle(gui, app);
+    }
+    CHECK(app.view_visible("search"));
+    CHECK_FALSE(app.context().actions.is_enabled("search.apply"));
+    REQUIRE(app.context().actions.run("search.start"));
+    // Rendered while it runs, until it is kept as done.
+    std::vector<search::RunRecord> runs;
+    for (int i = 0; i < 12000; ++i) {
+        gui.frame([&] { app.frame(); });
+        runs = search::list_runs(search::search_dir(*project));
+        if (!runs.empty() && runs.front().status != search::RunStatus::running && app.jobs().pending() == 0) break;
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(runs.size() == 1);
+    CHECK(runs.front().status == search::RunStatus::done);
+    CHECK(runs.front().candidates == 6);
+    REQUIRE(runs.front().best);
+    CHECK(runs.front().best->complete());
+    settle(gui, app);
+    // Its result; then its flags kept as the project's.
+    app.context().open("search", {.anchor = "run:" + runs.front().id});
+    settle(gui, app);
+    REQUIRE(app.context().actions.is_enabled("search.apply"));
+    REQUIRE(app.context().actions.run("search.apply"));
+    settle(gui, app);
+    CHECK(project->config().flags == std::vector<std::string>{"/O2", "/GS-"});
+    CHECK(project::Project::load(fx.root).value().config().flags == std::vector<std::string>{"/O2", "/GS-"});
+
+    // A permutation (Player::Hit with its statements reordered) and an identification, as `decomp search`
+    // makes them: their results, candidates and settings.
+    std::string perturbed = fs::read_text(decomp::test::fixture("src/basic.cpp")).value();
+    std::erase(perturbed, '\r');  // a checkout with CRLF line endings
+    const std::string hit = "    hp -= dmg;\n    if (hp < 0) hp = 0;\n    speed *= 0.5f;\n";
+    REQUIRE(perturbed.find(hit) != std::string::npos);
+    perturbed.replace(perturbed.find(hit), hit.size(), "    speed *= 0.5f;\n    hp -= dmg;\n    if (hp < 0) hp = 0;\n");
+    REQUIRE(fs::write_text(fx.root / "perturbed.cpp", perturbed));
+    auto setup = project::make_match_setup(project, "").value();
+    setup.flags = {"/O2", "/Gy", "/GS-", "/GR-", "/EHs-c-"};
+    search::SearchRequest permute;
+    permute.kind = search::SearchKind::permute;
+    permute.probes.sources = {fx.root / "perturbed.cpp"};
+    permute.probes.functions = {fx.va("Player::Hit")};
+    const auto permuted = search::run_search(project, *fx.workspace->program(), setup, permute).value();
+    CHECK(permuted.score.complete());
+    search::SearchRequest identify;
+    identify.kind = search::SearchKind::identify;
+    identify.probes.sources = {decomp::test::fixture("src/other.cpp")};
+    identify.toolchains = {"clang-cl-x86"};
+    const auto identified = search::run_search(project, *fx.workspace->program(), setup, identify).value();
+    for (const auto* run : {&permuted, &identified}) {
+        REQUIRE(run->run);
+        app.context().open("search", {.anchor = "run:" + run->run->id});
+        settle(gui, app);
+        CHECK(app.context().actions.is_enabled("search.apply"));
+    }
     CHECK_MESSAGE(gui.id_conflicts() == 0, gui.describe_conflicts());
 }
