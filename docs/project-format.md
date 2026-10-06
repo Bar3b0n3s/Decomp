@@ -36,6 +36,7 @@ units: `units.txt` and one source per unit. Anything marked *planned* does not e
         build/                  per-compile working directories
         cache/objects/          compile cache
         relink/                 the last relink: objects/, libs/, out/, link.rsp, result.json
+        search/<search-id>/     a search: run.json, log.jsonl (a permutation: its start and best sources)
 ```
 
 `<fn>` is the function's [key](#function-keys-fn), such as `add_401060`.
@@ -629,6 +630,45 @@ The `run.json` of the same run, with one queue entry:
 | `model`, `effort`, `workers`, `limits`, `run_budget_usd`, `policies` | The settings, including changes made during the run; a resume starts from them |
 | `selection`, `replay`, `replay_dir` | How the functions were chosen, and the scripts of a scripted run (so that a resume finds them) |
 | `counts`, `spent_usd`, `created`, `updated` | Progress for `decomp runs list` |
+
+### Search runs
+
+`search/<search-id>/` holds a search ([matching.md](matching.md#searching)): `decomp search
+flags|permute|identify` or the GUI's Search view, in a project. The ID is the UTC start time, the kind and four random hex digits, such as
+`2026-10-06T10-34-42-flags-3fdd`; `decomp search list` lists the searches newest first (by the
+millisecond they started) and `decomp search show <id> [--log]` shows one.
+
+| File | Contents |
+|---|---|
+| `run.json` | Written when the search starts and when it ends: `id`, `kind` (`flags`, `permute`, `identify`), `started` (UTC, to the millisecond), `target` (what was searched: functions, files, units), `functions` (the probes' target functions), `settings` (the kind's parameters: toolchain, start flags, groups and preset, limits, seed, the probes' files), `status` (`running`, `done`, `cancelled`, `failed`), `error`, `candidates`, `best` and `best_label` (the best score and its candidate), `result` and `duration_ms` |
+| `log.jsonl` | One line per candidate as it is evaluated: `index`, `ms` (since the start), `label` (the flags of the configuration, the edits of the permutation, the toolchain and its flags), `score` (`functions`, `exact`, `distance`, `match_percent`), and `best` when it was the best so far |
+| `start-<file>`, `best-<file>` | A permutation's source as it started and its best |
+
+The `result` by kind:
+
+- `flags`: `flags` (the best configuration's), `base` (the flags given that are in no group), `groups`
+  (each with `name`, `alternatives`, `start`, `chosen` and `equivalent`: the alternatives that score
+  the same with every other group as chosen), `score`, `start_score`, `candidates`, `space` (the
+  configurations there are), `exhaustive`, `cancelled`.
+- `permute`: `steps` (the edits from the start to the best), `score`, `start_score`, `candidates`,
+  `cancelled`, `error`.
+- `identify`: `ranking` (best first: `toolchain`, `kind`, `flags`, `score`, `candidates`, `error`),
+  `candidates`, `decided` (the first is ahead of the second), `cancelled`.
+
+An excerpt of a flag search's `run.json`:
+
+```json
+{
+  "id": "2026-10-06T10-34-42-flags-3fdd",
+  "kind": "flags",
+  "status": "done",
+  "target": "every verified source",
+  "candidates": 80,
+  "best": {"distance": 0, "exact": 12, "functions": 12, "match_percent": 100.0},
+  "best_label": "/O2 /GS-",
+  "result": {"flags": ["/Gy", "/GR-", "/EHs-c-", "/O2", "/GS-"], "space": 829440, "exhaustive": false}
+}
+```
 
 ### `changes.jsonl` and `blobs/`
 

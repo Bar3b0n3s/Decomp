@@ -109,6 +109,7 @@ cli, gui                  entry points; argument parsing, rendering
   viewmodel               what the GUI's views show, derived without ImGui (progress, tables, charts, notifications)
   run                     selection, work queue, run directories, RunController (N workers)
   agent                   run_loop, tools, Claude client, rate gate, approvals, MatchSession, runner
+  search                  flag search, the permuter, compiler identification, search runs
     project               decomp.json, symbols.txt, history, verified sources, locks, change logs, relinks
     relink                split objects, the linker, comparing images
     matching              toolchains, compile, diff, unit checks
@@ -522,6 +523,29 @@ Linking the target again ([Key flow: `decomp relink`](#key-flow-decomp-relink)):
   image (and computes its checksum again), compares the SHA-1s, and reports differences by header field
   or by section and RVA with the unit whose contribution holds them and the symbol there.
 
+### search
+
+The mechanical searches ([matching.md](matching.md#searching)), over `matching` and `project`:
+
+- `search/evaluate.hpp`: a `Configuration` (toolchain and flags) evaluated on `Probe`s (a translation
+  unit and the target functions it defines), one `verify_unit()` compile per probe; `Score` orders
+  candidates by byte-exact functions, then by a distance over the diff's rows. `parallel_for()` spreads
+  candidates over threads and stops starting new ones when cancelled.
+- `search/probes.hpp`: probes from a function's verified source, a unit's source, a best attempt, a file,
+  or every verified source.
+- `search/flags.hpp`: `FlagGroup`s of alternatives (parsed from `"name: a | b"`, and the presets per
+  toolchain style and architecture) and `search_flags()`: exhaustive for small spaces, local search with
+  seeded restarts otherwise, and the alternatives as good as the best's.
+- `search/permute.hpp`: `tokenize()`, the bodies of the target functions parsed into statements, the
+  edits (`all_mutations()`, `random_mutation()`) and `permute()`, the seeded search over them.
+- `search/identify.hpp`: `toolchain_arch()` and `identify()`, which ranks toolchains by their best
+  configuration's score.
+- `search/runs.hpp`: search runs as a project keeps them (`RunWriter`, `CandidateLog`, `list_runs()`,
+  `load_log()`), under `.decomp/search/`.
+- `search/runner.hpp`: `run_search()`, a search from start to end (probes, the search of its kind, the
+  run kept), which `decomp search` and the GUI's Search view both call; `search/apply.hpp` keeps a result
+  in the project (flags or a toolchain in `decomp.json`, a source as verified or as the best attempt).
+
 ### events
 
 The backbone shared by the CLI, the GUI and the logs ([ui.md](ui.md#architecture) has the consumer
@@ -650,7 +674,8 @@ Batch runs ([agent.md](agent.md#batch-runs) has the behavior):
 ### cli
 
 Commands built with CLI11 (`src/cli/`): `init`, `info`, `funcs`, `disasm`, `diff`,
-`toolchain list|test|add`, `status`, `agent`, `run` and `runs list|show`. Global options, which may come before or after the
+`toolchain list|test|add`, `status`, `agent`, `run`, `runs list|show`, `units`, `types`, `relink`,
+`changes`, `symbols` and `search flags|permute|identify|list|show`. Global options, which may come before or after the
 command name, are `--json`, `-v`/`--verbose` (repeat for trace), `-q`/`--quiet` and `-C`/`--project <dir>`, plus
 `--version`. `diff` takes `--source <file>` or `--obj <file>` (plus `--all` with `--obj`), and exits
 with 0 when byte-exact, 2 when the function differs and 3 when the compile failed (with `--all`, 0
@@ -661,7 +686,10 @@ options, and exits with 0 when matched, 2 when not matched, 3 when refused and 1
 `run` takes functions or a selection (`--all`, `--status`, `--filter`), `--workers`, budgets,
 `--policy`, `--replay-dir`, `--resume <id>` and `--interactive`, and exits with 0 when the run
 completed, 2 when it stopped or ran out of budget (resumable) and 1 when it was aborted or failed.
-Errors are printed as `error: <message>` with exit code 1.
+`search flags`, `search permute` and `search identify` exit with 0 when every function of the probes
+is byte-exact with the best they found (`identify`: and one toolchain is ahead of the others), 2
+otherwise, and keep their runs under `.decomp/search/`. Errors are printed as `error: <message>` with
+exit code 1.
 
 ### viewmodel
 
@@ -683,6 +711,7 @@ background jobs; each header says what its functions cost.
 | `notification_rules.hpp` | The [notifications](ui.md#notifications), each posted once |
 | `exports.hpp` | Progress, cost, function list and diff exports (Markdown, JSON, CSV) |
 | `relink.hpp` | A relink's `result.json` read into the Relink view's rows (units, checks, comparison, first difference), and the target's and the relinked image's bytes side by side |
+| `searches.hpp` | The Search view's rows: searches, a flag search's groups, a permutation's edits, an identification's ranking, the log and the best so far |
 
 ### gui
 
@@ -791,6 +820,26 @@ contains no matching or agent logic of its own:
    (units and why, notes, the linker's command and output, the comparison) is written to
    `.decomp/relink/result.json`.
 
+## Key flow: `decomp search flags`
+
+1. `make_probes()` turns what was asked into probes: the function's verified source (or every verified
+   source, a unit's source, a file) and the target functions each defines.
+2. The groups: the preset's for the toolchain's style and the target's architecture, with `--group`s
+   added or replacing theirs. The start is the project's flags: those in no group stay, the others pick
+   each group's starting alternative.
+3. A `RunWriter` creates `.decomp/search/<id>/run.json`; every candidate evaluated appends a line to
+   `log.jsonl` through the `CandidateLog`, which keeps the best.
+4. `search_flags()` compiles the start and then every configuration (a small space) or every
+   single-group change of the current one, in parallel, moving to the best while it improves, then from
+   seeded random starts; each candidate is one `verify_unit()` per probe, scored over the probes'
+   functions. The best's single-group changes say which alternatives do as well.
+5. `run.json` gets the result. With `--apply`, `apply_configuration()` writes the best flags into
+   `decomp.json` when they do better than the project's own.
+
+`decomp search permute` and `decomp search identify` run the same way through `run_search()`, with
+`permute()` (rounds of single edits and stacks of random ones, then the tidy pass) and `identify()` (a
+small flag search per toolchain) in step 4.
+
 ## Threading model
 
 | Thread | Runs | Notes |
@@ -800,6 +849,7 @@ contains no matching or agent logic of its own:
 | Workers | `decomp run` and the GUI: N `std::jthread`s owned by the `RunController`, each running one session at a time (request building, HTTP streaming, tools, compiles); `decomp agent`: one | Concurrency can change during a run; workers above the new limit retire after their session. |
 | Tool tasks | Consecutive read-only tool calls of one turn (`disassemble`, `read_memory`, `lookup_symbol`), started with `std::async` | Results are still reported in call order. |
 | GUI background work | Loading a project and its program, replaying a past run (one thread each), and `JobQueue`'s pool for the views' expensive derivations | Results are taken on the UI thread; cancelled jobs' results are dropped. |
+| Search candidates | `search::parallel_for()`: a pool of `std::jthread`s per batch of candidates (a flag search's configurations, a permutation's round), as many as compiles may run | Each candidate compiles in its own directory; candidates are logged in the order they were made once the batch ends. |
 | Interrupt watcher | Turns Ctrl+C into a stop (first), then an abort (second) | Polls a counter set by the signal handler, which itself exits the process on a third Ctrl+C. |
 | Stdin reader | `--interactive` only: commands and guidance | Detached; blocks on stdin. |
 

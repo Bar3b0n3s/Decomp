@@ -350,6 +350,36 @@ The manual check on a real target is in [acceptance.md](acceptance.md#phase-5-ac
 - Compiler identification ranks the correct toolchain first for fixtures built by at least three
   different toolchains.
 
+**Status:** the scope is implemented, and CI covers each exit criterion on the test fixtures with
+three toolchains.
+
+- Flag search: `decomp search flags` searches groups of alternatives (presets per toolchain style and
+  architecture, or given with `--group`) exhaustively when the space is small and by local search from
+  the project's flags with seeded restarts otherwise, compiling candidates in parallel and scoring them
+  over every function of the probes (verified sources, units' sources, best attempts, files); it reports
+  which alternatives do as well as the chosen one, and `--apply` sets the flags. CI starts from `/Od` and
+  recovers the fixture's flags (every function byte-exact, the fixture's alternative among the equally
+  good ones in every group) with clang-cl, x86 and x64, on Linux and with cl.exe, x86 and x64, on Windows.
+- The permuter: `decomp search permute` edits the bodies of a translation unit's target functions at the
+  token level (statements and declarations moved, declarators swapped or split, commutative operands
+  swapped, comparisons flipped, if/else branches swapped, increments) in seeded rounds, keeping what
+  brings the functions closer, and undoes the edits the result does not need. `permute_perturbed.cpp`,
+  the fixture `permute.cpp` with statements and declarations reordered, becomes byte-exact in about 60
+  compiles with clang-cl (x86 and x64, unit tests and Linux CI) and with cl.exe (x86 and x64, Windows
+  CI); `--apply` keeps a result as the function's verified source.
+- Compiler identification: `decomp search identify` ranks the registered toolchains for the target's
+  architecture by the best score of a small flag search each. `ident.c`, built by cl.exe and link.exe,
+  by clang-cl and lld-link, and by MinGW-w64 GCC (linked by lld-link), identifies its toolchain first in
+  each case, every function byte-exact (Windows CI; Linux CI and the unit tests with clang-cl and GCC).
+  GCC-style candidates are diffed like MSVC-style ones: without function sections, with their direct
+  calls to neighbouring functions and their section-relative data references read as the symbols they
+  reach.
+- The Search view in `decomp-gui` starts the three searches with their progress, lists the project's
+  searches (`.decomp/search/`, which `decomp search` writes too) and shows each one's result, candidates
+  and settings, and keeps a result in the project.
+
+The manual check on a real target is in [acceptance.md](acceptance.md#phase-6-acceptance).
+
 ### Phase 7: More targets
 
 **Goal:** go beyond Windows PE and x86.

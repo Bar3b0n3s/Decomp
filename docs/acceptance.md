@@ -288,3 +288,60 @@ built with clang-cl and lld-link and with cl.exe and link.exe, x86 and x64.
 Note the target, its linker and version, the number of units and how many were linked from their
 sources, the relinked image's SHA-1, and, for a relink that was not identical, its first difference and
 the unit holding it.
+
+# Phase 6 acceptance
+
+The manual check of the [Phase 6 exit criteria](roadmap.md#phase-6-search-helpers) on a real target: its
+flags recovered by a flag search, a function brought to byte-exact by the permuter, and its compiler
+identified among the toolchains that could have built it. CI covers the same steps on the test fixtures
+with clang-cl (x86 and x64), cl.exe (x86 and x64) and MinGW-w64 GCC (x64).
+
+## What you need
+
+- A project on a real target with some verified functions (in unit sources or their own files), and its
+  toolchain registered.
+- For identification, at least one other toolchain registered that could have built the target (another
+  release of the compiler, clang-cl, MinGW-w64 GCC): `decomp toolchain list` shows them.
+- For the permuter, a function whose best attempt is close but not byte-exact (an agent session's that
+  only an order of statements or declarations keeps from matching), or a matched function's source with
+  two independent statements swapped by hand.
+
+## Checklist
+
+### Flag search
+
+- [ ] Note the project's flags (`decomp.json`), then set its optimization level to another one (`/Od` for
+      `/O2`). `decomp search flags --verified` finds flags that make every verified function byte-exact
+      again; the optimization group is decided, and the project's own alternative is among the equally
+      good ones in every group.
+- [ ] `decomp search flags <function>` on one verified function: note which groups it decides and which it
+      leaves open (more functions decide more).
+- [ ] `decomp search flags --verified --apply` sets the flags; `decomp units verify` passes with them.
+
+### Permuter
+
+- [ ] `decomp search permute <function>` on the near-miss: it ends byte-exact (exit code 0), and its edits
+      and the diff are the reordering expected. Its run is in `decomp search list`.
+- [ ] `--apply` keeps the source as the function's verified source; `decomp units verify` passes.
+
+### Compiler identification
+
+- [ ] `decomp search identify --verified` ranks the target's own toolchain first, ahead of the others,
+      with every function byte-exact and its flags among those of the flag search.
+- [ ] With the target's toolchain left out (`--candidates` naming the others), no toolchain makes every
+      function byte-exact; note how the ranking reads.
+
+### The Search view
+
+- [ ] In `decomp-gui`'s Search view, start a flag search on a verified function: its progress shows while it
+      runs, then its groups (chosen, as good, the start), its candidates with the best so far, and its
+      settings. A permutation shows its edits and the diff of its start and best sources; an
+      identification its ranking. The searches made with `decomp search` are listed too.
+- [ ] Use these flags (or the toolchain, or Keep the source) changes `decomp.json` (or the verified
+      source) as the CLI's `--apply` does.
+
+## Recording the result
+
+Note the target, the toolchain and flags the flag search recovered and the groups it left open, the
+function the permuter matched with its edits and the number of candidates, and the identification's
+ranking with each toolchain's best score.

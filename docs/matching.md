@@ -111,21 +111,24 @@ functions the object defines.
 - The tables at the end of the range are split off as data: the first table the code indexes in the
   function's own section, past the instruction, marks the end of the code (see
   [jump tables](#jump-tables-inside-text)).
-- Candidates are always compiled with `/Gy`: for MSVC-style toolchains the driver appends `/Gy` when
-  the flags lack it or turn it off with `/Gy-`. `/Gy` changes how functions are packaged, not the code
+- Candidates of MSVC-style toolchains are always compiled with `/Gy`: the driver appends `/Gy` when the
+  flags lack it or turn it off with `/Gy-`. `/Gy` changes how functions are packaged, not the code
   generated for them, so targets built without it still match. Each candidate function is therefore
   a COMDAT of its own: no alignment padding is included and calls to neighbouring functions carry
-  relocations. (A `.obj` built elsewhere without `/Gy` and given to `diff --obj` is not supported:
-  padding shows as extra rows and same-section calls are not recognized.)
+  relocations. GCC-style candidates (MinGW GCC, clang's GNU driver) keep the flags given: their
+  functions share `.text`, the range ends at the next function and its alignment padding is left out,
+  and a call or jump the assembler resolved to a neighbouring function reads as a reference to it
+  ([Identifying the compiler](#identifying-the-compiler)).
 
 A relocation at the offset of an instruction's field makes that field an address operand. COFF
 relocations have no explicit addend: the field's existing contents are the addend. For example,
 `mov eax, [g_table+8]` is a `DIR32` relocation to `g_table` with 8 stored in the field. A PC-relative
 field counts from the end of the instruction and its relocation from the end of the field, so an
 immediate after the field shows in the stored addend (clang: `REL32` holding -1 in
-`add dword ptr [rip+g], 2`) or in the type (MSVC: `REL32_1`); both read as `g` itself. A RIP-relative
-field the assembler resolved, with no relocation, points into the same section: an internal label
-(clang's x64 funclets load their function's continuation address that way). The relocation's symbol
+`add dword ptr [rip+g], 2`) or in the type (MSVC: `REL32_1`); both read as `g` itself. A relative field
+the assembler resolved, with no relocation, points into the same section: an internal label (clang's x64
+funclets load their function's continuation address that way), or another function there (GCC without
+function sections calls its neighbours directly). The relocation's symbol
 decides what the operand becomes:
 
 | Relocation symbol | Becomes |
@@ -136,7 +139,7 @@ decides what the operand becomes:
 | A string literal (`??_C@...`), named or through its COMDAT's section symbol | The string's bytes |
 | A constant (`__real@`, `__xmm@`, `__ymm@`), named or through its section symbol | The constant's bytes; the size follows from the name (4, 8, 16 or 32 bytes) |
 | Any other named symbol outside the function's section | That symbol plus the addend |
-| Anonymous data: a section symbol, or a label in the function's own section (MSVC's `$LN` table labels) | A jump table when the data holds relocations back into the function (read up to the function's next table); otherwise, past the code in the function's range, a two-level switch's index table (its bytes up to the next table or the end of the range); otherwise a string when it holds a NUL-terminated string of at least 2 bytes (such as an older compiler's `$SG` literal in `.data`); otherwise the named symbol at that offset; otherwise `<section>+<offset>` |
+| Anonymous data: a section symbol, or a label in the function's own section (MSVC's `$LN` table labels) | A jump table when the data holds relocations back into the function (read up to the function's next table); otherwise, past the code in the function's range, a two-level switch's index table (its bytes up to the next table or the end of the range); otherwise a string when it holds a NUL-terminated string of at least 2 bytes (such as an older compiler's `$SG` literal in `.data`); otherwise the named symbol at that offset, or the one whose bytes hold it plus the offset into it (GCC's `.data+0x14` for `g_table+0x10`); otherwise `<section>+<offset>` |
 
 For jump-table entries the relocation type gives their size and whether they are PC-relative
 (clang's x64 `REL32` entries, which are adjusted back to the label they point to). Thread-local
@@ -530,6 +533,10 @@ matching:
 - other builds of the compiler (usually the runtime libraries), objects from other releases, assembly
   objects, objects without a tool ID, and a checksum that does not match.
 
+When the Rich header is missing (another linker made the program) or names several candidates, the
+toolchains can be told apart by what they compile: [Identifying the
+compiler](#identifying-the-compiler).
+
 A configured toolchain is compared with it through the `@comp.id` symbol that MSVC writes into every
 object: `decomp toolchain test` (and the GUI's health check) compiles a probe and reports the
 compiler ID it carries and, inside a project, whether it is the same build as the target's compiler,
@@ -586,8 +593,9 @@ For MSVC-style compilers (`msvc`, `clang_cl`), the command line is:
 Project flags come after the toolchain's base flags so that they take precedence. `<dir>` is the
 compile's working directory, passed as a full path. clang-cl selects the target with
 `--target=i686-pc-windows-msvc` or `--target=x86_64-pc-windows-msvc` in its base flags. `gcc` and
-`clang` toolchains get `-c <flags> -I<dir>... -o <dir>/candidate.o <dir>/candidate.cpp`, but their
-objects cannot be diffed before Phase 7. When an MSVC-style command line is longer than 4000
+`clang` toolchains get `-c <flags> -I<dir>... -o <dir>/candidate.o <dir>/candidate.cpp`; their COFF
+objects (MinGW-w64 GCC, clang targeting `*-windows-gnu`) are diffed like any other, and ELF objects come
+with Phase 7. When an MSVC-style command line is longer than 4000
 characters, the arguments after the compiler go into a response file, `@<dir>/args.rsp`. Every compile
 has a timeout (`timeout_seconds`, 120 by default). The compiler runs in its own process group on POSIX
 and inside a job object on Windows, so a timeout kills its whole process tree. Abort does not reach a
@@ -662,6 +670,127 @@ directory clears the cache; `decomp diff --source` outside a project and `decomp
 cache. A hit launches no process and is reported as cached in the `compile_finished` event and in the
 tool result (`compile: ok (cached)`), so the transcripts show which attempts actually ran the compiler.
 
+## Searching
+
+Some differences are not the source's: the target was built with other flags, or by another compiler,
+or the source says the same thing in another order than the original did. Three mechanical searches
+(`src/search/`, `decomp search`, the GUI's [Search view](ui.md#search)) look for what makes the
+functions compile to the target's bytes, each compiling many candidates in parallel.
+
+### Probes and scores
+
+A search compiles *probes*: a translation unit and the target functions it defines. They come from a
+function's verified source (the unit source or its own file under `src/functions/`; with `--whole` every
+function that file holds), a unit's source, a function's best attempt (the source its sessions came
+closest with), a file given by name (its target functions are those it defines at its top level), or
+every verified source of the project. A candidate is evaluated by compiling each probe once
+(`verify_unit()`) and diffing every function of it, and scored over all of them:
+
+- first by the number of byte-exact functions, more is better;
+- then by a distance, less is better: 10 for each inserted or deleted row, 6 for each opcode, 3 for each
+  operand and 1 for each encoding difference, at least 1 for a function that is not byte-exact, and a
+  large constant for a function the candidate does not define or that does not compile.
+
+The match percentages break ties. Compiles go through the compile cache, so a candidate that was
+compiled before (by any search) costs nothing, and as many run at once as compiles may
+(`set_max_parallel_compiles()`).
+
+### Flag search
+
+A flag search takes *groups* of alternatives, of which a configuration takes exactly one each, and
+finds the choice that scores best:
+
+```
+optimization: /Od | /O1 | /O2 | /Ox
+frame pointers: none | /Oy-
+security checks: none | /GS-
+```
+
+An alternative is zero or more flags (`none`: the compiler's default). Presets give the groups per
+toolchain style and architecture: `basic` (the optimization level, frame pointers, security checks;
+what tells toolchains apart), `common` (also inlining, floating point and the instruction set; the
+default) and `full` (also intrinsics, size or speed, exception handling, `char` signedness, packing, hot
+patching, tuning, and for GCC-style compilers aliasing, unrolling, fast math and vectorization).
+`--group` adds a group, or replaces the preset's of the same name. The flags given (the project's, and
+`--flag`) are the start: those that are in no alternative stay as they are (`/Gy /GR- /EHs-c-`), and
+those that are pick each group's starting alternative (the last one given wins).
+
+When there are at most `--exhaustive-limit` configurations (256), every one is compiled. Otherwise the
+search is local: from the start it compiles every single-group change at once and moves to the best one
+while that is better than staying, then does the same from `--restarts` random starts (seeded); the
+best configuration found is the result. Every single-group change of the best is compiled at the end,
+which tells, per group, which alternatives do exactly as well: a group with one is *decided*, and a group
+with several (`/O2` and `/Ox`, which make the same code) is not, as far as the probes can tell. More
+probes decide more groups: a single function rarely depends on the floating-point model.
+
+`--apply` writes the best flags into `decomp.json` when they do better than the project's own; `decomp
+units verify` then checks every verified function with them.
+
+### Permuter
+
+The permuter edits a translation unit at the token level, in the bodies of its target functions only,
+and keeps an edit while it brings the functions closer. The edits keep the code equivalent where C
+allows it:
+
+| Edit | For example |
+|---|---|
+| A statement moved within its block, up to three places | `speed *= 0.5f;` after `if (hp < 0) hp = 0;` |
+| Declarators swapped, or a declaration split into one per declarator | `int b[4], a[4];` |
+| The operands of a commutative operator swapped (`+ * & \| ^ == !=`, and `&& \|\|` without side effects) | `b[2] + a[1]` |
+| A comparison flipped | `100 < extra` |
+| An if/else's branches swapped under the negated condition | `if (!(c)) B else A` |
+| `++i` for `i++` where the value is not used | in a for loop's increment |
+
+A statement does not move past a label, a `case`, a `return`, `break`, `continue` or `goto`, a
+preprocessor line or inline assembly, and a declaration stays before the statements that use its
+names. Operands are whole operands by precedence (`a + b * c` swaps `a` with `b * c`, never with `b`).
+Statements are found by a small parser over the tokens (blocks, `if`/`else`, loops, `switch`, labels,
+`try`, `__asm`), not by a C++ front end; an edit that does not compile is just a candidate that scores
+badly.
+
+A round compiles every single edit of the current source not tried yet (in a seeded random order) and
+fills a quarter of the round with stacks of two or three random edits; the search moves to the round's
+best when it is better, and now and then to one as good, to cross a plateau. It stops when every
+function is byte-exact, at `--limit` candidates or `--time` seconds, or when no new candidate comes up.
+A last pass undoes the edits the score does not need (an operand order flipped on a plateau): the edits
+that bring the source closer to the start without making it worse. The same seed gives the same search.
+
+An edit can reorder statements that depend on each other, which is not equivalent. Only a result whose
+functions are byte-exact is known to be equivalent, to the target itself; a better but inexact result is
+a lead. `--apply` keeps the result in the project: verified when byte-exact (composed into the unit's
+source, as a match by hand is), else as the function's best attempt when it matches at least as well.
+
+### Identifying the compiler
+
+The Rich header names the compilers that made a program ([Choosing the
+toolchain](#choosing-the-toolchain)), but a program linked by another linker has none, and one can name
+several releases. Identification compiles the probes with every candidate toolchain, each with a flag
+search of its own over the `basic` groups (exhaustive: a dozen configurations), and ranks the toolchains
+by their best score. The candidates are the registered toolchains that compile for the target's
+architecture, as their `--target`, their compiler's name or path (`i686-w64-mingw32-gcc`,
+`...\Hostx64\x86\cl.exe`) or their own name (`msvc-x64`) says, or those named with `--candidates`. A
+toolchain that cannot compile the probes at all ranks last, with the compiler's message. The flags
+given are kept for toolchains of their style (MSVC or GCC); the others start bare. `--apply` makes the
+winner and its flags the project's, when it is ahead of the others.
+
+Probes for identification need sources that every candidate compiles: C, or C++ without
+compiler-specific extensions (MinGW GCC takes `__declspec`). C++ names are decorated differently by
+GCC, so a GCC candidate finds C++ functions of an MSVC-built target only by their undecorated names.
+
+GCC-style candidates are not compiled with `-ffunction-sections`, unlike MSVC-style ones with `/Gy`: the
+GNU assembler resolves a call or a jump to a function in the same section itself, with a short jump
+where it can, so function sections would change the bytes. The diff reads a direct call or jump out of
+the function to another one in its section as a reference to that function, and a reference into a
+variable through its section (`.data+0x14`) as that variable and the offset into it.
+
+### Search runs
+
+Every search started in a project is kept under `.decomp/search/<id>/` (`run.json` with what was
+searched, how and the result, and a line per candidate in `log.jsonl`, written as they go; a
+permutation also keeps its start and best sources): see
+[project-format.md](project-format.md#search-runs). `decomp search list` and `decomp search show <id>
+[--log]` read them, and the Search view lists them, a running one's log as it grows.
+
 ## Determinism
 
 - **Compare code and referenced data only.** Object headers carry timestamps, and debug sections
@@ -695,12 +824,12 @@ tool result (`compile: ok (cached)`), so the transcripts show which attempts act
 | Area | First slice | Later |
 |---|---|---|
 | Target formats | PE32, PE32+ | ELF64 (Phase 7) |
-| Candidate objects | COFF from MSVC and clang-cl (including `/bigobj`), built with `/Gy` | Objects without `/Gy` (padding, same-section calls); ELF objects (Phase 7) |
+| Candidate objects | COFF from MSVC and clang-cl (including `/bigobj`), built with `/Gy`; COFF from GCC-style compilers without function sections (Phase 6) | ELF objects (Phase 7) |
 | Address fields | Base relocations, relative branches, RIP-relative operands, stripped-`.reloc` heuristic (compared as values where the candidate has no relocation), MSVC x64 image-base-relative operands | — |
 | Symbol sources | PDB 7.0 (publics, procedures, data), exports, imports, x64 `.pdata`, `symbols.txt` | MSVC `.map`, RTTI names, library signatures (Phase 2) |
 | Data compared | Narrow and wide strings, floats and SSE constants, jump tables; per unit (Phase 5): global initializers, EH and unwind tables, string and float pools, section placement | |
 | Thunks | ILT and import thunks followed; names moved off ILT entries; the `dllimport` hint | |
 | Jump tables | x86 absolute, clang x64 relative and MSVC x64 RVA tables, in `.text` too, compared as index lists; two-level switches' byte tables compared by content | |
 | Hints | Register-only, stack-only, encoding, inverted branch, reordering, instruction count, branch target, binding, reference (string, constant, callee) and `dllimport` hints | `signature`, `gs_cookie`, `chkstk`, `eh_frame` |
-| Toolchains | Registry with auto-detected clang-cl, `toolchain add`/`list`/`test`, compile cache, MSVC and GCC-style diagnostics; clang-cl round trip (Linux CI), `cl.exe` round trip (Windows CI, being brought up) | Version banner, project overrides, `CL`/`_CL_` removal, Wine wrapper on Linux; flag search and compiler identification (Phase 6) |
+| Toolchains | Registry with auto-detected clang-cl, `toolchain add`/`list`/`test`, compile cache, MSVC and GCC-style diagnostics; clang-cl round trip (Linux CI), `cl.exe` round trip (Windows CI); flag search, the permuter and compiler identification (Phase 6) | Version banner, project overrides, Wine wrapper on Linux |
 | Verification scope | Single functions; every function of a unit source compiled together (Phase 3); whole units and relinking with a SHA-1 check of the result (Phase 5) | |

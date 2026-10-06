@@ -577,6 +577,48 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 - `units.txt` before the first relink; the unit checks of Check units, which replace the relink's own
   until the next relink.
 
+### Search
+
+The mechanical searches ([matching.md](matching.md#searching)): flags, permutations and toolchains.
+
+**Shows**
+
+- New search: the kind (Flags, Permute, Identify) and what it compiles: a function (the selection, or
+  a name or address typed in) with its verified source, every function of that source's file, its best
+  attempt, every verified source of the project, or a file. For a flag search the preset and more
+  groups, one per line; for an identification the toolchains for the target's architecture, each
+  ticked; the candidate limit and the seed. While a search runs: its target, the candidates evaluated
+  and the best so far.
+- The project's searches, newest first, whoever made them (`decomp search` too): when each started,
+  its kind and status, the candidates it evaluated, its best score (in the success color when every
+  function is byte-exact) and what it searched.
+- The selected search: its status, candidates and time, and its best. Result: a flag search's best
+  flags and, per group, the chosen alternative (marked when it is not where the search started), the
+  alternatives as good as it, or "decided", and the start; a permutation's edits and the side-by-side
+  diff of its start and best sources; an identification's ranking (each toolchain's best score and
+  flags, or why it could not compile the sources). Candidates: the best match so far over the
+  candidates as a chart, and every candidate (or only the improvements) with its time, score and what
+  it was. Settings: the search's settings as recorded.
+
+**Actions**
+
+- Start the search in the background, and stop it (the candidates being compiled finish first; the
+  search is kept as stopped). The actions `search.start`, `search.cancel` and `search.apply` do the
+  same from the command palette.
+- Keep the result in the project: a flag search's flags, or an identification's first toolchain with
+  its flags, in `decomp.json`; a permutation of one function's source as its verified source when
+  byte-exact (into its unit's source, as a match by hand is), else as its best attempt.
+- Navigation anchors fill the form or select a search: `flags`, `permute`, `identify`, `file:<path>`,
+  `preset:<name>`, `group:<a | b>`, `run:<id>`, with a function to search on.
+
+**Data sources**
+
+- `.decomp/search/<id>/` ([project-format.md](project-format.md#search-runs)): `run.json`, `log.jsonl`
+  and a permutation's start and best sources, read in the background (`search::list_runs()`,
+  `vm::search_run_row()`, `vm::read_flag_search()`, `vm::read_permute()`, `vm::read_identify()`,
+  `vm::search_log_rows()`, `vm::best_so_far()`); every second while a search runs, its log as it grows.
+- The search itself runs through `search::run_search()`, as `decomp search` does.
+
 ### Cost and usage
 
 **Shows**
@@ -682,9 +724,7 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 
 ### Later-phase views
 
-| View | Phase | Shows |
-|---|---|---|
-| Permuter and flag search | 6 | Search runs, candidates tried, best score over time, and the winning flags or permutations |
+None: Phase 6's permuter and flag-search view is [Search](#search).
 
 ## Interactions
 
@@ -891,6 +931,7 @@ past run.
 | Binary explorer | `decomp info`, `decomp disasm <func>` |
 | Toolchains and compiles | `decomp toolchain list`, `decomp toolchain test <name>` (with the compiler's version), `decomp toolchain add <name>` |
 | Past runs | `decomp runs list`, `decomp runs show <id>` (equal to its `summary.json`), `decomp run --resume <id>` |
+| Search | `decomp search flags`, `decomp search permute`, `decomp search identify` (each with `--apply` to keep the result), `decomp search list`, `decomp search show <id> [--log]`; the chart of the best so far is a GUI feature |
 
 ## Architecture
 
@@ -1058,7 +1099,7 @@ which `events.jsonl` omits and the transcript holds in full.
 | Units view; approvals for `set_symbol` and `define_type` | Phase 3 |
 | Types view; field names in listings | Phase 4 |
 | Relink view | Phase 5 |
-| Permuter and flag-search view | Phase 6 |
+| Search view (flag search, permuter, compiler identification) | Phase 6 |
 
 Phase 1 is done when, on Windows and Linux, a user can open a project, run 20 or more functions on 4
 workers, watch live sessions, steer one, pause and stop, review diffs and changes, and reopen the
