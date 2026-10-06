@@ -293,6 +293,43 @@ The manual check on a real target with a PDB is in [acceptance.md](acceptance.md
 - When a relink is not identical, the relink view reports the first differing bytes and the unit
   responsible.
 
+**Status:** the scope is implemented, and CI covers each exit criterion on the test fixtures and on a
+real program.
+
+- Per-unit matching: `decomp units check` places each unit source's compiled object where the linker
+  would put it (by its functions, the external names the program knows and the targets of its
+  relocations) and compares its code and data with the image section by section: the order of the
+  functions, initial values and placement of `.data`, `.rdata` and `.bss`, strings and constants pooled
+  across units, switch tables, C++ exception-handling and SEH tables, x64 unwind data and `.pdata`, and
+  functions identical-COMDAT folding put together.
+- Relinking: `decomp relink` links every complete unit from its source and every other one from a split
+  object of its original bytes (`formats/coff_writer.hpp` writes them, and import libraries from the
+  import table), in the order the image shows, with the target's linker and the flags its headers call
+  for; takes over the fields that only record when and how the image was built; compares the SHA-1s;
+  and says whether the linker is the version that made the target. Split objects carry what the linker
+  reads of the originals besides their bytes: their units' names, the compiler marks link.exe counts
+  (`@comp.id`, `@feat.00`), x86 SAFESEH registrations, x64 `.pdata` relocated to its functions, and the
+  C common symbols the linker allocates (in the order each linker allocates them). Folded functions are
+  folded again (`/opt:icf`).
+- CI relinks the fixtures byte-identically: 14 images from split objects alone (plain code and data,
+  C++ and structured exception handling, RTTI, a static library, `/FIXED`, hand-written code with and
+  without its map), x86 and x64, with LLVM 18's lld-link, which made them; the fixture rebuilt from its
+  units' sources partly and wholly; the exception-handling fixture from its source; a program whose
+  functions ICF folds within and across units, in every mix of split and source units; and programs
+  with C common symbols and with an inline function two units define. The Windows round trip relinks
+  the fixture cl.exe and link.exe built, x86 and x64, with link.exe, from split objects and from its
+  units' sources.
+- A partially matched real program: the corpus (Zydis with C++ and structured exception handling,
+  31 units) relinks byte-identically from split objects, and with nine of its units (its decoder and
+  the SEH unit among them) built from their own sources and the rest split, x86 and x64, with both
+  toolchains: clang-cl and lld-link on Linux, cl.exe and link.exe on Windows.
+- When a relink differs, `decomp relink` and its `result.json` name the first differing bytes, the unit
+  whose contribution holds them and the symbol there; the Relink view in `decomp-gui` shows them with
+  the bytes around them in both images, and each unit's check section by section. Tests force a unit
+  with a changed initializer into a relink and find the difference at that global, in that unit.
+
+The manual check on a real target is in [acceptance.md](acceptance.md#phase-5-acceptance).
+
 ### Phase 6: Search helpers
 
 **Goal:** mechanical search for the last few percent and for unknown build settings.

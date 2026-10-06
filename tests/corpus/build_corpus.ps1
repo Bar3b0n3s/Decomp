@@ -104,10 +104,7 @@ function Test-Links {
 if ($LASTEXITCODE -ne 0) {
     Show-LinkRecords
     Test-Links
-    # Reported, not failed, while what link.exe makes itself here is worked out.
-    Write-Warning "MSVC corpus ($Arch): the relink from split objects differs from the original"
-    $global:LASTEXITCODE = 0
-    return
+    throw "MSVC corpus ($Arch): the relink from split objects differs from the original"
 }
 $units = & $decomp -C $project --json units | Out-String | ConvertFrom-Json
 $own = [ordered]@{

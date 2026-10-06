@@ -8,7 +8,7 @@ decompilation yields source that is mechanically proven equivalent to the origin
 what preservation, porting and research projects need. Doing it by hand is slow, and most of the time
 goes into that same edit-compile-compare loop, which Decomp automates while a person supervises.
 
-> **Status: the first working slice and Phases 1 to 4 are implemented.** The `decomp` command loads
+> **Status: the first working slice and Phases 1 to 5 are implemented.** The `decomp` command loads
 > PE targets and their PDBs, annotates disassembly, compiles candidates with the original toolchain,
 > diffs them with relocation awareness, and runs the built-in agent on one function (`decomp agent`) or
 > on many with several workers (`decomp run`), with transcripts, event logs, a live progress view,
@@ -19,11 +19,15 @@ goes into that same edit-compile-compare loop, which Decomp automates while a pe
 > can name symbols and define shared types under the supervisor's approval. Types live in the project's
 > headers: compiled with the original compiler, their layouts are read back and checked against the
 > PDB, they can be imported from the PDB or sketched from RTTI, and listings name the fields the code
-> reaches (`this->health`). `decomp-gui` opens
+> reaches (`this->health`). The whole program is verified by relinking it with its original linker:
+> units whose sources are complete (code, data, exception tables, folded functions) are compiled, the
+> rest carried by split objects of their original bytes, and the result is compared with the target's
+> SHA-1, down to the first differing byte and the unit responsible. `decomp-gui` opens
 > projects; starts, watches, steers and reopens runs; and has a view for each part, from the Dashboard
-> and the Function browser to the Diff viewer with manual editing, the Units view and the Types view. CI covers Linux
-> and Windows, including a round trip with the real MSVC `cl.exe` for x86 and x64. See
-> [docs/roadmap.md](docs/roadmap.md).
+> and the Function browser to the Diff viewer with manual editing, the Units, Types and Relink views.
+> CI covers Linux and Windows, including a round trip with the real MSVC `cl.exe` and `link.exe` for x86
+> and x64, and relinks a real program (Zydis) byte-identically with either toolchain, partly from its
+> own sources. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Key ideas
 
@@ -170,6 +174,11 @@ decomp runs list                                  # the project's runs; `decomp 
 decomp status
 decomp run --unit basic.obj                       # one unit's unfinished functions, easiest first
 
+# The whole program: link it again with its original linker and compare it with the target
+decomp units check                                # each unit source compiled and placed in the image: complete?
+decomp relink --all-split                         # every unit from its original bytes: tests the relink itself
+decomp relink                                     # complete units from their sources: identical, or the first difference
+
 # The supervision GUI: open the project, start a run, watch and steer it
 decomp-gui --project .
 ```
@@ -230,20 +239,21 @@ described in [docs/agent.md](docs/agent.md).
 | [docs/ui.md](docs/ui.md) | The supervision GUI, view by view, its event-driven architecture, and CLI parity |
 | [docs/project-format.md](docs/project-format.md) | Project files, symbol file, history, toolchain registry |
 | [docs/roadmap.md](docs/roadmap.md) | First slice checklist, Phases 1-7 with exit criteria, risks |
-| [docs/acceptance.md](docs/acceptance.md) | The manual acceptance checklists of Phases 1 to 3 |
+| [docs/acceptance.md](docs/acceptance.md) | The manual acceptance checklists of Phases 1 to 5 |
 
 ## Repository layout
 
 ```
 premake5.lua, premake/   build scripts (third-party projects in premake/deps.lua)
 src/core/                errors (Result, TRY), logging, files, bytes, SHA-1, processes, JSON
-src/formats/             PE, COFF and PDB readers
+src/formats/             PE, COFF and PDB readers; COFF object and import library writers
 src/arch/x86/            x86 and x64 decoding over Zydis
 src/analysis/            symbols, bounds, CFG, annotation, demangling
 src/matching/            toolchains, compile driver and cache, the diff
 src/events/              events, event bus, RunState and snapshots, progress view
 src/agent/               the built-in agent: transports, client, conversation, tools, loop, rate gate, approvals
-src/project/             decomp.json, symbols.txt, history, locks, change logs
+src/project/             decomp.json, symbols.txt, history, locks, change logs, units, relinks
+src/relink/              split objects, the linker driver, comparing a relinked image with the target
 src/run/                 batch runs: selection, work queue, run directories, the run controller
 src/viewmodel/           what the GUI's views show, computed without ImGui
 src/cli/                 the decomp command

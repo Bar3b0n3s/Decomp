@@ -235,3 +235,56 @@ and on one built with `/GR` without a PDB. CI covers the same steps on the test 
 
 Note the target and compiler, how many types the PDB defines, how many imported and how many came back
 equal, the differences `decomp types check` reported, and how many classes the skeletons covered.
+
+# Phase 5 acceptance
+
+The manual check of the [Phase 5 exit criteria](roadmap.md#phase-5-units-data-and-full-relink) on a
+real target: partially matched, and relinked byte-identically with its unmatched code and data carried
+by split objects. CI covers the same steps on the test fixtures and on a real program, the Zydis corpus,
+built with clang-cl and lld-link and with cl.exe and link.exe, x86 and x64.
+
+## What you need
+
+- A target with its PDB (or a link map), and its original toolchain registered with the linker that
+  made the target, of the same version: `decomp relink` says whether it is (`linker:`). When the
+  toolchain's linker is another, set `link.linker` in `decomp.json`.
+- A project for it with its units (`decomp units` lists them; `decomp units derive` makes them) and
+  some matched functions in unit sources.
+- An incrementally linked target (link.exe's default with `/DEBUG`) cannot be relinked identically: its
+  incremental jump thunks and padding are the linker's.
+
+## Checklist
+
+### Split objects
+
+- [ ] `decomp relink --all-split` reports `identical to the target`, with the fields it took over from
+      the target (timestamps, the PDB's GUID and age). If it differs, note the first difference, its
+      unit, and the `linker:` line.
+
+### A partially matched target
+
+- [ ] Complete one unit's source: every function matched into it and its data defined in its prelude,
+      by matches and edits, or with `decomp units compose <unit> <file>` from a translation unit written
+      by hand. `decomp units check <unit>` reports it `complete`.
+- [ ] `decomp relink` links that unit from its source (`source  complete`) and every other unit from its
+      split object, and reports `identical to the target`.
+
+### A difference
+
+- [ ] Change an initializer in that unit's source: `decomp units check <unit>` names the section that
+      differs, and `decomp relink` splits the unit again (and stays identical).
+- [ ] `decomp relink --source <unit>` differs, and names the first differing bytes in the unit's data,
+      with the unit and the symbol there. Revert the change.
+
+### The Relink view
+
+- [ ] In `decomp-gui`'s Relink view, Relink shows the units and how each was linked and why; the
+      Comparison tab shows the SHA-1s and the fields taken over, and for the relink that differs, the
+      first differing bytes and the unit responsible, with the bytes around them in both images; the
+      Unit tab shows the unit's check section by section.
+
+## Recording the result
+
+Note the target, its linker and version, the number of units and how many were linked from their
+sources, the relinked image's SHA-1, and, for a relink that was not identical, its first difference and
+the unit holding it.
