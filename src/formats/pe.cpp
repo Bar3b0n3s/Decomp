@@ -144,6 +144,17 @@ Result<void> Image::parse_headers() {
     if (dirs[dir_debug].first) TRY(parse_debug_directory(dirs[dir_debug].first, dirs[dir_debug].second));
     if (dirs[dir_exception].first && machine_ == machine::amd64)
         TRY(parse_pdata(dirs[dir_exception].first, dirs[dir_exception].second));
+    // x86 load configuration: SEHandlerTable and SEHandlerCount, when it is large enough to have them.
+    if (dirs[10].first && !pe32_plus_) {
+        if (auto off = rva_to_offset(dirs[10].first)) {
+            const u32 size = read_le<u32>(d, *off).value_or(0);
+            const u32 table = size >= 0x48 ? read_le<u32>(d, *off + 0x40).value_or(0) : 0;
+            const u32 count = size >= 0x48 ? read_le<u32>(d, *off + 0x44).value_or(0) : 0;
+            if (table > image_base_ && count < (1u << 20))
+                for (u32 i = 0; i < count; ++i)
+                    if (auto e = rva_to_offset(static_cast<u32>(table - image_base_) + 4 * i)) safe_seh_handlers_.push_back(read_le<u32>(d, *e).value_or(0));
+        }
+    }
     return {};
 }
 

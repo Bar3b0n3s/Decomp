@@ -132,6 +132,28 @@ jobs:
           # Progress and spend per unit: 7 of basic.obj's functions and other.obj's one.
           ./bin/Release/decomp -C "$p" status
           ./bin/Release/decomp -C "$p" --json status | python3 -c "import json,sys; u={x['name']: x for x in json.load(sys.stdin)['units']}; assert u['basic.obj']['matched_functions'] == 7 and u['other.obj']['matched_functions'] == 1 and u['basic.obj']['cost_usd'] > 0, u"
+          # The whole program linked again by lld-link: other.obj, complete after the run, from its source,
+          # basic.obj from its original bytes. Identical to the target once its build timestamps and PDB GUID
+          # are taken over.
+          ./bin/Release/decomp -C "$p" units check || true
+          ./bin/Release/decomp -C "$p" relink
+          ./bin/Release/decomp -C "$p" --json relink | python3 -c "import json,sys; r=json.load(sys.stdin); u={x['unit']: x['mode'] for x in r['units']}; assert r['identical'] and u['other.obj'] == 'source' and u['basic.obj'] == 'split', u"
+
+      - name: Relink smoke test
+        run: |
+          # The fixtures rebuilt from their units' sources, composed from the fixture's own translation units,
+          # and linked again by lld-link are identical to the originals (and so are they from split objects).
+          for arch in x86 x64; do
+            p="$(mktemp -d)/project"
+            ./bin/Release/decomp init tests/fixtures/$arch/basic.exe --dir "$p" --toolchain clang-cl-$arch \
+              --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+            ./bin/Release/decomp -C "$p" relink --all-split
+            ./bin/Release/decomp -C "$p" units compose basic.obj tests/fixtures/src/basic.cpp
+            ./bin/Release/decomp -C "$p" units compose other.obj tests/fixtures/src/other.cpp
+            ./bin/Release/decomp -C "$p" units check
+            ./bin/Release/decomp -C "$p" relink
+            ./bin/Release/decomp -C "$p" --json relink | python3 -c "import json,sys; r=json.load(sys.stdin); assert r['identical'] and all(u['mode'] != 'split' for u in r['units']), r['units']"
+          done
 
       - name: Function bounds corpus (clang-cl)
         run: |

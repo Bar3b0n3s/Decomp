@@ -165,6 +165,9 @@ public:
     // Data directory `index` (IMAGE_DIRECTORY_ENTRY_*): RVA and size, zero when absent.
     std::pair<u32, u32> data_directory(u32 index) const { return index < 16 ? directories_[index] : std::pair<u32, u32>{}; }
     const std::vector<DebugEntry>& debug_entries() const { return debug_entries_; }
+    // x86: the RVAs of the exception handlers /SAFESEH registered, from the load configuration's table
+    // (sorted); empty without one.
+    const std::vector<u32>& safe_seh_handlers() const { return safe_seh_handlers_; }
     // The DLL name the export directory records ("basic.exe"); empty without exports.
     const std::string& export_name() const { return export_name_; }
     // The fields relinking takes over from the original, in file order (identity_fields above).
@@ -207,6 +210,7 @@ private:
     OptionalHeader optional_;
     std::array<std::pair<u32, u32>, 16> directories_{};
     std::vector<DebugEntry> debug_entries_;
+    std::vector<u32> safe_seh_handlers_;
     std::string export_name_;
     u32 pe_offset_ = 0;
     u32 optional_offset_ = 0;

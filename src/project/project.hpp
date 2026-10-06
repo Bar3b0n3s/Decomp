@@ -36,6 +36,15 @@ struct AgentSettings {
     std::map<std::string, std::string> approvals;
 };
 
+// How `decomp relink` links the target again (docs/project-format.md#link).
+struct LinkSettings {
+    std::string linker;                   // a path or name; empty: the toolchain's (lld-link, link.exe)
+    std::vector<std::string> flags;       // after the flags taken from the image
+    std::vector<std::string> libraries;   // linked after the objects, relative to the project: import libraries, static libraries
+
+    bool empty() const { return linker.empty() && flags.empty() && libraries.empty(); }
+};
+
 struct Config {
     int version = 1;
     std::string target;        // path relative to the project root
@@ -45,6 +54,7 @@ struct Config {
     std::vector<std::string> flags;         // compiler flags for candidates
     std::vector<std::string> include_dirs;  // relative to the project root
     AgentSettings agent;
+    LinkSettings link;
 
     Json to_json() const;
     static Result<Config> from_json(const Json& j);

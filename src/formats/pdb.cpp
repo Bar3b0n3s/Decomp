@@ -108,9 +108,14 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
             const auto symbols = module.CreateSymbolStream(raw);
             symbols.ForEachSymbol([&](const PDB::CodeView::DBI::Record* record) {
                 auto kind = record->header.kind;
-                if (kind == Kind::S_COMPILE3) {
+                if (kind == Kind::S_COFFGROUP) {
+                    const auto& g = record->data.S_COFFGROUP;
+                    const u32 rva = sections.ConvertSectionOffsetToRVA(g.section, g.offset);
+                    if (rva) reader.coff_groups_.push_back({g.name, rva, g.size, g.characteristics});
+                } else if (kind == Kind::S_COMPILE3) {
                     reader.modules_.back().language =
                         static_cast<int>(PDB_AS_UNDERLYING(record->data.S_COMPILE3.flags) & 0xFFu);
+                    reader.modules_.back().backend_build = record->data.S_COMPILE3.versionBackendBuild;
                 } else if (kind == Kind::S_GPROC32 || kind == Kind::S_LPROC32 || kind == Kind::S_GPROC32_ID ||
                     kind == Kind::S_LPROC32_ID) {
                     // All four records share the same layout.

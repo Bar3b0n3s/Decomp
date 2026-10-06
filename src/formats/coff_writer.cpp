@@ -138,6 +138,19 @@ Result<std::vector<std::byte>> ObjectWriter::write() const {
         symbols.push_back({".drectve", 0, static_cast<i32>(number), 0, storage::static_, number});
         sections.back().symbol = static_cast<u32>(symbols.size() - 1);
     }
+    // .sxdata holds symbol table indexes: filled in once they are known.
+    std::optional<usize> sxdata;
+    if (!safe_seh_.empty()) {
+        SectionEntry x;
+        x.name = ".sxdata";
+        x.characteristics = scn_flags::lnk_info | alignment_flags(4);
+        x.data.resize(4 * safe_seh_.size());
+        sections.push_back(std::move(x));
+        sxdata = sections.size() - 1;
+        const u32 number = static_cast<u32>(sections.size());
+        symbols.push_back({".sxdata", 0, static_cast<i32>(number), 0, storage::static_, number});
+        sections.back().symbol = static_cast<u32>(symbols.size() - 1);
+    }
     if (sections.size() > 65279) return make_error(ErrorCode::unsupported, "a COFF object holds at most 65279 sections, not {}", sections.size());
 
     // Symbol table order: absolute symbols, then each section's symbol followed by its COMDAT symbol,
@@ -163,6 +176,9 @@ Result<std::vector<std::byte>> ObjectWriter::write() const {
         raw_index[h] = raw;
         raw += 1 + (symbols[h].section_definition ? 1 : 0);
     }
+
+    if (sxdata)
+        for (usize i = 0; i < safe_seh_.size(); ++i) write_le<u32>(sections[*sxdata].data, 4 * i, raw_index.at(safe_seh_[i]));
 
     StringTable strings;
     std::vector<std::byte> out;
@@ -275,9 +291,10 @@ std::string library_name(std::string_view dll) {
 
 // The import descriptor object: .idata$2 (the descriptor, pointing at the lookup and address tables and
 // the name) and .idata$6 (the DLL's name).
-Result<std::vector<std::byte>> import_descriptor(std::string_view dll, u16 machine) {
+Result<std::vector<std::byte>> import_descriptor(std::string_view dll, u16 machine, std::optional<u32> comp_id) {
     const std::string lib = library_name(dll);
     ObjectWriter w(machine);
+    if (comp_id) w.add_absolute("@comp.id", *comp_id);
     const u32 descriptor = w.add_section(".idata$2", kIdataCharacteristics | alignment_flags(4), std::vector<std::byte>(20));
     std::vector<std::byte> name;
     append_string(name, dll);
@@ -296,16 +313,18 @@ Result<std::vector<std::byte>> import_descriptor(std::string_view dll, u16 machi
     return w.write();
 }
 
-Result<std::vector<std::byte>> null_import_descriptor(u16 machine) {
+Result<std::vector<std::byte>> null_import_descriptor(u16 machine, std::optional<u32> comp_id) {
     ObjectWriter w(machine);
+    if (comp_id) w.add_absolute("@comp.id", *comp_id);
     const u32 s = w.add_section(".idata$3", kIdataCharacteristics | alignment_flags(4), std::vector<std::byte>(20));
     w.add_symbol("__NULL_IMPORT_DESCRIPTOR", 0, static_cast<i32>(s));
     return w.write();
 }
 
-Result<std::vector<std::byte>> null_thunk(std::string_view dll, u16 machine) {
+Result<std::vector<std::byte>> null_thunk(std::string_view dll, u16 machine, std::optional<u32> comp_id) {
     const usize pointer = machine == pe::machine::amd64 ? 8 : 4;
     ObjectWriter w(machine);
+    if (comp_id) w.add_absolute("@comp.id", *comp_id);
     const u32 address = w.add_section(".idata$5", kIdataCharacteristics | alignment_flags(static_cast<u32>(pointer)),
                                       std::vector<std::byte>(pointer));
     w.add_section(".idata$4", kIdataCharacteristics | alignment_flags(static_cast<u32>(pointer)), std::vector<std::byte>(pointer));
@@ -348,14 +367,15 @@ std::optional<u8> import_name_type_for(const ImportEntry& entry, u16 machine) {
     return std::nullopt;
 }
 
-Result<std::vector<std::byte>> write_import_library(std::string_view dll, u16 machine, std::span<const ImportEntry> entries) {
+Result<std::vector<std::byte>> write_import_library(std::string_view dll, u16 machine, std::span<const ImportEntry> entries,
+                                                    std::optional<u32> comp_id) {
     const std::string lib = library_name(dll);
     std::vector<ArchiveMember> members;
-    TRY_ASSIGN(auto descriptor, import_descriptor(dll, machine));
+    TRY_ASSIGN(auto descriptor, import_descriptor(dll, machine, comp_id));
     members.push_back({std::string(dll), std::move(descriptor), {"__IMPORT_DESCRIPTOR_" + lib}});
-    TRY_ASSIGN(auto null_descriptor, null_import_descriptor(machine));
+    TRY_ASSIGN(auto null_descriptor, null_import_descriptor(machine, comp_id));
     members.push_back({std::string(dll), std::move(null_descriptor), {"__NULL_IMPORT_DESCRIPTOR"}});
-    TRY_ASSIGN(auto thunk, null_thunk(dll, machine));
+    TRY_ASSIGN(auto thunk, null_thunk(dll, machine, comp_id));
     members.push_back({std::string(dll), std::move(thunk), {"\x7f" + lib + "_NULL_THUNK_DATA"}});
     for (const auto& entry : entries) {
         auto name_type = import_name_type_for(entry, machine);

@@ -184,15 +184,24 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
     for (usize i = 0; i < kept.size(); ++i) blocks[kept[i]->name].push_back(i);
     auto sec_alignment = [&](usize i) { return std::max<u32>(out.sections[i].alignment, 1); };
 
-    // Anchors: an RVA for a section, from one of its symbols or from a reference to it.
-    std::map<usize, std::map<u32, std::string>> anchors;  // section index -> rva -> what said so
-    auto anchor = [&](usize i, u32 rva, std::string why) { anchors[i].emplace(rva, std::move(why)); };
+    // Anchors: an RVA for a section, from one of its symbols or from a reference to it. The unit's own
+    // functions pin their sections.
+    struct Anchor {
+        std::string why;
+        bool function = false;
+    };
+    std::map<usize, std::map<u32, Anchor>> anchors;  // section index -> rva -> what said so
+    auto anchor = [&](usize i, u32 rva, std::string why, bool function = false) {
+        auto [it, inserted] = anchors[i].emplace(rva, Anchor{std::move(why), function});
+        if (!inserted && function) it->second.function = true;
+        return inserted;
+    };
     for (u64 va : functions) {
         const auto* target = program.symbols().at(va);
         if (!target) continue;
         const auto* cs = find_candidate_symbol(object, *target);
         if (!cs || !index_of.contains(static_cast<u32>(cs->section_number))) continue;
-        anchor(index_of[static_cast<u32>(cs->section_number)], static_cast<u32>(va - base - cs->value), std::format("function {}", target->name));
+        anchor(index_of[static_cast<u32>(cs->section_number)], static_cast<u32>(va - base - cs->value), std::format("function {}", target->name), true);
     }
     for (const auto& s : object.symbols()) {
         if (!s.is_defined() || !s.is_external() || !index_of.contains(static_cast<u32>(s.section_number))) continue;
@@ -204,69 +213,75 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
     std::map<usize, u32> placed;  // section index -> rva
     std::set<usize> discarded;
     std::map<usize, std::string> discarded_unit;
-    std::vector<std::string> problems;
     auto other_unit_at = [&](u32 rva) -> std::optional<std::string> {
         const auto* c = layout.at(rva);
         if (!c || c->unit == unit || c->linker || c->unit.empty()) return std::nullopt;
         return c->unit;
     };
 
-    // Place each name's sections in a row from the anchors they have; a COMDAT anchored away from the row,
-    // or in another unit's contribution, is a discarded duplicate.
+    // A COMDAT that only references put in another unit's contribution is that unit's copy, which the
+    // linker keeps: a string or constant pooled across units. Then each name's sections go in a row:
+    // a section follows the one before it unless its anchors put it elsewhere (a gap: a function of the
+    // unit is not in the source, or the object differs), and sections before the first anchored one
+    // end where the next begins.
+    std::vector<std::string> gaps;
     auto place_blocks = [&] {
         placed.clear();
-        problems.clear();
-        for (auto& [name, members] : blocks) {
-            for (int round = 0; round < 8; ++round) {
-                std::vector<usize> row;
-                for (usize i : members)
-                    if (!discarded.contains(i)) row.push_back(i);
-                // Offsets from a start aligned for every member.
-                std::map<usize, u32> offset;
-                u32 pos = 0;
-                for (usize i : row) {
-                    pos = align_up(pos, out.sections[i].alignment);
-                    offset[i] = pos;
-                    pos += out.sections[i].size;
-                }
-                // The start most anchors agree on.
-                std::map<u32, usize> votes;
-                for (usize i : row)
-                    for (const auto& [rva, why] : anchors[i]) ++votes[rva - offset[i]];
-                if (votes.empty()) break;
-                const u32 start = std::ranges::max_element(votes, {}, [](const auto& v) { return v.second; })->first;
-                bool changed = false;
-                for (usize i : row) {
-                    const u32 at = start + offset[i];
-                    const auto& here = anchors[i];
-                    const bool agrees = here.empty() || here.contains(at);
-                    if (!agrees && out.sections[i].comdat) {
-                        discarded.insert(i);
-                        discarded_unit[i] = other_unit_at(here.begin()->first).value_or("");
-                        changed = true;
-                    }
-                }
-                if (changed) continue;
-                for (usize i : row) {
-                    placed[i] = start + offset[i];
-                    for (const auto& [rva, why] : anchors[i])
-                        if (rva != placed[i])
-                            problems.push_back(std::format("{} {} is at {:#x} by its place among the object's {} sections, but {} puts it at {:#x}",
-                                                           out.sections[i].name, out.sections[i].symbol, placed[i], name, why, rva));
-                }
-                break;
+        gaps.clear();
+        for (usize i = 0; i < kept.size(); ++i) {
+            if (!out.sections[i].comdat || discarded.contains(i)) continue;
+            const auto& here = anchors[i];
+            if (here.empty() || std::ranges::any_of(here, [](const auto& a) { return a.second.function; })) continue;
+            std::optional<std::string> other;
+            for (const auto& [rva, a] : here) {
+                other = other_unit_at(rva);
+                if (!other) break;
             }
-        }
-        // A COMDAT alone in another unit's contribution is that unit's copy.
-        for (auto it = placed.begin(); it != placed.end();) {
-            const usize i = it->first;
-            auto other = out.sections[i].comdat ? other_unit_at(it->second) : std::nullopt;
             if (other) {
                 discarded.insert(i);
                 discarded_unit[i] = *other;
-                it = placed.erase(it);
-            } else {
-                ++it;
+            }
+        }
+        for (auto& [name, members] : blocks) {
+            std::optional<u32> cursor;
+            std::string previous;
+            std::vector<usize> pending;
+            for (usize i : members) {
+                if (discarded.contains(i)) continue;
+                const auto& sec = out.sections[i];
+                const auto& here = anchors[i];
+                std::optional<u32> at;
+                const std::optional<u32> next = cursor ? std::optional<u32>(align_up(*cursor, sec.alignment)) : std::nullopt;
+                if (next && (here.empty() || here.contains(*next))) {
+                    at = next;
+                } else if (!here.empty()) {
+                    auto f = std::ranges::find_if(here, [](const auto& a) { return a.second.function; });
+                    at = f != here.end() ? f->first : here.begin()->first;
+                    if (next && *at > *next)
+                        gaps.push_back(std::format("{} bytes between {} and {} {} at {:#x}, which the linker would close", *at - *next, previous,
+                                                   sec.name, sec.symbol, *at));
+                    else if (next)
+                        gaps.push_back(std::format("{} {} at {:#x} overlaps {}", sec.name, sec.symbol, *at, previous));
+                }
+                if (!at) {
+                    pending.push_back(i);
+                    continue;
+                }
+                u32 end = *at;
+                for (auto p = pending.rbegin(); p != pending.rend(); ++p) {
+                    const auto& ps = out.sections[*p];
+                    const u32 align = std::max<u32>(ps.alignment, 1);
+                    const u32 start = end >= ps.size ? (end - ps.size) / align * align : 0;
+                    placed[*p] = start;
+                    end = start;
+                }
+                pending.clear();
+                placed[i] = *at;
+                cursor = *at + sec.size;
+                previous = std::format("{} {}", sec.name, sec.symbol);
+                for (const auto& [rva, a] : here)
+                    if (rva != *at)
+                        gaps.push_back(std::format("{} {} is placed at {:#x}, but {} puts it at {:#x}", sec.name, sec.symbol, *at, a.why, rva));
             }
         }
     };
@@ -346,8 +361,7 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
                 auto t = image_target(image, object, r, f, rva + r.offset);
                 if (!t) continue;
                 const u32 section_rva = *t - target->value;
-                if (anchors[ti].emplace(section_rva, std::format("the reference at {}+{:#x}", out.sections[i].symbol, r.offset)).second)
-                    added = true;
+                if (anchor(ti, section_rva, std::format("the reference at {}+{:#x}", out.sections[i].symbol, r.offset))) added = true;
             }
         }
         if (!added)
@@ -470,7 +484,7 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
             if (it == by_rva.end()) {
                 out.missing.push_back(*c);
             } else if (it->second->size != c->size) {
-                problems.push_back(std::format("{} {} at {:#x} is {} bytes; the original's was {}", it->second->name, it->second->symbol, c->rva,
+                out.problems.push_back(std::format("{} {} at {:#x} is {} bytes; the original's was {}", it->second->name, it->second->symbol, c->rva,
                                                it->second->size, c->size));
             }
         }
@@ -478,12 +492,12 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
             if (!p.rva || p.state == PlacementState::discarded || p.state == PlacementState::unplaced) continue;
             const auto* c = layout.at(*p.rva);
             if (!c || c->rva != *p.rva || c->unit != unit)
-                problems.push_back(std::format("{} {} goes to {:#x}, {}", p.name, p.symbol, *p.rva,
+                out.problems.push_back(std::format("{} {} goes to {:#x}, {}", p.name, p.symbol, *p.rva,
                                                c ? std::format("inside {}'s {} at {:#x}", c->unit, c->name, c->rva)
                                                  : std::string("where the original has no contribution")));
         }
     }
-    out.problems = std::move(problems);
+    out.problems.insert(out.problems.begin(), gaps.begin(), gaps.end());
     return out;
 }
 

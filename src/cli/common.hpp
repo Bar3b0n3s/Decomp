@@ -61,5 +61,6 @@ void register_project_commands(CLI::App& app, GlobalOptions& g);
 void register_agent_commands(CLI::App& app, GlobalOptions& g);
 void register_run_commands(CLI::App& app, GlobalOptions& g);
 void register_types_commands(CLI::App& app, GlobalOptions& g);
+void register_relink_commands(CLI::App& app, GlobalOptions& g);
 
 } // namespace decomp::cli

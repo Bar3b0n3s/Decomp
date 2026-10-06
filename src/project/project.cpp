@@ -56,6 +56,13 @@ Json Config::to_json() const {
                   {"max_usd_per_run", agent.max_usd_per_run},
                   {"workers", agent.workers},
                   {"approvals", agent.approvals}};
+    if (!link.empty()) {
+        Json l = Json::object();
+        if (!link.linker.empty()) l["linker"] = link.linker;
+        if (!link.flags.empty()) l["flags"] = link.flags;
+        if (!link.libraries.empty()) l["libraries"] = link.libraries;
+        j["link"] = std::move(l);
+    }
     return j;
 }
 
@@ -93,6 +100,19 @@ Result<Config> Config::from_json(const Json& j) {
             if (policy != "auto" && policy != "ask" && policy != "deny")
                 return make_error(ErrorCode::parse, "decomp.json: agent.approvals.{} must be \"auto\", \"ask\" or \"deny\"", p.key());
             c.agent.approvals[p.key()] = policy;
+        }
+    }
+    if (auto it = j.find("link"); it != j.end()) {
+        if (!it->is_object()) return make_error(ErrorCode::parse, "decomp.json: link must be an object");
+        c.link.linker = json_string_or(*it, "linker", "");
+        for (const char* key : {"flags", "libraries"}) {
+            auto list = it->find(key);
+            if (list == it->end()) continue;
+            if (!list->is_array()) return make_error(ErrorCode::parse, "decomp.json: link.{} must be an array of strings", key);
+            for (const auto& v : *list) {
+                if (!v.is_string()) return make_error(ErrorCode::parse, "decomp.json: link.{} must be an array of strings", key);
+                (std::string(key) == "flags" ? c.link.flags : c.link.libraries).push_back(v.get<std::string>());
+            }
         }
     }
     return c;

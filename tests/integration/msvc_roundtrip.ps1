@@ -53,6 +53,19 @@ if ($LASTEXITCODE -ne 0) { throw "scripted agent run did not match add() with cl
 if ($LASTEXITCODE -ne 0) { throw "the unit source of add() does not verify with cl.exe ($Arch)" }
 Write-Host "MSVC agent replay ($Arch): matched"
 
+# The program linked again by link.exe, from split objects of its original bytes, then from its units'
+# sources (composed from the fixture's own translation units and compiled by cl.exe): identical to the
+# original once its build timestamps and PDB GUID are taken over.
+& $decomp -C $project relink --all-split
+if ($LASTEXITCODE -ne 0) { throw "the relink from split objects differs from the original with link.exe ($Arch)" }
+& $decomp -C $project units compose basic.obj "$src\basic.cpp"
+if ($LASTEXITCODE -ne 0) { throw "basic.cpp composed into basic.obj's source does not match with cl.exe ($Arch)" }
+& $decomp -C $project units compose other.obj "$src\other.cpp"
+if ($LASTEXITCODE -ne 0) { throw "other.cpp composed into other.obj's source does not match with cl.exe ($Arch)" }
+& $decomp -C $project relink
+if ($LASTEXITCODE -ne 0) { throw "the relink from the units' sources differs from the original with link.exe ($Arch)" }
+Write-Host "MSVC relink ($Arch): identical to the original"
+
 # The fixtures' types, declared in project headers (tests/fixtures/include), compile with cl.exe /Z7 to
 # the layouts in the PDBs link.exe wrote: a struct, and classes with virtual functions, multiple and
 # virtual inheritance.

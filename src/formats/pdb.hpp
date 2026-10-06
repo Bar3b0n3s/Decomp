@@ -41,12 +41,22 @@ struct Module {
     std::string object_name;  // library or object name
     std::vector<std::string> source_files;  // the files its line information names: its source, then headers
     int language = -1;  // CV_CFL_* of its S_COMPILE3 record: 0 C, 1 C++, 3 MASM, 7 the linker; -1 unknown
+    u16 backend_build = 0;  // the compiler's build number (19.29.30133: 30133), as its Rich header entry has it
 };
 
 struct Contribution {
     u32 rva = 0;
     u32 size = 0;
     u32 module = 0;
+    u32 characteristics = 0;
+};
+
+// An input section name's range in the image (S_COFFGROUP, in the linker's module): what the linker
+// merged into an image section, ".text$mn", ".xdata", ".CRT$XCU".
+struct CoffGroup {
+    std::string name;
+    u32 rva = 0;
+    u32 size = 0;
     u32 characteristics = 0;
 };
 
@@ -68,6 +78,7 @@ public:
     const std::vector<PublicSymbol>& publics() const { return publics_; }
     const std::vector<Module>& modules() const { return modules_; }
     const std::vector<Contribution>& contributions() const { return contributions_; }
+    const std::vector<CoffGroup>& coff_groups() const { return coff_groups_; }
     // The TPI stream: every type the program's code uses (empty when the PDB has none that reads).
     const codeview::TypeStream& types() const { return types_; }
     codeview::TypeStream take_types() { return std::move(types_); }
@@ -85,6 +96,7 @@ private:
     std::vector<PublicSymbol> publics_;
     std::vector<Module> modules_;
     std::vector<Contribution> contributions_;
+    std::vector<CoffGroup> coff_groups_;
     codeview::TypeStream types_;
     std::unordered_map<codeview::TypeIndex, std::string> type_sources_;
 };

@@ -60,6 +60,8 @@ ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image) {
     ImageLayout layout;
     layout.source = LayoutSource::pdb;
     const auto names = pdb_unit_names(pdb);
+    for (usize i = 0; i < pdb.modules().size() && i < names.size(); ++i)
+        if (pdb.modules()[i].language >= 0) layout.origins[names[i]] = {pdb.modules()[i].language, pdb.modules()[i].backend_build};
     for (const auto& c : pdb.contributions()) {
         if (c.size == 0 || c.module >= names.size()) continue;
         Contribution out;
@@ -73,6 +75,10 @@ ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image) {
         layout.contributions.push_back(std::move(out));
     }
     std::ranges::stable_sort(layout.contributions, {}, &Contribution::rva);
+    // The linker's record of each input section name's range names the contributions in it.
+    for (const auto& g : pdb.coff_groups())
+        for (auto& c : layout.contributions)
+            if (c.name.empty() && c.rva >= g.rva && c.rva < g.rva + std::max<u32>(g.size, 1)) c.name = g.name;
     name_contributions(layout, image);
     return layout;
 }
@@ -158,26 +164,38 @@ ImageLayout layout_from_units(const Program& program, const UnitLayout& units) {
         --it;
         return rva < it->second;
     };
-    // Unit boundaries: each symbol with a unit starts a stretch of that unit.
-    std::map<u32, std::string> starts;
+    // Unit boundaries: each symbol with a unit starts a stretch of that unit (an import library's unit
+    // holds nothing an object carries: the linker makes its part). On x64 each function's unwind
+    // information starts a stretch of .xdata of the function's unit.
+    struct Start {
+        std::string unit;
+        std::string name;  // the input section's name, when known
+    };
+    std::map<u32, Start> starts;
     for (const auto& [va, unit] : units.members) {
         if (va < image.image_base()) continue;
         const auto* s = program.symbols().at(va);
         if (s && s->kind == SymbolKind::label) continue;
-        starts.emplace(static_cast<u32>(va - image.image_base()), unit);
+        const auto kind = unit_kind_of(unit);
+        starts.emplace(static_cast<u32>(va - image.image_base()), Start{kind == UnitKind::import || kind == UnitKind::linker ? "" : unit, ""});
     }
+    if (image.is_pe32_plus())
+        for (const auto& f : image.runtime_functions())
+            starts.insert_or_assign(f.unwind_rva & ~1u, Start{std::string(units.unit_of(image.image_base() + f.begin_rva)), ".xdata"});
     for (const auto& section : image.sections()) {
         if (section.name == ".reloc" || section.name == ".rsrc") continue;
+        // The section's size in memory: the file's alignment padding past it is not the section's.
         const u32 begin = section.virtual_address;
-        const u32 end = begin + std::max(section.virtual_size, section.raw_size);
-        // The unit of the first symbol in the section owns what comes before it.
+        const u32 end = begin + (section.virtual_size ? section.virtual_size : section.raw_size);
+        // The unit of the first symbol in the section owns what comes before it (in a section of its own name).
         auto it = starts.lower_bound(begin);
-        std::string unit = it != starts.end() && it->first < end ? it->second : std::string();
-        auto emit = [&](u32 from, u32 to, const std::string& owner, bool made_by_linker) {
+        Start current = it != starts.end() && it->first < end ? Start{it->second.unit, ""} : Start{};
+        auto emit = [&](u32 from, u32 to, const Start& owner, bool made_by_linker) {
             if (from >= to) return;
             if (!layout.contributions.empty()) {
                 auto& last = layout.contributions.back();
-                if (last.end() == from && last.unit == owner && last.linker == made_by_linker && last.section == section.name) {
+                if (last.end() == from && last.unit == owner.unit && last.linker == made_by_linker && last.section == section.name &&
+                    last.name == owner.name) {
                     last.size = to - last.rva;
                     return;
                 }
@@ -186,9 +204,10 @@ ImageLayout layout_from_units(const Program& program, const UnitLayout& units) {
             c.rva = from;
             c.size = to - from;
             c.section = section.name;
+            c.name = owner.name;
             c.characteristics = section.characteristics & (pe::scn::cnt_code | pe::scn::cnt_initialized_data | pe::scn::cnt_uninitialized_data |
                                                            pe::scn::mem_execute | pe::scn::mem_read | pe::scn::mem_write);
-            c.unit = owner;
+            c.unit = owner.unit;
             c.linker = made_by_linker;
             layout.contributions.push_back(std::move(c));
         };
@@ -202,10 +221,18 @@ ImageLayout layout_from_units(const Program& program, const UnitLayout& units) {
                 if (r.first > pos && r.first < next) next = r.first;
                 if (r.first <= pos && r.second > pos && r.second < next) next = r.second;
             }
-            if (auto s = starts.find(pos); s != starts.end()) unit = s->second;
-            emit(pos, next, made_by_linker ? std::string() : unit, made_by_linker);
+            if (auto s = starts.find(pos); s != starts.end()) current = s->second;
+            emit(pos, next, made_by_linker ? Start{} : current, made_by_linker);
             pos = next;
         }
+    }
+    // Zero padding right after the linker's own tables is the linker's too (it aligns what it adds).
+    for (usize i = 1; i < layout.contributions.size(); ++i) {
+        auto& c = layout.contributions[i];
+        const auto& before = layout.contributions[i - 1];
+        if (c.linker || !before.linker || before.end() != c.rva || c.size >= 16) continue;
+        auto bytes = image.read_rva(c.rva, c.size);
+        if (bytes && std::ranges::all_of(*bytes, [](std::byte b) { return b == std::byte{0}; })) c.linker = true;
     }
     // The uninitialized tail of a section (past its file data) is uninitialized data.
     for (auto& c : layout.contributions) {

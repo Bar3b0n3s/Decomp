@@ -9,6 +9,7 @@
 #include "formats/pdb.hpp"
 #include "formats/pe.hpp"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,9 +36,16 @@ struct Contribution {
 enum class LayoutSource : u8 { pdb, symbols };
 std::string_view to_string(LayoutSource source);
 
+// What compiled a unit's object, as the PDB's compile record says.
+struct ObjectOrigin {
+    int language = -1;  // CV_CFL_*: 0 C, 1 C++, 3 MASM
+    u16 build = 0;      // the compiler's build number
+};
+
 struct ImageLayout {
     std::vector<Contribution> contributions;  // address order
     LayoutSource source = LayoutSource::pdb;
+    std::map<std::string, ObjectOrigin> origins;  // by unit, from the PDB
 
     // The contribution holding `rva`, or nullptr (padding, headers).
     const Contribution* at(u32 rva) const;
@@ -54,9 +62,9 @@ struct PogoEntry {
 };
 std::vector<PogoEntry> pogo_entries(const pe::Image& image);
 
-// The PDB's section contributions, in address order, with each module's unit name (pdb_unit_names()).
-// Contributions of the linker's own module and of import libraries are marked `linker`. Empty
-// contributions are left out.
+// The PDB's section contributions, in address order, with each module's unit name (pdb_unit_names())
+// and the input section names its COFF group records give. Contributions of the linker's own module and
+// of import libraries are marked `linker`. Empty contributions are left out.
 ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image);
 
 // Without a PDB: each section of the image cut where the unit of the symbols in it changes (functions and

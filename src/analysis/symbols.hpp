@@ -52,6 +52,8 @@ public:
     const Symbol* at(u64 va) const;
     // Symbol whose [va, va + size) covers `address` (or the exact match when size is 0).
     const Symbol* containing(u64 address) const;
+    // The last symbol at or before `address`, whatever its size.
+    const Symbol* at_or_before(u64 address) const;
     // Lookup by decorated name, alias, PDB name, readable name or qualified name.
     const Symbol* find(std::string_view name) const;
 

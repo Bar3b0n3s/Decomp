@@ -35,6 +35,7 @@ units: `units.txt` and one source per unit. Anything marked *planned* does not e
         active-run.lock         held by the process that runs agent sessions
         build/                  per-compile working directories
         cache/objects/          compile cache
+        relink/                 the last relink: objects/, libs/, out/, link.rsp, result.json
 ```
 
 `<fn>` is the function's [key](#function-keys-fn), such as `add_401060`.
@@ -120,6 +121,7 @@ The example below is shown exactly as `decomp init ../bin/GAME.EXE --toolchain v
 | `flags` | array of strings | The target's code-generation flags, passed after the toolchain's base flags |
 | `include_dirs` | array of strings | Project include directories (relative), passed to the compiler as `/I` |
 | `agent` | object | Agent settings ([agent.md](agent.md#configuration)). Omitted keys use the defaults shown above. |
+| `link` | object | Optional. How `decomp relink` links the target again ([Relinking](#relinking)): `linker` (a path or a name; default the toolchain's: lld-link for clang-cl, link.exe beside cl.exe for MSVC), `flags` (passed after the flags taken from the image, such as `/opt:icf` or an `/alternatename:` the original link had), `libraries` (linked after the objects: import libraries, static libraries; relative to the project, or a bare name the linker finds through `LIB`) |
 
 `decomp init` fills in `target` (path, SHA-1, and the PDB when one was given with `--pdb` or found
 next to the binary and matched), sets `toolchain` and `flags` from `--toolchain` and `--flag`, and
@@ -373,6 +375,73 @@ verifies again.
   ones too). Functions that do not compose, or are not byte-exact in the unit, keep their own files
   and the rest is tried again without them. A unit source is written only when every function in it is
   byte-exact. Each write and each removed file is recorded in `changes.jsonl`.
+- `decomp units check [unit...]` checks the unit as a whole ([matching.md](matching.md#units)): it
+  compiles the unit source, places the object's code and data where the linker would put them and
+  compares them with the target. A unit is **complete** when every function the unit has (its `obj=`)
+  is in its source and the object fills the unit's place in the image exactly: its functions in the
+  same order, its data with the same contents in the same places, the same strings and constants
+  (pooled ones shared with other units), and the same exception-handling and unwind tables. The data
+  is part of the prelude: the unit's globals defined there with their initial values, in the order the
+  original source had them. The exit code is 2 when a unit is not complete.
+- `decomp units compose <unit> <file> [--dry-run]` makes a unit's source from a whole translation unit
+  (an original source file, one written by hand): each function of the unit is composed from it after
+  its marker and the rest becomes the prelude. The result is checked like `units check`, written
+  (recorded in `changes.jsonl`), and when the unit is complete its functions are marked matched.
+
+## Relinking
+
+`decomp relink` links the whole target again and compares the result with it: the verification of the
+whole program, not just of its functions. Every complete code unit is linked from its source; every
+other unit (incomplete, without a source, a static library's member) from a *split object* that
+carries its original code and data; imports come from import libraries written from the target's import
+table (or `link.libraries`). The original linker links them in `units.txt` order with flags taken from
+the target's headers ([architecture.md](architecture.md#key-flow-decomp-relink)).
+
+```
+$ decomp relink
+  basic.obj                    split   7 of 12 functions in its source
+  other.obj                    source  complete
+identical to the target: SHA-1 3b10acac... (1 units from source, 1 split); taken over from the
+original: COFF header TimeDateStamp, debug directory entry 0 TimeDateStamp, ..., CodeView GUID
+```
+
+The fields that only record when and how an image was built (the COFF header's and the debug
+directory's timestamps, the PDB's GUID and age, the export and resource directories' timestamps, a
+repro hash) cannot come out of any source: they are taken over from the target before the SHA-1s are
+compared (the checksum is then computed again), and the result lists them. Everything else must be the
+same byte for byte. When it is not, `relink` names the first differing bytes in the target's sections,
+with the unit whose contribution holds them and the symbol there, the header fields that differ and the
+differing bytes per section. The exit code is 0 when the relink is identical and 2 otherwise.
+
+| Option | Meaning |
+|---|---|
+| `--source <unit>` | Link the unit from its source even when its check fails (repeatable): to see what it breaks |
+| `--split <unit>` | Carry the unit's original bytes even when its source is complete (repeatable) |
+| `--all-split` | Every unit from its original bytes: tests the relink itself |
+| `--toolchain <name>` | Compile (and link) with another toolchain than the project's |
+
+`.decomp/relink/` holds the last relink: `objects/` (the compiled and split objects, in link order),
+`libs/` (the import libraries written), `link.rsp` (the linker's arguments), `out/` (the relinked image
+and its PDB) and `result.json`:
+
+| Field | Meaning |
+|---|---|
+| `time` | When it ran (UTC) |
+| `identical` | Whether the relinked image equals the target once the identity fields are taken over |
+| `units[]` | Per unit in link order: `unit`, `kind`, `mode` (`source`, `split`, `linker`), `reason`, `bytes` (the size of its contributions), `object`, and for units with a source the `check` (`decomp units check --json`'s record) |
+| `libraries` | The import libraries written |
+| `notes` | What the relink could not provide (a name a compiled object needs that nothing defines, an export or entry point without a symbol) |
+| `link` | `ok`, `exit_code`, `output`, `command`, `duration_ms` |
+| `image` | The relinked image, relative to the project |
+| `comparison` | `identical`, `original_sha1`, `relinked_sha1` (stamped), `relinked_unstamped_sha1`, `original_size`, `relinked_size`, `stamped[]` (`name`, `offset`, `original`, `relinked`), `differing_bytes`, `differences[]` (`offset`, `size`, `where`, `rva`, `unit`, `symbol`, `original`, `relinked` bytes), `sections[]` (`name`, `differing_bytes`, `first_rva`, `first_unit`, `size_differs`) and `first`, the first difference in section contents |
+
+Split objects reproduce the target's layout because each carries its unit's contributions, the input
+sections the linker placed, with their names, alignments and COMDAT-ness: a PDB lists them exactly
+(its section contributions, named by the linker's COFF group records); without one they are cut from the
+units of the symbols, which is enough while every unit is split, and as good as the units are once some
+are built from source. link.exe writes a Rich header counting the objects of each compiler: split
+objects carry the `@comp.id` of the compiler the PDB says made their originals, and import libraries
+the import library tool's.
 
 ## `src/functions/`
 

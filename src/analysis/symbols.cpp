@@ -143,6 +143,12 @@ const Symbol* SymbolDb::containing(u64 address) const {
     return nullptr;
 }
 
+const Symbol* SymbolDb::at_or_before(u64 address) const {
+    auto it = by_va_.upper_bound(address);
+    if (it == by_va_.begin()) return nullptr;
+    return &std::prev(it)->second;
+}
+
 const Symbol* SymbolDb::find(std::string_view name) const {
     auto it = by_name_.find(std::string(name));
     if (it != by_name_.end()) return at(it->second);

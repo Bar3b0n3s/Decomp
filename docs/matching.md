@@ -33,10 +33,11 @@ comparison proves the relocated fields equivalent, and the remaining bytes must 
 by content, the data the function references directly: string literals, floating-point and SSE
 constants, and jump tables. Named globals and functions are compared by name.
 
-**What is not compared** (in the slice): object-file metadata (timestamps, symbol order, debug
+**What is not compared** in a function's diff: object-file metadata (timestamps, symbol order, debug
 sections, `.drectve`); the function's address and its alignment padding; the contents of referenced
-globals beyond their identity; exception-handling tables; and unwind data. Data matching and full
-relinking come in Phase 5.
+globals beyond their identity; exception-handling tables; and unwind data. A unit check compares those
+for a whole unit ([Units](#units)), and a relink verifies the whole program
+([project-format.md](project-format.md#relinking)).
 
 ## Inputs
 
@@ -335,6 +336,44 @@ shown compacted here):
 
 Bindings appear as `{"candidate_symbol": "?g_counter@@3HA", "target_va": 4206592}`.
 
+## Units
+
+A function's diff proves its code. A *unit check* (`matching/unit_check.hpp`, `decomp units check`)
+proves a translation unit: that its compiled object, linked in the original's place, puts exactly the
+original's code and data there. It works from the image layout (what each unit contributed, see
+[architecture.md](architecture.md#image-layout)):
+
+1. **Placement.** The object's sections that go into the image (not debug sections, `.drectve` or
+   other linker information) are placed by their symbols: the unit's functions at their addresses
+   (they pin their sections), external names the program knows, and then the targets of the
+   relocations of placed sections, wherever the image's bytes say they are. A section nothing refers
+   to (x64 `.pdata`) is found by its relocations: where the image holds, at the same offsets, the
+   values its placed targets give. The linker puts an object's sections of one name together in
+   object order, so one placed section places the others of its name; a gap or an overlap in such a
+   row (a function missing from the source, a section of another size) is a problem the check reports.
+2. **Pooled duplicates.** A COMDAT that references put in another unit's contribution is a copy the
+   linker discards in favor of that unit's: a string literal or a floating-point constant pooled across
+   units, a function folded by `/OPT:ICF`. It is reported as discarded, with the unit whose copy the
+   image has.
+3. **Comparison.** Each placed section is compared with the image byte for byte; a relocation's field
+   with the value the linker would write for where its target is (in a placed section, at a pooled
+   copy, or for an external symbol where the program's symbols or the image's bytes put it, the same
+   address for every reference to one name). Uninitialized data must be zero in the image.
+4. **Against the PDB.** With a layout from the PDB, each of the unit's contributions must be filled by a
+   placed section of the same address and size, and no placed section may sit in another unit's
+   contribution: data the original object had and the source does not define shows up as missing.
+
+What this verifies beyond the function diffs: the order of the functions (each section where the
+original's was), the unit's data (initial values, order and alignment of globals and statics, `.bss`),
+strings and constants and how they are pooled, switch tables in `.rdata`, C++ exception-handling tables
+and SEH scope tables, x64 unwind data (`.xdata`) and `.pdata` entries, and RTTI and vtables.
+
+The unit's data comes from the unit source's prelude: its globals defined there with their initial
+values, in the order the original source had them. Sessions compose each function's translation unit
+into the unit source, which brings declarations along (`extern int g_counter;`); a definition the unit
+needs (`int g_counter = 3;`) has to replace the declaration for the unit to be complete. `decomp units
+compose <unit> <file>` makes the whole unit source from a translation unit at once.
+
 ## MSVC specifics
 
 ### `/Gy` and COMDAT sections
@@ -356,7 +395,7 @@ Without pooling, older compilers place literals in `.data` or `.rdata` under ano
 symbols. Decomp compares both by content. A wrong literal is therefore an `operand` row (category
 `symbol`) with a hint that shows both strings. Wide literals are compared over all their UTF-16 units.
 A literal placed in a different section, for example because
-of a `const` mismatch, is caught in Phase 5 when data placement is verified.
+of a `const` mismatch, is caught by the unit check, which verifies data placement ([Units](#units)).
 
 ### Floating-point constants (`__real@`, `__xmm@`)
 
@@ -435,8 +474,8 @@ to `__CxxFrameHandler`. Structured exception handling (`__try`) uses a scope tab
 candidate object under a name made from the function's (`__ehhandler$f`, `__sehtable$f`; clang's x86
 stub is `___ehhandler$f`), while the target often has only an address. The diff finds the target
 function's own stub and scope table from its registration (`analysis/eh.hpp`) and pairs them with
-the candidate's, whatever either function is called. Comparing the companion bodies and the
-`FuncInfo`/scope tables as part of data matching is planned (Phase 5). An EH prolog present on only one side will produce the planned
+the candidate's, whatever either function is called. The companion bodies and the
+`FuncInfo`/scope tables are compared by the unit check ([Units](#units)). An EH prolog present on only one side will produce the planned
 `eh_frame` hint: exception-handling flags, objects with destructors, or `try` blocks. x64 has no prolog
 registration (handling is table-based, through `.pdata`/`.xdata`).
 
@@ -498,7 +537,7 @@ unwind info RVA). These entries give exact bounds without symbols. The slice alr
 entry without a symbol becomes a function named `sub_<hex address>` with the entry's size. Leaf
 functions that neither allocate stack nor save registers may have no entry. Functions split by the
 optimizer appear as chained unwind entries; merging them into one function is planned (Phase 2).
-Comparing the unwind data itself (`.xdata`) belongs to data matching in Phase 5.
+The unwind data itself (`.xdata`) is compared by the unit check ([Units](#units)).
 
 ### Whole-program optimization (`/GL`)
 
@@ -653,9 +692,9 @@ tool result (`compile: ok (cached)`), so the transcripts show which attempts act
 | Candidate objects | COFF from MSVC and clang-cl (including `/bigobj`), built with `/Gy` | Objects without `/Gy` (padding, same-section calls); ELF objects (Phase 7) |
 | Address fields | Base relocations, relative branches, RIP-relative operands, stripped-`.reloc` heuristic (compared as values where the candidate has no relocation), MSVC x64 image-base-relative operands | — |
 | Symbol sources | PDB 7.0 (publics, procedures, data), exports, imports, x64 `.pdata`, `symbols.txt` | MSVC `.map`, RTTI names, library signatures (Phase 2) |
-| Data compared | Narrow and wide strings, floats and SSE constants, jump tables | Global initializers, EH and unwind tables, string and float pools, section placement (Phase 5) |
+| Data compared | Narrow and wide strings, floats and SSE constants, jump tables; per unit (Phase 5): global initializers, EH and unwind tables, string and float pools, section placement | |
 | Thunks | ILT and import thunks followed; names moved off ILT entries; the `dllimport` hint | |
 | Jump tables | x86 absolute, clang x64 relative and MSVC x64 RVA tables, in `.text` too, compared as index lists; two-level switches' byte tables compared by content | |
 | Hints | Register-only, stack-only, encoding, inverted branch, reordering, instruction count, branch target, binding, reference (string, constant, callee) and `dllimport` hints | `signature`, `gs_cookie`, `chkstk`, `eh_frame` |
 | Toolchains | Registry with auto-detected clang-cl, `toolchain add`/`list`/`test`, compile cache, MSVC and GCC-style diagnostics; clang-cl round trip (Linux CI), `cl.exe` round trip (Windows CI, being brought up) | Version banner, project overrides, `CL`/`_CL_` removal, Wine wrapper on Linux; flag search and compiler identification (Phase 6) |
-| Verification scope | Single functions, and every function of a unit source compiled together (Phase 3) | Relinking with a SHA-1 check of the result (Phase 5) |
+| Verification scope | Single functions; every function of a unit source compiled together (Phase 3); whole units and relinking with a SHA-1 check of the result (Phase 5) | |

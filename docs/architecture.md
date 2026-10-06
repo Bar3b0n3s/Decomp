@@ -61,7 +61,8 @@ code, and the headers are authoritative. Anything marked *planned* does not exis
 | Ingest | Parse the target image, its PDB and candidate objects | `formats` | PE32/PE32+, COFF `.obj` (including `/bigobj`), PDB 7.0, exports, imports, base relocations, CodeView, Rich header decode, x64 `.pdata` | COFF `.lib`, MSVC `.map` (Phase 2); ELF64 (Phase 7) |
 | Analyze | Build the symbol database, find function bounds, build CFGs | `analysis` | Symbol import, bounds from symbol size, `.pdata` or recursive descent, jump tables, linker-thunk resolution, basic blocks and loop headers, a cross-reference scan for callers | Full cross-reference index, RTTI/vtables, library signatures (Phase 2) |
 | Annotate | Turn a function into a readable, symbolized listing | `analysis` + `arch/x86` | Labels, symbolized operands, frame slot names, loop hints, switch tables | Field names from types (Phase 4) |
-| Match | Compile a candidate, extract the function, diff it | `matching` | Toolchain registry, compile driver and cache, diagnostics, relocation-aware diff, verdicts, hints | Data matching and relinking (Phase 5), flag search and permuter (Phase 6) |
+| Match | Compile a candidate, extract the function, diff it | `matching` | Toolchain registry, compile driver and cache, diagnostics, relocation-aware diff, verdicts, hints; unit checks (a unit's compiled code and data placed in the image and compared) | Flag search and permuter (Phase 6) |
+| Relink | Link the whole program again and compare it with the target | `relink`, `project` | Image layout (what each unit contributed), split objects of the unmatched code and data, import libraries from the import table, the original linker with flags from the image's headers, SHA-1 comparison with the build's identity taken over | |
 | Agent | Run one Claude conversation per function | `agent`, `run` | Transports, SSE, client, append-only conversation, tools, loop, live control and limits, transcripts, cost, shared rate gate, approvals; the multi-worker run controller with its queue and resumable run directories | More tools (Phases 3-4) |
 | Project | Persist sources, symbols, history and progress | `project` | `init`, `symbols.txt`, status and history, verified sources, `status` | Translation-unit organization (Phase 3), headers and types (Phase 4) |
 | Supervise | Show everything live and historically; take commands | `events`, `cli`, `gui` | Events, the serialized `EventBus`, `RunState` and copy-on-write snapshots, JSONL log, CLI progress view, Ctrl+C and `--interactive` commands, `decomp-gui` | Later-phase views ([ui.md](ui.md#views)) |
@@ -108,8 +109,9 @@ cli, gui                  entry points; argument parsing, rendering
   viewmodel               what the GUI's views show, derived without ImGui (progress, tables, charts, notifications)
   run                     selection, work queue, run directories, RunController (N workers)
   agent                   run_loop, tools, Claude client, rate gate, approvals, MatchSession, runner
-    project               decomp.json, symbols.txt, history, verified sources, locks, change logs
-    matching              toolchains, compile, diff
+    project               decomp.json, symbols.txt, history, verified sources, locks, change logs, relinks
+    relink                split objects, the linker, comparing images
+    matching              toolchains, compile, diff, unit checks
       analysis            Program, SymbolDb, bounds, CFG, annotation, demangling
         arch/x86          decoding, formatting
         formats           PE, COFF, PDB (BinaryImage interface)
@@ -166,6 +168,22 @@ Readers for binary formats, all built on `ByteReader` and returning `Result`:
   static symbols with their object files and `f` (function) flags, the entry point and the timestamp.
 - `archive::Archive`: COFF archives (.lib): members, long names, the linker's symbol index and the
   short import objects of import libraries.
+- Writers (`formats/coff_writer.hpp`), for relinking: `coff::ObjectWriter` builds COFF objects
+  (sections with data or an uninitialized size, section symbols and their definition records, COMDATs
+  with the COMDAT symbol after the section symbol, defined, undefined and absolute symbols such as
+  `@comp.id` and `@feat.00`, relocations past 65535 through the overflow record, long names, `.drectve`
+  directives and x86 `.sxdata` handler registrations). `write_import_library()` writes an import library
+  the way lib.exe and llvm-lib do (the import descriptor, null descriptor and null thunk objects, a short
+  import object per function with its hint and name type), and `write_archive()` the archive with both
+  linker members.
+- `pe::Image` also keeps what a relink reproduces or takes over: the optional header's alignments,
+  versions, stack and heap sizes and checksum, the data directories, every debug directory entry, the
+  x86 load configuration's SAFESEH handlers, and `identity_fields()`, the fields that say when and how
+  the image was built (the COFF and debug timestamps, the PDB's GUID and age, the export and resource
+  directory timestamps, a repro hash, the checksum); `compute_checksum()` is the PE checksum and
+  `describe_header_offset()` names a header byte's field. `pdb::Reader` also reads the linker's COFF
+  group records (`S_COFFGROUP`: each input section name's range, `.text$mn`, `.xdata`) and each module's
+  compiler build (`S_COMPILE3`).
 - `BinaryImage`: the interface the rest of the code uses (architecture, image base and size, entry
   point, sections, bytes at a VA, relocation lookup), so that ELF can be added in Phase 7 without
   touching analysis or matching.
@@ -431,6 +449,19 @@ and the bases at its start. Layouts come from the project's headers first, then 
 header says what is known at entry (`; types:    this = Player* (ecx)`). Session briefs and the
 `disassemble` tool use the headers the session compiled; `decomp disasm` compiles them in a project.
 
+#### Image layout
+
+`analysis/layout.hpp` describes what the linker put where: the image's sections cut into
+*contributions*, the input sections of the objects it linked, each with its unit and the name of its
+input section (`.text$mn`, `.xdata`, `.bss`). With a PDB they are its section contributions, named by
+the linker's COFF group records; link.exe's POGO debug record names them too. Without one,
+`layout_from_units()` cuts each section where the unit of the symbols changes (the project's units),
+starts a `.xdata` stretch at each x64 unwind record, and cuts out what the linker makes itself: import
+and export tables, the debug directory and its records, base relocations, import thunks, and the
+padding after them. Contributions of the linker's own module and of import libraries are marked
+`linker`: no object carries them. `ImageLayout::origins` keeps what compiled each unit (language and
+build, from the PDB's compile records). The relink and the unit checks work from this layout.
+
 `TypeCatalog::field_ref()` names the field at an offset as C++ would: through nested structs and
 arrays (`pos.y`, `grid[1][2]`, `pair.b`), a base's fields by their own names, the table pointers as
 `__vfptr` and `__vbptr` (a later base's as `Named::__vfptr`), with whether the offset is the field's
@@ -459,6 +490,29 @@ The compile and diff engine ([matching.md](matching.md) has the full design):
   `UnitSource` holds a prelude and the matched functions behind `// FUNCTION: 0x...` markers;
   `compose_function()` adds a function's verified translation unit to it, and `verify_unit()` compiles a
   unit source once and diffs each of its functions.
+- Unit checks (`matching/unit_check.hpp`): `check_unit()` places a unit's compiled object where the
+  linker would put it and compares it with the image ([matching.md](matching.md#units)): the order of
+  its functions, its data's contents and placement, pooled strings and constants, exception-handling
+  and unwind tables. It also says where the object's external references resolve and where its
+  definitions land, which the relink needs.
+
+### relink
+
+Linking the target again ([Key flow: `decomp relink`](#key-flow-decomp-relink)):
+
+- `write_split_object()` (`relink/split.hpp`) makes a COFF object of a unit's contributions with their
+  original bytes: each a section of its input section's name, alignment and access (a COMDAT stays one,
+  since linkers order an object's COMDATs and its other sections differently); each place the image's
+  base relocations cover becomes a relocation, against the import's `__imp_` symbol for an IAT slot and
+  against `__ImageBase` with the RVA as addend otherwise, so the linker writes the same values and base
+  relocations again; and the names other objects need are defined where they are.
+- `image_link_flags()` (`relink/linker.hpp`) derives the flags that make the linker write the image's
+  headers (machine, subsystem and versions, base, alignments, stack and heap, DLL characteristics,
+  `/debug` with the CodeView record's PDB path, `/Brepro`, `/release`, `/fixed`, `/safeseh:no`), and
+  `run_linker()` runs lld-link or link.exe through a response file with the toolchain's environment.
+- `compare_images()` (`relink/compare.hpp`) takes the original's identity fields over into the relinked
+  image (and computes its checksum again), compares the SHA-1s, and reports differences by header field
+  or by section and RVA with the unit whose contribution holds them and the symbol there.
 
 ### events
 
@@ -547,6 +601,10 @@ The built-in agent ([agent.md](agent.md) has the full design):
   header (in place of an earlier one), and `prepare_type_change()` checks the result before
   `commit_type_change()` writes it: the header compiles and names the type, and every verified source
   that includes it keeps its byte-exact functions. The agent's `define_type` tool is built on it.
+- Relinking (`project/relink.hpp`): `check_unit_sources()` compiles the unit sources and checks them
+  against the image (`decomp units check`), `compose_unit_source()` makes a unit's source from a whole
+  translation unit (`decomp units compose`), and `relink_project()` links the target again and compares
+  it (`decomp relink`, the GUI's Relink view), writing `.decomp/relink/`.
 - `ProgramGenerations` (`project/project.hpp`): the program with the project's symbols, a new
   generation whenever they change (`Project::symbols_version()`), which `decomp run` hands each
   session it dispatches, so later sessions see the symbols earlier ones named with `set_symbol`.
@@ -690,6 +748,29 @@ contains no matching or agent logic of its own:
 7. `decomp run --resume <id>` (or Resume in the GUI) reopens the directory: finished functions stay
    finished, and interrupted, stopped and failed ones start again with a fresh conversation whose
    brief carries their attempts, notes and best source. The event numbering continues the log.
+
+## Key flow: `decomp relink`
+
+1. The project's units (`units.txt`, link order) and the image layout: the PDB's contributions, or the
+   units cut from the symbols.
+2. Each code unit with a source is compiled and checked (`check_unit()`): when every function of the
+   unit is in the source and the object fills the unit's place exactly, the unit is linked from that
+   object; otherwise, and for library units, from a split object of its original bytes. `--source` and
+   `--split` override the choice, `--all-split` carries every unit's bytes.
+3. What the objects need from each other: the names compiled objects reference are defined by the
+   split objects that hold their addresses (or tied to a compiled object's own name with
+   `/ALTERNATENAME`); a pooled COMDAT a compiled unit repeats is defined by the split unit that has it,
+   so the linker keeps that copy; the entry point, the exports, the TLS and load configuration
+   directories' symbols, and x86 SAFESEH handlers are provided the same way; every import is pulled in
+   with `/INCLUDE`. Split objects carry the `@comp.id` of the compiler that made their originals (the
+   PDB's compile record matched against the Rich header), so link.exe counts the same objects.
+4. Import libraries are written from the image's import table (names, hints, ordinals, and whether
+   each import has a jump thunk), unless `decomp.json`'s `link.libraries` cover the DLL.
+5. The original linker (`link.linker`, else lld-link for clang-cl and link.exe for MSVC toolchains)
+   links the objects in link order and the libraries, with `image_link_flags()` and `link.flags`.
+6. `compare_images()` stamps the result with the original's identity fields and compares; the result
+   (units and why, notes, the linker's command and output, the comparison) is written to
+   `.decomp/relink/result.json`.
 
 ## Threading model
 

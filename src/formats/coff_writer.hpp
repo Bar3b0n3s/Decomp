@@ -68,6 +68,8 @@ public:
     void add_relocation(u32 section, u32 offset, u32 symbol, u16 type);
     // Linker directives (.drectve), added to one section, each after a space.
     void add_directive(std::string_view directive);
+    // x86 /SAFESEH: functions registered as exception handlers (.sxdata, the symbols' table indexes).
+    void add_safe_seh_handler(u32 symbol) { safe_seh_.push_back(symbol); }
 
     // The object file. Fails when it would have more sections than a regular COFF header can count.
     Result<std::vector<std::byte>> write() const;
@@ -100,6 +102,7 @@ private:
     std::map<std::string, u32, std::less<>> undefined_;
     std::map<std::string, u32, std::less<>> defined_;
     std::string directives_;
+    std::vector<u32> safe_seh_;
 };
 
 // Short import object types and name types (IMPORT_OBJECT_*).
@@ -127,7 +130,10 @@ std::optional<u8> import_name_type_for(const ImportEntry& entry, u16 machine);
 // descriptor, the null import descriptor and the null thunk objects, then a short import object per entry
 // in the given order, with both linker members and the long names member. Fails for an entry whose name no
 // name type gives.
-Result<std::vector<std::byte>> write_import_library(std::string_view dll, u16 machine, std::span<const ImportEntry> entries);
+// `comp_id`, when given, is the descriptor objects' @comp.id (the import library tool's, which link.exe counts
+// in the Rich header).
+Result<std::vector<std::byte>> write_import_library(std::string_view dll, u16 machine, std::span<const ImportEntry> entries,
+                                                    std::optional<u32> comp_id = std::nullopt);
 
 // A member of an archive written by write_archive().
 struct ArchiveMember {
