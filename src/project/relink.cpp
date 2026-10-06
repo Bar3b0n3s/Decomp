@@ -119,13 +119,14 @@ Result<ComposedUnit> compose_unit_source(const Project& project, const Program& 
         return make_error(ErrorCode::invalid_argument, "{} is not a code unit with a source file (units.txt source=)", unit_name);
     ComposedUnit out;
     out.unit = *unit;
-    // The whole translation unit starts as the prelude; each function's definition then becomes its entry.
-    // (A unit whose functions are all folded into others' keeps its source as the prelude.)
+    // The whole translation unit starts as the prelude; each function's definition then becomes its entry,
+    // and nothing else of the source joins again. (A unit whose functions are all folded into others' keeps
+    // its source as the prelude.)
     matching::UnitSource composed = matching::UnitSource::parse(source);
     composed.functions.clear();
     for (u64 va : unit_functions(program, *unit)) {
         const auto* f = program.symbols().at(va);
-        if (auto r = matching::compose_function(composed, va, matching::definition_names(*f), source); !r)
+        if (auto r = matching::compose_function(composed, va, matching::definition_names(*f), source, false); !r)
             out.rejected.emplace_back(va, r.error().message);
     }
     // In the order the translation unit defines them: a compiler lays out what it does not give sections of

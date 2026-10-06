@@ -191,6 +191,29 @@ TEST_CASE("matched functions move into their units' sources and verify byte-exac
     }
 }
 
+TEST_CASE("composing a whole translation unit: its prelude once, declarations a compiler takes") {
+    // As compose_unit_source() does: the translation unit is the prelude, and each function's definition
+    // becomes its entry, leaving a declaration for the functions before it.
+    const std::string tu = "// helpers\n"
+                           "#if defined(_M_IX86)\n"
+                           "__declspec(naked) void helper(void) { __asm { ret } }\n"
+                           "#endif\n"
+                           "int first(int x) { return x + 1; }\n";
+    UnitSource unit = UnitSource::parse(tu);
+    REQUIRE(compose_function(unit, 0x401000, names({"helper"}), tu, false));
+    REQUIRE(compose_function(unit, 0x401010, names({"first"}), tu, false));
+    const std::string text = unit.render();
+    // Nothing of the source joins again.
+    CHECK(std::ranges::count(text, '#') == 2);
+    CHECK(text.find("// helpers") == text.rfind("// helpers"));
+    // MSVC takes __declspec(naked) only on a definition.
+    CHECK(text.find("#if defined(_M_IX86)\nvoid helper(void);\n#endif\n") != std::string::npos);
+    CHECK(text.find("__declspec(naked) void helper(void) {") != std::string::npos);
+    CHECK(text.find("int first(int x);") != std::string::npos);
+    REQUIRE(unit.functions.size() == 2);
+    CHECK(unit.functions[0].name == "helper");
+}
+
 TEST_CASE("matches join a guessed unit's source only once it has one") {
     auto dir = fs::TempDir::create("decomp-matching-unit").value();
     auto p = project::Project::init(dir.path() / "p", test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86").value();

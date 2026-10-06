@@ -46,9 +46,12 @@ struct UnitSource {
 // #pragma and #line directives right before and after it; an earlier entry for `va` is replaced. The
 // source's other items join the prelude unless the unit has them already: the same item (ignoring
 // comments and spacing), a definition of the same function, or a static declaration where the item
-// declares the function without `static`. Conditional directives (#if ... #endif) always join. Fails
-// when the source has no such definition at its top level (not inside a class or namespace).
-Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::string> names, std::string_view source);
+// declares the function without `static`. Conditional directives (#if ... #endif) always join. With
+// `join` false nothing else joins: the prelude is `source` already (a whole translation unit composed
+// function by function). A definition the prelude has becomes a declaration (without __declspec(naked),
+// which only a definition may have). Fails when the source has no such definition at its top level (not
+// inside a class or namespace).
+Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::string> names, std::string_view source, bool join = true);
 
 // The names a function's definition may carry in a source: its qualified name ("Player::Hit"), its PDB
 // name and its C name without decoration ("add" for _add@8).

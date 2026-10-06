@@ -34,6 +34,29 @@ bool after_blank_line(std::string_view text) {
     return newlines >= 2;
 }
 
+// A function's head without `__declspec(naked)`: MSVC takes it only on a definition.
+std::string without_naked(std::string head) {
+    for (usize at = head.find("__declspec"); at != std::string::npos; at = head.find("__declspec", at + 1)) {
+        usize i = at + 10;
+        auto skip_space = [&] {
+            while (i < head.size() && (head[i] == ' ' || head[i] == '\t')) ++i;
+        };
+        skip_space();
+        if (i >= head.size() || head[i] != '(') continue;
+        ++i;
+        skip_space();
+        if (head.compare(i, 5, "naked") != 0) continue;
+        i += 5;
+        skip_space();
+        if (i >= head.size() || head[i] != ')') continue;
+        ++i;
+        skip_space();
+        head.erase(at, i - at);
+        return head;
+    }
+    return head;
+}
+
 bool is_conditional(const SourceItem& item) {
     if (item.kind != ItemKind::preprocessor) return false;
     for (std::string_view d : {"if", "ifdef", "ifndef", "elif", "else", "endif"})
@@ -105,7 +128,7 @@ const UnitSource::Function* UnitSource::find(u64 va) const {
 
 bool UnitSource::remove(u64 va) { return std::erase_if(functions, [&](const Function& f) { return f.va == va; }) > 0; }
 
-Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::string> names, std::string_view source) {
+Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::string> names, std::string_view source, bool join) {
     const auto items = parse_source_items(source);
     std::optional<usize> def;
     for (usize i = 0; i < items.size() && !def; ++i)
@@ -139,7 +162,7 @@ Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::str
             const std::string_view body = item_body(*it);
             const auto brace = body.find('{');
             if (entry.name.find("::") == std::string::npos && brace != std::string_view::npos) {
-                auto declaration = parse_source_items(std::string(trimmed(body.substr(0, brace))) + ";");
+                auto declaration = parse_source_items(without_naked(std::string(trimmed(body.substr(0, brace)))) + ";");
                 if (declaration.size() == 1) {
                     *it++ = std::move(declaration.front());
                     continue;
@@ -151,6 +174,11 @@ Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::str
         } else {
             ++it;
         }
+    }
+    if (!join) {
+        auto at = std::ranges::upper_bound(unit.functions, va, {}, &UnitSource::Function::va);
+        unit.functions.insert(at, std::move(entry));
+        return {};
     }
     std::set<std::string> seen;
     for (const auto& p : unit.prelude) seen.insert(normalized(item_body(p)));
