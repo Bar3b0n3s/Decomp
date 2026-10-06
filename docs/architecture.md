@@ -462,8 +462,9 @@ padding after them. Contributions of the linker's own module and of import libra
 `linker`: no object carries them. An x64 image's exception table is the exception: link.exe's PDBs give
 the sorted `.pdata` to the linker (or to no module), and without a PDB no symbol is in it, though each
 entry came from the object of the function it describes, so `attribute_exception_table()` gives each
-entry back to that function's unit, as a 12-byte `.pdata` contribution (a COMDAT with its function's). `ImageLayout::origins` keeps what compiled each unit (language and
-build, from the PDB's compile records). The relink and the unit checks work from this layout.
+entry back to that function's unit, as a 12-byte `.pdata` contribution (a COMDAT with its function's).
+`ImageLayout::origins` keeps what compiled each unit (language and build, from the PDB's compile
+records). The relink and the unit checks work from this layout.
 
 `TypeCatalog::field_ref()` names the field at an offset as C++ would: through nested structs and
 arrays (`pos.y`, `grid[1][2]`, `pair.b`), a base's fields by their own names, the table pointers as

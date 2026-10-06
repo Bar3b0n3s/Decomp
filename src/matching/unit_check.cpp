@@ -228,6 +228,7 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
     // unit is not in the source, or the object differs), and sections before the first anchored one
     // end where the next begins.
     std::vector<std::string> gaps;
+    const bool sorted_table = image.machine() == pe::machine::amd64;
     auto place_blocks = [&] {
         placed.clear();
         gaps.clear();
@@ -263,6 +264,19 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
             }
         }
         for (auto& [name, members] : blocks) {
+            // x64 .pdata: the linker sorts the exception table by address, so each section is where its
+            // function's entries are, whatever came before it in the object.
+            if (sorted_table && name == ".pdata") {
+                for (usize i : members) {
+                    if (discarded.contains(i) || anchors[i].empty()) continue;
+                    const auto& sec = out.sections[i];
+                    placed[i] = anchors[i].begin()->first;
+                    for (const auto& [rva, a] : anchors[i])
+                        if (rva != placed[i])
+                            gaps.push_back(std::format("{} {} is placed at {:#x}, but {} puts it at {:#x}", sec.name, sec.symbol, placed[i], a.why, rva));
+                }
+                continue;
+            }
             std::optional<u32> cursor;
             std::string previous;
             std::vector<usize> pending;

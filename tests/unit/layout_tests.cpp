@@ -259,6 +259,47 @@ TEST_CASE("unit check: the fixture's units compiled from their sources match the
     }
 }
 
+TEST_CASE("unit check: x64 .pdata goes where the sorted exception table has its function's entry") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl not found; skipping");
+        return;
+    }
+    // late() comes first in the object, but its section's name puts it after early() in the image, and the
+    // linker sorts the exception table by address: the object's .pdata sections are not in the table's order.
+    auto tmp = fs::TempDir::create("decomp-unit-check-pdata").value();
+    const std::string source = "#define NOINLINE __declspec(noinline)\n"
+                               "int callee(int x);\n"
+                               "#pragma code_seg(\".text$z\")\n"
+                               "NOINLINE int late(int x) { return callee(x) + 1; }\n"
+                               "#pragma code_seg(\".text$a\")\n"
+                               "NOINLINE int early(int x) { return callee(x) + 2; }\n"
+                               "#pragma code_seg()\n"
+                               "extern \"C\" void entry() { early(late(3)); }\n";
+    REQUIRE(fs::write_text(tmp.path() / "order.cpp", source));
+    REQUIRE(fs::write_text(tmp.path() / "callee.cpp", "__declspec(noinline) int callee(int x) { return x * 3; }\n"));
+    const auto exe = test::build_program(Arch::x64, *tools, tmp.path() / "target", {tmp.path() / "order.cpp", tmp.path() / "callee.cpp"}, "order");
+    REQUIRE(exe);
+    auto program = Program::open(*exe);
+    REQUIRE(program);
+    const u64 late = program->resolve("?late@@YAHH@Z").value();
+    const u64 early = program->resolve("?early@@YAHH@Z").value();
+    REQUIRE(early < late);
+    const auto layout = pdb_layout(*program);
+    auto setup = test::clang_setup(Arch::x64, tools->clang_cl, tmp.path() / "work", tmp.path() / "cache");
+    auto object = compile(setup, source, "order.cpp");
+    const auto result = check_unit(*program, layout, *object, "order.obj", unit_functions(*program, layout, "order.obj"));
+    CHECK_MESSAGE(result.ok(), result.summary());
+    CHECK(result.problems.empty());
+    // Each function's entry is where the table has it.
+    for (const auto& s : result.sections) {
+        if (s.name != ".pdata") continue;
+        CAPTURE(s.symbol);
+        CHECK(s.state == PlacementState::equal);
+    }
+    CHECK(std::ranges::count(result.sections, std::string(".pdata"), &PlacedSection::name) >= 3);
+}
+
 TEST_CASE("link order: the order the image shows, not the module list's") {
     // As link.exe's PDBs have it: the modules listed c, a, b; the image holds a's code before c's and
     // a's, b's and c's data in that order. b has no code; d holds nothing.

@@ -351,6 +351,8 @@ original's code and data there. It works from the image layout (what each unit c
    values its placed targets give. The linker puts an object's sections of one name together in
    object order, so one placed section places the others of its name; a gap or an overlap in such a
    row (a function missing from the source, a section of another size) is a problem the check reports.
+   x64 `.pdata` is the exception: the linker sorts the exception table by address, so each `.pdata`
+   section stays where its relocations found its function's entry.
 2. **Pooled duplicates and folded functions.** A COMDAT that references put in another unit's
    contribution is a copy the linker discards in favor of that unit's: a string literal or a
    floating-point constant pooled across units, a function folded by `/OPT:ICF` into another unit's

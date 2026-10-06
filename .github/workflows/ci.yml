@@ -271,6 +271,10 @@ jobs:
             build/corpus-msvc-x64/obj/*.obj
             build/corpus-msvc-x86/project/.decomp/relink/out/corpus.exe
             build/corpus-msvc-x64/project/.decomp/relink/out/corpus.exe
+            build/corpus-msvc-x86/project/.decomp/relink/result.json
+            build/corpus-msvc-x64/project/.decomp/relink/result.json
+            build/corpus-msvc-x86/project/.decomp/relink/objects/*.obj
+            build/corpus-msvc-x64/project/.decomp/relink/objects/*.obj
             build/msvc-roundtrip-x86/basic.*
             build/msvc-roundtrip-x64/basic.*
             build/msvc-roundtrip-x86/other.obj
@@ -279,4 +283,6 @@ jobs:
             build/msvc-roundtrip-x64/project/.decomp/relink/out/basic.exe
             build/msvc-roundtrip-x86/project/.decomp/relink/objects/*.obj
             build/msvc-roundtrip-x64/project/.decomp/relink/objects/*.obj
+            build/msvc-roundtrip-x86/project/.decomp/relink/result.json
+            build/msvc-roundtrip-x64/project/.decomp/relink/result.json
           if-no-files-found: ignore
