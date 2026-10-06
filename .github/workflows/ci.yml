@@ -248,13 +248,17 @@ jobs:
         shell: pwsh
         run: tests\corpus\build_corpus.ps1 -Arch x86 -MinExact 98
 
+      # x64 runs after an x86 failure too: each architecture's result is worth having.
       - name: MSVC round trip (x64)
+        if: ${{ !cancelled() }}
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - shell: pwsh
+      - if: ${{ !cancelled() }}
+        shell: pwsh
         run: tests\integration\msvc_roundtrip.ps1 -Arch x64
       - name: Function bounds corpus (MSVC x64)
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: tests\corpus\build_corpus.ps1 -Arch x64 -MinExact 98
 
