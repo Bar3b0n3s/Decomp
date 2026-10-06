@@ -119,15 +119,14 @@ public:
         parallel_for(todo.size(), threads, [&](usize i) {
             const Configuration config{setup_.toolchain, flags_of(base_, options_.groups, todo[i])};
             auto e = search::evaluate(program_, setup_, config, probes_);
-            if (e.cancelled) return;
-            scores[i] = e.score;
-            if (options_.log) options_.log->add(choice_label(options_.groups, todo[i]), e.score);
+            if (!e.cancelled) scores[i] = e.score;
         }, [&] { return cancelled(); });
-        for (usize i = 0; i < todo.size(); ++i) {
+        for (usize i = 0; i < todo.size(); ++i) {  // logged in the order they were made
             if (!scores[i]) {
                 cancelled_ = true;  // a job was skipped or its compile cancelled
                 continue;
             }
+            if (options_.log) options_.log->add(choice_label(options_.groups, todo[i]), *scores[i]);
             memo_.emplace(std::move(todo[i]), *scores[i]);
             ++evaluated_;
         }

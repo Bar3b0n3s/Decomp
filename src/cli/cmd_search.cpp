@@ -4,9 +4,13 @@
 #include "core/log.hpp"
 #include "core/strings.hpp"
 #include "matching/toolchain.hpp"
+#include "matching/unit_source.hpp"
 #include "project/project.hpp"
 #include "project/units.hpp"
+#include "viewmodel/line_diff.hpp"
+#include "search/apply.hpp"
 #include "search/flags.hpp"
+#include "search/permute.hpp"
 #include "search/probes.hpp"
 #include "search/runs.hpp"
 
@@ -180,8 +184,7 @@ Result<int> search_flags_command(const GlobalOptions& g, const FlagArgs& a) {
     const bool better = result.score.better_than(result.start_score);
     bool applied = false;
     if (a.apply && project && better) {
-        project->config().flags = result.flags;
-        TRY(project->save_config());
+        TRY(search::apply_configuration(*project, result.flags));
         applied = true;
     }
     if (g.json) {
@@ -209,6 +212,110 @@ Result<int> search_flags_command(const GlobalOptions& g, const FlagArgs& a) {
         else if (a.apply && !better) std::println("the project's flags do as well: nothing to apply");
         else if (a.apply) std::println("--apply needs a project");
         else if (better && project) std::println("--apply sets them as the project's flags");
+    }
+    return result.score.complete() ? 0 : 2;
+}
+
+struct PermuteArgs {
+    ProbeArgs probes;
+    usize limit = 500, batch = 0;
+    int threads = 0, seconds = 0;
+    u64 seed = 1;
+    std::string out;
+    bool apply = false, no_record = false;
+};
+
+Result<int> search_permute_command(const GlobalOptions& g, const PermuteArgs& a) {
+    if (a.probes.sources.size() > 1) return make_error(ErrorCode::invalid_argument, "the permuter takes one --source");
+    if (!a.probes.units.empty() || a.probes.verified || a.probes.whole)
+        return make_error(ErrorCode::invalid_argument, "the permuter takes a function's best attempt or a --source file");
+    auto project = command_project(g, a.probes);
+    TRY_ASSIGN(auto program, open_program(g, a.probes.binary));
+    TRY_ASSIGN(auto setup, make_match_setup(g, a.probes.toolchain, a.probes.flags));
+    ProbeArgs pa = a.probes;
+    if (pa.sources.empty()) {
+        if (pa.functions.size() != 1) return make_error(ErrorCode::invalid_argument, "give a function (its best attempt is permuted), or --source <file>");
+        pa.attempt = true;
+    }
+    TRY_ASSIGN(auto probes, make_probes(pa, project ? &*project : nullptr, program));
+    const auto& probe = probes.probes.front();
+    std::vector<std::string> names;
+    for (u64 va : probe.functions)
+        if (const Symbol* fn = program.symbols().at(va))
+            for (auto& n : matching::definition_names(*fn)) names.push_back(std::move(n));
+    const search::Configuration configuration{setup.toolchain, setup.flags};
+
+    search::PermuteOptions options;
+    options.max_candidates = a.limit;
+    options.batch = a.batch;
+    options.threads = a.threads;
+    options.seed = a.seed;
+    options.time_limit = std::chrono::seconds(a.seconds);
+    auto stop = std::make_shared<std::atomic<bool>>(false);
+    options.cancelled = [stop] { return stop->load(); };
+
+    const Json settings{{"toolchain", setup.toolchain.name}, {"flags", setup.flags},   {"file", probe.file_name}, {"limit", a.limit},
+                        {"batch", a.batch},                  {"seed", a.seed},        {"seconds", a.seconds}};
+    std::unique_ptr<search::RunWriter> writer;
+    if (project && !a.no_record) {
+        TRY_ASSIGN(writer, search::RunWriter::create(search::search_dir(*project), search::SearchKind::permute, probes.target, probes.functions, settings));
+        TRY(writer->write_file("start-" + probe.file_name, probe.source));
+    }
+    const bool show = !g.json && !g.quiet;
+    if (show)
+        std::println("permuting {} ({}, {} function{}) with {}", probes.target, probe.file_name, probe.functions.size(), probe.functions.size() == 1 ? "" : "s",
+                     configuration.label());
+    search::CandidateLog log(writer.get(), [show](const search::LogEntry& e) {
+        if (show && e.best) std::println("  #{:<5} {}  {}", e.index, e.score.text(), e.label);
+    });
+    options.log = &log;
+
+    search::PermuteResult result;
+    {
+        InterruptWatcher watcher([stop](int) {
+            log::warn("stopping: the candidates being compiled finish first");
+            stop->store(true);
+        });
+        result = search::permute(program, setup, configuration, probe, names, options);
+    }
+    if (!result.error.empty() && !g.json) log::warn("{}", result.error);
+    Json result_json = search::to_json(result);
+    if (writer) {
+        TRY(writer->write_file("best-" + probe.file_name, result.source));
+        TRY(writer->finish(result.cancelled ? search::RunStatus::cancelled : !result.error.empty() ? search::RunStatus::failed : search::RunStatus::done,
+                           result_json, result.error));
+    }
+    if (!a.out.empty()) TRY(fs::write_text(fs::from_utf8(a.out), result.source));
+
+    const bool better = result.score.better_than(result.start_score);
+    std::string applied;
+    if (a.apply) {
+        if (!project) return make_error(ErrorCode::invalid_argument, "--apply needs a project");
+        if (probe.functions.size() != 1) return make_error(ErrorCode::invalid_argument, "--apply keeps the source of one function: give it");
+        if (better || result.score.complete()) {
+            const Symbol* fn = program.symbols().at(probe.functions.front());
+            TRY_ASSIGN(auto kept, search::apply_source(*project, program, setup, *fn, result.source, result.score.match_percent, result.score.complete(),
+                                                       "found by the permuter"));
+            applied = kept.message;
+        } else {
+            applied = "the permuter found nothing better: nothing kept";
+        }
+    }
+    if (g.json) {
+        result_json["source"] = result.source;
+        if (writer) result_json["run"] = writer->record().id;
+        if (!applied.empty()) result_json["applied"] = applied;
+        print_json(result_json);
+    } else {
+        std::println("{}best: {} after {} candidates (start: {})", result.cancelled ? "stopped; " : "", result.score.text(), result.candidates,
+                     result.start_score.text());
+        if (better) {
+            std::println("edits: {}", join(result.steps, "; "));
+            std::print("{}", vm::to_unified(vm::diff_lines(probe.source, result.source), "start/" + probe.file_name, "best/" + probe.file_name));
+        }
+        if (writer) std::println("run: {}", writer->record().id);
+        if (!applied.empty()) std::println("{}", applied);
+        else if (better && project && probe.functions.size() == 1) std::println("--apply keeps it in the project");
     }
     return result.score.complete() ? 0 : 2;
 }
@@ -279,6 +386,21 @@ void register_search_commands(CLI::App& app, GlobalOptions& g) {
         cmd->add_flag("--apply", a->apply, "Set the best flags as the project's (when they do better than its own)");
         cmd->add_flag("--no-record", a->no_record, "Do not keep the run under .decomp/search/");
         cmd->callback([&g, a] { throw CLI::RuntimeError(run(g, [&] { return search_flags_command(g, *a); })); });
+    }
+    {
+        auto* cmd = search->add_subcommand("permute", "Permute a function's source (its best attempt, or --source) toward the target's bytes "
+                                                      "(exit code 0 = every function byte-exact)");
+        auto a = std::make_shared<PermuteArgs>();
+        add_probe_options(cmd, a->probes);
+        cmd->add_option("--limit", a->limit, "Candidates to compile, at most");
+        cmd->add_option("--batch", a->batch, "Candidates per round (default: twice the threads, at least 8)");
+        cmd->add_option("--seed", a->seed, "Seed of the random edits");
+        cmd->add_option("--threads", a->threads, "Candidates compiled at once (default: as many as compiles may run)");
+        cmd->add_option("--time", a->seconds, "Seconds to search, at most (default: no limit)");
+        cmd->add_option("--out", a->out, "Write the best source to this file");
+        cmd->add_flag("--apply", a->apply, "Keep the best source: verified when byte-exact, else as the function's best attempt");
+        cmd->add_flag("--no-record", a->no_record, "Do not keep the run under .decomp/search/");
+        cmd->callback([&g, a] { throw CLI::RuntimeError(run(g, [&] { return search_permute_command(g, *a); })); });
     }
     search->add_subcommand("list", "List the project's searches, newest first")->callback([&g] {
         throw CLI::RuntimeError(run(g, [&] { return search_list(g); }));

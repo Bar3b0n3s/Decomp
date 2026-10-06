@@ -5,6 +5,7 @@
 #include "formats/coff.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <set>
 
@@ -200,6 +201,19 @@ Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::str
             if (p.kind == ItemKind::function && p.name == name) return true;
         return false;
     };
+    // What comes after the definition in the source and uses the function goes before it in the unit
+    // source: a declaration made from the definition's head comes first (a member function's class
+    // declares it already).
+    bool declared = entry.name.empty() || entry.name.find("::") != std::string::npos;
+    for (const auto& p : unit.prelude)
+        if (p.name == entry.name && (p.function_declaration || p.kind == ItemKind::function)) declared = true;
+    auto uses_function = [&](const SourceItem& item) {
+        const std::string text = normalized(item_body(item));
+        auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '$'; };
+        for (usize at = text.find(entry.name); at != std::string::npos; at = text.find(entry.name, at + 1))
+            if ((at == 0 || !ident(text[at - 1])) && (at + entry.name.size() >= text.size() || !ident(text[at + entry.name.size()]))) return true;
+        return false;
+    };
     for (usize i = 0; i < items.size(); ++i) {
         if (i >= first && i <= last) continue;
         const SourceItem& item = items[i];
@@ -208,6 +222,17 @@ Result<void> compose_function(UnitSource& unit, u64 va, std::span<const std::str
             if (item.kind == ItemKind::function && !item.name.empty() && defined_in_unit(item.name)) continue;
             if (item.function_declaration && !item.is_static && is_static_in_unit(item.name)) continue;
             if (!seen.insert(normalized(item_body(item))).second) continue;
+        }
+        if (i > last && !declared && (item.kind == ItemKind::function || item.kind == ItemKind::declaration) && uses_function(item)) {
+            const std::string_view body = item_body(items[*def]);
+            if (const auto brace = body.find('{'); brace != std::string_view::npos) {
+                auto declaration = parse_source_items(without_naked(std::string(trimmed(body.substr(0, brace)))) + ";");
+                if (declaration.size() == 1) {
+                    declaration.front().text = "\n\n" + declaration.front().text;  // a blank line before it
+                    unit.prelude.push_back(std::move(declaration.front()));
+                }
+            }
+            declared = true;
         }
         unit.prelude.push_back(item);
     }

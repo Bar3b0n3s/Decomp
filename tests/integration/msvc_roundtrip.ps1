@@ -88,6 +88,21 @@ if ($LASTEXITCODE -ne 0) { throw "flag search did not find the fixture's flags w
 if ($LASTEXITCODE -ne 0) { throw "the units do not verify with the flags the search applied ($Arch)" }
 Write-Host "MSVC flag search ($Arch): the fixture's flags recovered"
 
+# The permuter with cl.exe: permute.cpp's program built by cl.exe and link.exe; its functions, reordered in
+# permute_perturbed.cpp (independent statements and declarations), are permuted back to byte-exact matches.
+& cl.exe @cflags "$src\permute.cpp" "/Fo$out\permute.obj"
+if ($LASTEXITCODE -ne 0) { throw "cl.exe failed on permute.cpp" }
+& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug /incremental:no "/out:$out\permute.exe" "/pdb:$out\permute.pdb" `
+    "$out\permute.obj" kernel32.lib
+if ($LASTEXITCODE -ne 0) { throw "link.exe failed on permute.obj" }
+$permuteProject = Join-Path $out "permute-project"
+if (Test-Path $permuteProject) { Remove-Item -Recurse -Force $permuteProject }
+& $decomp init "$out\permute.exe" --dir $permuteProject --toolchain "msvc-$Arch" --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+if ($LASTEXITCODE -ne 0) { throw "decomp init failed (permute)" }
+& $decomp -C $permuteProject search permute --source "$src\permute_perturbed.cpp"
+if ($LASTEXITCODE -ne 0) { throw "the permuter did not turn permute_perturbed.cpp into byte-exact matches with cl.exe ($Arch)" }
+Write-Host "MSVC permuter ($Arch): the reordered sources permuted back to byte-exact matches"
+
 # The fixtures' types, declared in project headers (tests/fixtures/include), compile with cl.exe /Z7 to
 # the layouts in the PDBs link.exe wrote: a struct, and classes with virtual functions, multiple and
 # virtual inheritance.

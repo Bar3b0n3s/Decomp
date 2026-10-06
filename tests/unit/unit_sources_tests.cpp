@@ -91,6 +91,32 @@ TEST_CASE("a function's entry takes over a definition another function's source 
     CHECK(after.find("#ifndef LIMIT\n#define LIMIT 8\n#endif\n") != std::string::npos);
 }
 
+TEST_CASE("a function composed from a whole translation unit stays declared for what came after it") {
+    // weigh's source is the whole file: entry, after weigh there, calls it. In the unit source entry is in the
+    // prelude, before weigh's entry: a declaration made from weigh's head goes before it.
+    const std::string file = "struct P { int hp; };\n"
+                             "static int weigh(const P* p) { return p->hp * 4; }\n"
+                             "int unrelated(int x) { return x; }\n"
+                             "// the entry point\n"
+                             "extern \"C\" int entry() { P p{3}; return weigh(&p); }\n";
+    UnitSource unit;
+    REQUIRE(compose_function(unit, 0x401020, names({"weigh"}), file));
+    CHECK(unit.render() == "struct P { int hp; };\n"
+                           "int unrelated(int x) { return x; }\n"
+                           "\n"
+                           "static int weigh(const P* p);\n"
+                           "// the entry point\n"
+                           "extern \"C\" int entry() { P p{3}; return weigh(&p); }\n"
+                           "\n"
+                           "// FUNCTION: 0x00401020\n"
+                           "static int weigh(const P* p) { return p->hp * 4; }\n");
+    // A member function's class declares it already; nothing is added.
+    UnitSource member;
+    REQUIRE(compose_function(member, 0x401000, names({"P::Get"}),
+                             "struct P { int hp; int Get(); };\nint P::Get() { return hp; }\nint use(P* p) { return p->Get(); }\n"));
+    CHECK(member.render() == "struct P { int hp; int Get(); };\nint use(P* p) { return p->Get(); }\n\n// FUNCTION: 0x00401000\nint P::Get() { return hp; }\n");
+}
+
 TEST_CASE("matched functions move into their units' sources and verify byte-exact there") {
     auto tools = test::find_llvm();
     if (!tools) {

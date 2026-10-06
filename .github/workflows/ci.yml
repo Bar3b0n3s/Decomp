@@ -173,6 +173,22 @@ jobs:
             ./bin/Release/decomp -C "$p" units verify
             ./bin/Release/decomp -C "$p" search list
           done
+          # The permuter: permute.cpp's functions, reordered in permute_perturbed.cpp (independent statements and
+          # declarations), permuted back to byte-exact matches; one of them kept in the project, where it verifies.
+          for arch in x86 x64; do
+            target=$([ $arch = x86 ] && echo i686-pc-windows-msvc || echo x86_64-pc-windows-msvc)
+            d="$(mktemp -d)"
+            /usr/lib/llvm-18/bin/clang-cl --target=$target /nologo /c /O2 /Gy /GS- /GR- /EHs-c- /Zl /Z7 /Brepro \
+              tests/fixtures/src/permute.cpp "/Fo$d/permute.obj"
+            /usr/lib/llvm-18/bin/lld-link /nologo /nodefaultlib /entry:entry /subsystem:console /debug /Brepro \
+              "/out:$d/permute.exe" "/pdb:$d/permute.pdb" "$d/permute.obj" tests/fixtures/$arch/kernel32.lib
+            ./bin/Release/decomp init "$d/permute.exe" --dir "$d/project" --toolchain clang-cl-$arch \
+              --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+            ./bin/Release/decomp -C "$d/project" search permute --source tests/fixtures/src/permute_perturbed.cpp
+            ./bin/Release/decomp -C "$d/project" search permute Player::Hit --source tests/fixtures/src/permute_perturbed.cpp --apply
+            ./bin/Release/decomp -C "$d/project" units verify
+            ./bin/Release/decomp -C "$d/project" search list
+          done
 
       - name: Function bounds corpus (clang-cl)
         run: |
