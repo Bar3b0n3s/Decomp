@@ -19,6 +19,43 @@
 
 using namespace decomp;
 
+TEST_CASE("units from a PDB whose modules list several files: each unit's source is its own") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    // first.cpp's line information names its header too (an inline function's code), so its module lists
+    // two files; second.cpp's files follow them in the PDB.
+    auto tmp = fs::TempDir::create("decomp-units-files").value();
+    REQUIRE(fs::write_text(tmp.path() / "shared.h", "#pragma once\ninline int twice(volatile int* p) { return *p * 2; }\n"));
+    REQUIRE(fs::write_text(tmp.path() / "first.cpp",
+                           "#include \"shared.h\"\nvolatile int g_first = 2;\nint second_value(int);\n"
+                           "extern \"C\" int entry() { return twice(&g_first) + second_value(1); }\n"));
+    REQUIRE(fs::write_text(tmp.path() / "second.cpp", "int second_value(int x) { return x + 40; }\n"));
+    for (const Arch arch : {Arch::x86, Arch::x64}) {
+        CAPTURE(to_string(arch));
+        const auto dir = tmp.path() / std::string(to_string(arch));
+        const auto exe = test::build_program(arch, *tools, dir, {tmp.path() / "first.cpp", tmp.path() / "second.cpp"}, "files");
+        REQUIRE(exe);
+        const Program p = Program::open(*exe).value();
+        const auto pdb = pdb::Reader::load(dir / "files.pdb").value();
+        REQUIRE(pdb.modules().size() >= 2);
+        CHECK(pdb.modules()[0].source_files.size() >= 2);
+        auto names = [](const pdb::Module& m) {
+            std::set<std::string> out;
+            for (const auto& f : m.source_files) out.insert(fs::to_utf8(fs::from_utf8(f).filename()));
+            return out;
+        };
+        CHECK(names(pdb.modules()[0]) == std::set<std::string>{"first.cpp", "shared.h"});
+        CHECK(names(pdb.modules()[1]) == std::set<std::string>{"second.cpp"});
+        const UnitLayout layout = units_from_pdb(pdb, p.image(), p.symbols());
+        REQUIRE(layout.units.size() >= 2);
+        CHECK(layout.units[0].source == "src/first.cpp");
+        CHECK(layout.units[1].source == "src/second.cpp");
+    }
+}
+
 TEST_CASE("units from a PDB: its module list in link order, every function in its module") {
     for (const char* arch : {"x86", "x64"}) {
         CAPTURE(arch);

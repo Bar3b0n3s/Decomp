@@ -1,3 +1,4 @@
+#include "core/strings.hpp"
 #include "formats/coff.hpp"
 #include "formats/pdb.hpp"
 #include "formats/pe.hpp"
@@ -201,6 +202,37 @@ TEST_CASE("PDB fixture procedures, publics, data, modules, contributions") {
         return c.module == 0 && c.rva <= add_proc->rva && add_proc->rva < c.rva + c.size;
     });
     CHECK(covered);
+}
+
+TEST_CASE("PDB modules: each module's source files are its own") {
+    // A module's files follow those of the modules before it; LLVM's PDBs number the modules where the
+    // substream's start indices should be, so a module with several files used to shift the rest.
+    for (const char* name : {"x86/basic.pdb", "x64/basic.pdb", "x86/eh.pdb", "x64/eh.pdb", "x86/rtti.pdb", "x64/libuser.pdb"}) {
+        const std::string pdb_name = name;
+        CAPTURE(pdb_name);
+        const auto reader = pdb::Reader::load(test::fixture(name)).value();
+        usize with_sources = 0;
+        for (const auto& m : reader.modules()) {
+            if (m.name == "* Linker *" || m.name.starts_with("Import:") || m.source_files.empty()) continue;
+            CAPTURE(m.name);
+            // An object compiled from <stem>.c or <stem>.cpp (named <stem>.obj, or <prefix>_<stem>.obj) lists
+            // that file among its own.
+            const auto slash = m.name.find_last_of("\\/");
+            const std::string stem = m.name.substr(slash == std::string::npos ? 0 : slash + 1, m.name.rfind('.') - (slash == std::string::npos ? 0 : slash + 1));
+            const bool own = std::ranges::any_of(m.source_files, [&](const std::string& f) {
+                const auto fs = f.find_last_of("\\/");
+                const std::string file = f.substr(fs == std::string::npos ? 0 : fs + 1);
+                const auto dot = file.rfind('.');
+                const std::string source = file.substr(0, dot);
+                const std::string ext = dot == std::string::npos ? std::string() : file.substr(dot);
+                return (ext == ".c" || ext == ".cpp") && (stem == source || stem.ends_with("_" + source));
+            });
+            const std::string files = join(m.source_files, ", ");
+            CHECK_MESSAGE(own, m.name << ": " << files);
+            ++with_sources;
+        }
+        CHECK(with_sources >= 1);
+    }
 }
 
 TEST_CASE("COFF object fixture: COMDAT sections, symbols, relocations") {

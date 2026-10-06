@@ -214,7 +214,7 @@ Import:kernel32.dll kind=import origin=pdb
 | Field | Meaning |
 |---|---|
 | name | The object as a link map names it: `player.obj`, `LIBCMT:printf.obj` for a member of `LIBCMT.lib` (a library match's `LIBCMT.LIB:printf.obj` is written so too), `kernel32:KERNEL32.dll` for an import library's member, `Import:KERNEL32.dll`, `* Linker *`. Quoted like a symbol name when it contains a space. |
-| `kind=` | `code` (the default; the program's own code), `library` (a static library's member), `import` (import stubs and descriptors) or `linker` (what the linker made) |
+| `kind=` | `code` (the default; the program's own code), `library` (a static library's member), `import` (import stubs and descriptors) or `linker` (what the linker made: its own module, and the export file link.exe makes from the objects' exports, `basic.exp`) |
 | `source=` | A code unit's source file, relative to the project: the file the PDB's line information names for the module (`src/basic.cpp`), else the object's stem with `.c` when its functions all have C names and `.cpp` otherwise. Directories of the original path are added where two units would share a file name (never a drive, `.` or `..`; characters other than letters, digits and `_-.+` and spaces become `_`). A source must be a C or C++ file (`.c`, `.cc`, `.cpp`, `.cxx`) under `src/` but not `src/functions/`, written with forward slashes and without `.` or `..`: `units.txt` with another is refused. |
 | `origin=` | Where the unit came from, in increasing order of trust: `analysis`, `map`, `pdb`, `user`. A line without `origin=` was written by hand (`user`). |
 

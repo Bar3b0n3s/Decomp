@@ -248,6 +248,14 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     for (const auto& name : options.split)
         if (std::ranges::find(units, name, &Unit::name) == units.end()) return make_error(ErrorCode::not_found, "no unit named '{}'", name);
     TRY_ASSIGN(const auto layout, project_image_layout(program, units));
+    // The units in the order the linker took them, which the image shows (link.exe's PDBs list the modules
+    // in another order).
+    std::vector<Unit> ordered;
+    {
+        std::vector<std::string> names;
+        for (const auto& u : units) names.push_back(u.name);
+        for (const auto& name : link_order(layout, names)) ordered.push_back(*std::ranges::find(units, name, &Unit::name));
+    }
 
     const auto dir = relink_dir(project);
     std::error_code ec;
@@ -260,7 +268,7 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
 
     // Which units come from their sources.
     std::map<std::string, usize> link_index;
-    for (const auto& unit : units) {
+    for (const auto& unit : ordered) {
         if (cancelled()) return make_error(ErrorCode::cancelled, "the relink was cancelled");
         UnitLink link;
         link.unit = unit;

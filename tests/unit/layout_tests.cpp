@@ -14,6 +14,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <set>
 
 using namespace decomp;
 using namespace decomp::matching;
@@ -188,4 +189,38 @@ TEST_CASE("unit check: the fixture's units compiled from their sources match the
         REQUIRE(extra != result.sections.end());
         CHECK(extra->state == PlacementState::differs);
     }
+}
+
+TEST_CASE("link order: the order the image shows, not the module list's") {
+    // As link.exe's PDBs have it: the modules listed c, a, b; the image holds a's code before c's and
+    // a's, b's and c's data in that order. b has no code; d holds nothing.
+    auto contribution = [](u32 rva, const char* section, const char* name, u32 characteristics, const char* unit) {
+        Contribution c;
+        c.rva = rva;
+        c.size = 0x10;
+        c.section = section;
+        c.name = name;
+        c.characteristics = characteristics;
+        c.unit = unit;
+        return c;
+    };
+    constexpr u32 code = 0x60500020, data = 0xC0400040, aligned_data = 0xC0300040;
+    ImageLayout layout;
+    layout.contributions = {
+        contribution(0x1000, ".text", ".text$mn", code, "a.obj"),       contribution(0x1010, ".text", ".text$mn", code, "c.obj"),
+        contribution(0x3000, ".data", ".data", data, "a.obj"),           contribution(0x3010, ".data", ".data", aligned_data, "b.obj"),
+        contribution(0x3020, ".data", ".data", data, "c.obj"),           contribution(0x3030, ".data", ".data", data, "c.obj"),
+    };
+    layout.contributions.push_back(contribution(0x2000, ".rdata", ".rdata", 0x40300040, "* Linker *"));
+    layout.contributions.back().linker = true;
+    CHECK(link_order(layout, {"c.obj", "d.obj", "a.obj", "b.obj", "* Linker *"}) ==
+          std::vector<std::string>{"d.obj", "a.obj", "b.obj", "c.obj", "* Linker *"});
+    // An order the image agrees with stays as it is.
+    CHECK(link_order(layout, {"a.obj", "b.obj", "c.obj", "d.obj"}) == std::vector<std::string>{"a.obj", "b.obj", "c.obj", "d.obj"});
+    // Groups that disagree (a cycle) still give every unit once.
+    layout.contributions.push_back(contribution(0x5000, ".tls", ".tls", data, "c.obj"));
+    layout.contributions.push_back(contribution(0x5010, ".tls", ".tls", data, "a.obj"));
+    const auto order = link_order(layout, {"c.obj", "a.obj", "b.obj"});
+    CHECK(order.size() == 3);
+    CHECK(std::set<std::string>(order.begin(), order.end()) == std::set<std::string>{"a.obj", "b.obj", "c.obj"});
 }

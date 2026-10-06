@@ -79,4 +79,10 @@ ImageLayout layout_from_units(const Program& program, const UnitLayout& units);
 // and the image section's name for the rest.
 void name_contributions(ImageLayout& layout, const pe::Image& image);
 
+// The order the linker took `units` in, as the image shows it: the input sections of one name (and
+// kind) are placed in link order, so each such group orders the units it holds; the groups' orders are
+// merged, with `units`' own order breaking ties (and placing units that hold nothing). link.exe's PDBs
+// list the modules in another order than the link's.
+std::vector<std::string> link_order(const ImageLayout& layout, const std::vector<std::string>& units);
+
 } // namespace decomp

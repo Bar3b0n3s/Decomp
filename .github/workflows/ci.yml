@@ -164,6 +164,30 @@ jobs:
             ./bin/Release/decomp bounds build/corpus/$arch/corpus.exe --truth build/corpus/$arch/corpus.map --min-exact 98 --units
           done
 
+      - name: Corpus relink (clang-cl)
+        run: |
+          # The corpus is a real program of 31 units. Relinked by lld-link from split objects alone, and with nine
+          # of its units (Zydis's decoder among them, and the SEH unit) built from their own sources composed
+          # into unit sources, the rest split: byte-identical both times.
+          z="$PWD/external/zydis"
+          for arch in x86 x64; do
+            p="$(mktemp -d)/corpus"
+            ./bin/Release/decomp init build/corpus/$arch/corpus.exe --dir "$p" --toolchain clang-cl-$arch \
+              --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c- \
+              --flag -DZYAN_NO_LIBC --flag -DZYDIS_STATIC_BUILD --flag -DZYCORE_STATIC_BUILD \
+              --flag "-I$z/include" --flag "-I$z/src" --flag "-I$z/dependencies/zycore/include"
+            ./bin/Release/decomp -C "$p" relink --all-split
+            ./bin/Release/decomp -C "$p" --json units > "$p/units.json"
+            for pair in src/Decoder.c:$z/src/Decoder.c src/Mnemonic.c:$z/src/Mnemonic.c src/Register.c:$z/src/Register.c \
+                        src/Utils.c:$z/src/Utils.c src/FormatterBuffer.c:$z/src/FormatterBuffer.c \
+                        src/zycore/src/String.c:$z/dependencies/zycore/src/String.c \
+                        src/seh.c:tests/corpus/seh.c src/rt.c:tests/corpus/rt.c src/main.c:tests/corpus/main.c; do
+              unit=$(python3 -c "import json,sys; print(next(u['name'] for u in json.load(open(sys.argv[1])) if u['source'] == sys.argv[2]))" "$p/units.json" "${pair%%:*}")
+              ./bin/Release/decomp -C "$p" units compose "$unit" "${pair#*:}"
+            done
+            ./bin/Release/decomp -C "$p" --json relink | python3 -c "import json,sys; r=json.load(sys.stdin); n=sum(u['mode'] == 'source' for u in r['units']); assert r['identical'] and n == 9, (n, r.get('comparison', {}).get('first'))"
+          done
+
   windows:
     name: Windows (MSVC)
     runs-on: windows-latest

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <tuple>
 
 namespace decomp {
 
@@ -58,6 +59,47 @@ std::string section_name_at(const pe::Image& image, u32 rva) {
 }
 
 } // namespace
+
+std::vector<std::string> link_order(const ImageLayout& layout, const std::vector<std::string>& units) {
+    std::map<std::string, usize> index;
+    for (usize i = 0; i < units.size(); ++i) index.emplace(units[i], i);
+    // Each group's units in address order: an edge from each to the next.
+    std::vector<std::set<usize>> next(units.size());
+    std::vector<usize> waiting(units.size(), 0);
+    std::map<std::tuple<std::string, std::string, u32>, usize> last;
+    for (const auto& c : layout.contributions) {
+        if (c.linker || c.size == 0) continue;
+        const auto it = index.find(c.unit);
+        if (it == index.end()) continue;
+        // Contents and access, not alignment: what the linker groups input sections of one name by.
+        const auto key = std::make_tuple(c.section, c.name, c.characteristics & 0xFE0000E0u);
+        if (auto prev = last.find(key); prev != last.end() && prev->second != it->second) {
+            if (next[prev->second].insert(it->second).second) ++waiting[it->second];
+        }
+        last[key] = it->second;
+    }
+    // Kahn's algorithm, the earliest of `units` first; a cycle (groups that disagree) is broken there too.
+    std::set<usize> ready;
+    for (usize i = 0; i < units.size(); ++i)
+        if (waiting[i] == 0) ready.insert(i);
+    std::vector<bool> placed(units.size(), false);
+    std::vector<std::string> out;
+    while (out.size() < units.size()) {
+        usize u = 0;
+        if (!ready.empty()) {
+            u = *ready.begin();
+            ready.erase(ready.begin());
+        } else {
+            while (placed[u]) ++u;
+        }
+        if (placed[u]) continue;
+        placed[u] = true;
+        out.push_back(units[u]);
+        for (const usize n : next[u])
+            if (!placed[n] && --waiting[n] == 0) ready.insert(n);
+    }
+    return out;
+}
 
 ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image) {
     ImageLayout layout;

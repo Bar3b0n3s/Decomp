@@ -756,8 +756,10 @@ contains no matching or agent logic of its own:
 
 ## Key flow: `decomp relink`
 
-1. The project's units (`units.txt`, link order) and the image layout: the PDB's contributions, or the
-   units cut from the symbols.
+1. The project's units and the image layout: the PDB's contributions, or the units cut from the symbols.
+   The units are linked in the order the image shows (`link_order()`: each image section's input
+   sections of one name are in link order, and the orders are merged), which is `units.txt`'s for
+   lld-link; link.exe's PDBs list their modules in another order.
 2. Each code unit with a source is compiled and checked (`check_unit()`): when every function of the
    unit is in the source and the object fills the unit's place exactly, the unit is linked from that
    object; otherwise, and for library units, from a split object of its original bytes. `--source` and

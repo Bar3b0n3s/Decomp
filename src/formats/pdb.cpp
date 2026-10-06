@@ -98,11 +98,19 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
     // some PDBs).
     const PDB::SourceFileStream source_files =
         dbi.GetHeader().sourceInfoSize >= 4 ? dbi.CreateSourceFileStream(raw) : PDB::SourceFileStream();
+    // A module's files follow those of the modules before it. The substream's per-module start indices
+    // cannot be trusted (LLVM writes each module's own number there), so the starts are summed from the
+    // per-module counts; module 0's files start the array under either convention.
+    const u32* file_offsets = source_files.GetModuleCount() > 0 ? source_files.GetModuleFilenameOffsets(0).Decay() : nullptr;
+    usize next_file = 0;
     u32 module_index = 0;
     for (const auto& module : modules) {
         Module m{array_to_string(module.GetName()), array_to_string(module.GetObjectName()), {}, -1, 0, {}};
-        if (module_index < source_files.GetModuleCount())
-            for (const u32 offset : source_files.GetModuleFilenameOffsets(module_index)) m.source_files.emplace_back(source_files.GetFilename(offset));
+        if (module_index < source_files.GetModuleCount()) {
+            const usize count = source_files.GetModuleFilenameOffsets(module_index).GetLength();
+            for (usize f = 0; f < count; ++f) m.source_files.emplace_back(source_files.GetFilename(file_offsets[next_file + f]));
+            next_file += count;
+        }
         reader.modules_.push_back(std::move(m));
         if (module.HasSymbolStream()) {
             const auto symbols = module.CreateSymbolStream(raw);

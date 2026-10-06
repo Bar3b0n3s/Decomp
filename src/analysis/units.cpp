@@ -143,6 +143,8 @@ std::string normalize_unit_name(std::string_view name) {
 
 UnitKind unit_kind_of(std::string_view name) {
     if (name == "* Linker *" || name == "<linker-defined>") return UnitKind::linker;
+    // The export file link.exe makes from the objects' /EXPORT directives and links in (basic.exp).
+    if (iends_with(name, ".exp")) return UnitKind::linker;
     if (name.starts_with("Import:")) return UnitKind::import;
     if (const auto colon = name.find(':'); colon != std::string_view::npos)
         return iends_with(name.substr(colon + 1), ".dll") ? UnitKind::import : UnitKind::library;
