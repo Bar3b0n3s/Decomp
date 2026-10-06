@@ -24,6 +24,7 @@
 #include <implot.h>
 #include <misc/cpp/imgui_stdlib.h>
 
+#include <algorithm>
 #include <format>
 #include <mutex>
 #include <set>
@@ -215,7 +216,11 @@ private:
         }
         // The newest search is shown until one is picked.
         if (!selected_ && data_.value() && !data_.value()->runs.empty()) selected_ = data_.value()->runs.front().id;
-        const bool running = job_.pending();
+        // While a search runs (this one, one stopped that is finishing its compiles, or one `decomp search`
+        // runs), its files change.
+        const bool running = job_.pending() || (data_.value() && std::ranges::any_of(data_.value()->runs, [](const search::RunRecord& r) {
+                                                    return r.status == search::RunStatus::running;
+                                                }));
         const u64 tick = running ? static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch() / std::chrono::seconds(1)) : 0;
         const project::Project& project = *access.project;  // copied into the job
         data_.update(
@@ -248,7 +253,7 @@ private:
                     return out;
                 };
             },
-            running ? std::chrono::milliseconds(1000) : refresh_interval(ctx, std::chrono::milliseconds(2000)));
+            running ? std::chrono::milliseconds(job_.pending() ? 1000 : 2000) : refresh_interval(ctx, std::chrono::milliseconds(2000)));
     }
 
     // The request the form describes, or why it cannot be made.

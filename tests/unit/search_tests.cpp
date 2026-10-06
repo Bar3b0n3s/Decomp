@@ -250,6 +250,14 @@ TEST_CASE("flag search recovers the fixture's flags from a candidate set") {
         CHECK(j["groups"][0]["chosen"] == 2);
         CHECK(j["groups"][1]["alternatives"][1] == "/GS-");
     }
+    SUBCASE("a budget smaller than the space") {
+        options.groups = {parse_flag_group("optimization: /Od | /O1 | /O2").value(), parse_flag_group("security checks: none | /GS-").value()};
+        options.max_candidates = 4;
+        const auto r = search_flags(program, setup, probes, options);
+        CHECK_FALSE(r.exhaustive);
+        CHECK(r.candidates == 4);
+        CHECK(r.score.better_than(r.start_score));
+    }
     SUBCASE("local search over the common groups") {
         options.groups = preset_groups("common", matching::ToolchainKind::clang_cl, Arch::x86).value();
         // /Ox makes the same code as /O2 here: leave it out to see the level decided.

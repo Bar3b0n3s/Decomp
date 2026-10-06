@@ -293,7 +293,7 @@ FlagSearchResult search_flags(const Program& program, const matching::MatchSetup
                                                                                        : r.space * g.alternatives.size();
     Engine engine(program, setup, probes, options, r.base);
     Choice best = r.start_choice;
-    if (r.space <= options.exhaustive_limit) {
+    if (r.space <= options.exhaustive_limit && r.space <= options.max_candidates) {
         r.exhaustive = true;
         std::vector<Choice> all;
         Choice c(groups.size(), 0);
