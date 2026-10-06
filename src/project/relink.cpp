@@ -535,10 +535,16 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     }
     // C common symbols (`int g;` in C): the linker allocated them in .bss itself, and split code reaches them
     // only through bytes it does not read, so a split object declares them for it to allocate again. A
-    // common has a C name; another name there is an alias (an /ALTERNATENAME).
+    // common has a C name; another name there is an alias (an /ALTERNATENAME). link.exe's PDB marks them
+    // uninitialized data; lld-link's marks them initialized, though they are past their section's file data.
+    // lld-link allocates them in the order it reads them, link.exe in the reverse order: for it they are
+    // declared from the last one back.
+    const auto linker = relink::linker_for(setup.toolchain, project.config().link.linker);
     std::vector<std::pair<std::string, u32>> commons;
     for (const auto& c : layout.contributions) {
-        if (!c.linker || !c.uninitialized() || c.size == 0 || unit_kind_of(c.unit) != UnitKind::linker) continue;
+        if (!c.linker || c.size == 0 || unit_kind_of(c.unit) != UnitKind::linker) continue;
+        const auto* section = image.section_for_rva(c.rva);
+        if (!c.uninitialized() && !(section && c.rva >= section->virtual_address + section->raw_size)) continue;
         const Symbol* s = program.symbols().at(base + c.rva);
         if (!s || s->is_static || s->source < SymbolSource::pdb_public) continue;
         std::vector<std::string> names{s->name};
@@ -546,6 +552,7 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
         auto it = std::ranges::find_if(names, [](const std::string& n) { return !n.empty() && n[0] != '?'; });
         if (it != names.end()) commons.emplace_back(*it, c.size);
     }
+    if (linker.kind == relink::LinkerKind::msvc) std::ranges::reverse(commons);
 
     // Every import is pulled in: split code reaches some only through bytes the linker does not read.
     std::map<u32, std::string> import_slots;
@@ -707,7 +714,6 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     }
 
     // Link, with the image's own linker if it can be told.
-    const auto linker = relink::linker_for(setup.toolchain, project.config().link.linker);
     std::vector<std::string> compilers;
     for (const auto& [unit, origin] : layout.origins)
         if (!origin.compiler.empty()) compilers.push_back(origin.compiler);

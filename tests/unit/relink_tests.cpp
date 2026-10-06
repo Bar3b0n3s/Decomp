@@ -223,6 +223,38 @@ TEST_CASE("relink: split objects define their units' public names") {
     CHECK(statics > 0);
 }
 
+TEST_CASE("relink: C common symbols the linker allocated") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("lld-link not found; skipping");
+        return;
+    }
+    // Tentative definitions in C files compiled as commons: the linker allocates them, in .bss, aligned by
+    // their sizes, in the order it reads them (lld-link; link.exe in the reverse order). Split objects
+    // declare them again.
+    auto tmp = fs::TempDir::create("decomp-relink-commons").value();
+    REQUIRE(fs::write_text(tmp.path() / "commons_a.c",
+                           "int g_small;\nlong long g_big[2];\n"
+                           "__declspec(dllimport) void __stdcall ExitProcess(unsigned int code);\nint use_b(void);\n"
+                           "void entry(void) { g_small = 1; g_big[0] = 2; ExitProcess((unsigned)(g_small + use_b())); }\n"));
+    REQUIRE(fs::write_text(tmp.path() / "commons_b.c",
+                           "char g_byte;\nlong long g_wide;\nint use_b(void) { g_byte = 3; g_wide = 4; return g_byte + (int)g_wide; }\n"));
+    for (Arch arch : {Arch::x86, Arch::x64}) {
+        CAPTURE(to_string(arch));
+        const std::string a(to_string(arch));
+        const auto exe = test::build_program(arch, *tools, tmp.path() / a / "target", {tmp.path() / "commons_a.c", tmp.path() / "commons_b.c"},
+                                             "commons", {}, {"/clang:-fcommon"});
+        REQUIRE(exe);
+        auto p = project::Project::init(tmp.path() / a / "p", *exe, std::nullopt, "clang-cl-" + a).value();
+        auto program = p.open_program().value();
+        const auto setup = test::clang_setup(arch, tools->clang_cl, tmp.path() / a / "work", tmp.path() / a / "cache");
+        project::RelinkOptions options;
+        options.all_split = true;
+        const auto r = relink_and_compare(p, program, setup, options);
+        CHECK_MESSAGE(r.result.identical(), r.summary);
+    }
+}
+
 TEST_CASE("relink: comparing images takes the build's identity over and finds the first difference") {
     auto program = Program::open(test::fixture("x86/basic.exe")).value();
     auto reader = pdb::Reader::load(*program.pdb_path()).value();

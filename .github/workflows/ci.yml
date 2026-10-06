@@ -286,3 +286,4 @@ jobs:
             build/msvc-roundtrip-x86/project/.decomp/relink/result.json
             build/msvc-roundtrip-x64/project/.decomp/relink/result.json
           if-no-files-found: ignore
+          include-hidden-files: true

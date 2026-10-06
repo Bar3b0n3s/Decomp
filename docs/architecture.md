@@ -776,7 +776,8 @@ contains no matching or agent logic of its own:
    security cookie); the entry point, the exports, the TLS and load configuration
    directories' symbols, and x86 SAFESEH handlers (from the load configuration's table, or the table
    the linker wrote without one) are provided the same way; C common symbols the linker allocated in
-   `.bss` are declared again; every import is pulled in with `/INCLUDE` (on the command line when no
+   `.bss` are declared again, in the order that has the linker allocate them as before (lld-link takes
+   them in the order it reads them, link.exe in the reverse order); every import is pulled in with `/INCLUDE` (on the command line when no
    split object carries it). Split objects carry the `@comp.id` of the compiler that made their originals (the
    PDB's compile record matched against the Rich header), so link.exe counts the same objects, and the
    `@feat.00` that compiler build gives a probe compiled with the project's toolchain and flags (with

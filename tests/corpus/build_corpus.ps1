@@ -78,64 +78,26 @@ function Show-LinkRecords {
             ForEach-Object { "  $($object.Name): $_" }
     }
 }
-# Links of the original objects and of the relink's split objects, to tell what makes link.exe ask for a load
-# configuration (__load_config_used) with the split ones. Swapping one object at a time showed it is the split
-# object of the runtime unit (eh_rt), which defines the exception handlers: it registers __except_handler3's
-# address in its own .sxdata (the SEH unit registered it in the original), and /INCLUDEs every function it
-# defines (__except_handler4, __CxxFrameHandler3 and the rest among them).
+# Links of the original objects and of the relink's split objects with maps, for a relink that differs: what
+# link.exe made of each (its own tables, the common symbols it allocated).
 function Test-Links {
     $exp = Join-Path $out "experiments"
     New-Item -ItemType Directory -Force $exp | Out-Null
     $original = @("/nologo", "/nodefaultlib", "/entry:entry", "/subsystem:console", "/debug", "/incremental:no", "/opt:noref",
         "/alternatename:??_7type_info@@6B@=${prefix}corpus_type_info_vftable")
     $objects = Get-ChildItem "$out\obj\*.obj" | ForEach-Object FullName
-    $split = Get-ChildItem "$project\.decomp\relink\objects\*.obj" | Sort-Object Name | ForEach-Object FullName
-    # A copy of an object with sections renamed and marked for removal, so link.exe neither reads nor keeps them.
-    function Copy-Without([string]$object, [string]$variant, [string[]]$sections) {
-        $bytes = [System.IO.File]::ReadAllBytes($object)
-        $count = [BitConverter]::ToUInt16($bytes, 2)
-        $table = 20 + [BitConverter]::ToUInt16($bytes, 16)
-        for ($i = 0; $i -lt $count; $i++) {
-            $at = $table + 40 * $i
-            $name = [System.Text.Encoding]::ASCII.GetString($bytes, $at, 8).TrimEnd([char]0)
-            if ($sections -notcontains $name) { continue }
-            $bytes[$at + 1] = [byte][char]'z'
-            $flags = [BitConverter]::ToUInt32($bytes, $at + 36) -bor 0x800
-            [BitConverter]::GetBytes([uint32]$flags).CopyTo($bytes, $at + 36)
-        }
-        $copy = Join-Path $exp "$variant-$(Split-Path -Leaf $object)"
-        [System.IO.File]::WriteAllBytes($copy, $bytes)
-        $copy
-    }
-    function Test-Link([string]$name, [string[]]$arguments) {
-        $output = & link.exe @arguments "/out:$exp\$name.exe" "/pdb:$exp\$name.pdb" "/map:$exp\$name.map" 2>&1 | Out-String
-        $result = "links"
-        if ($LASTEXITCODE -ne 0) {
-            $first = $output -split "`n" | Where-Object { $_ -match "error" } | Select-Object -First 1
-            $result = if ($output -match "__load_config_used") { "asks for a load configuration" } else { "fails: $first" }
-        }
-        Write-Host "  experiment $name : $result"
+    $command = (Get-Content "$project\.decomp\relink\result.json" -Raw | ConvertFrom-Json).link.command
+    $relinkFlags = @($command | Select-Object -Skip 1 | Where-Object { $_ -like "/*" -and $_ -notlike "/out:*" -and $_ -notlike "/pdb:*" })
+    $split = @($command | Select-Object -Skip 1 | Where-Object { $_ -notlike "/*" })
+    foreach ($run in @(@{ Name = "original"; Arguments = $original + $objects }, @{ Name = "split"; Arguments = $relinkFlags + $split })) {
+        $name = $run.Name
+        $output = & link.exe @($run.Arguments) "/out:$exp\$name.exe" "/pdb:$exp\$name.pdb" "/map:$exp\$name.map" 2>&1 | Out-String
+        Write-Host "  link of the $name objects: exit $LASTEXITCODE"
+        $output -split "`n" | Where-Object { $_ -match "error|warning" } | Select-Object -First 10 | ForEach-Object { Write-Host "    $_" }
         if (Test-Path "$exp\$name.map") {
-            Select-String -Path "$exp\$name.map" -Pattern "sxdata|voltmd|load_config" | ForEach-Object { Write-Host "    map: $($_.Line.Trim())" }
+            Select-String -Path "$exp\$name.map" -Pattern "sxdata|voltmd|load_config|<common>|\.bss|\.edata" |
+                ForEach-Object { Write-Host "    map: $($_.Line.Trim())" }
         }
-    }
-    $runtime = $objects | Where-Object { (Split-Path -Leaf $_) -like "eh_rt_*" }
-    $splitRuntime = $split | Where-Object { (Split-Path -Leaf $_) -like "*_eh_rt_*" }
-    if (-not $runtime -or -not $splitRuntime) { Write-Host "  no runtime unit"; return }
-    $others = @($objects | Where-Object { $_ -ne $runtime })
-    Test-Link "original" ($original + $objects)
-    Test-Link "split-runtime" ($original + $others + $splitRuntime)
-    Test-Link "split-runtime-without-sxdata" ($original + $others + (Copy-Without $splitRuntime "no-sxdata" @(".sxdata")))
-    Test-Link "split-runtime-without-directives" ($original + $others + (Copy-Without $splitRuntime "no-drectve" @(".drectve")))
-    Test-Link "split-runtime-without-either" ($original + $others + (Copy-Without $splitRuntime "neither" @(".sxdata", ".drectve")))
-    # The original objects and one that only asks the linker to include one of the runtime's functions.
-    foreach ($name in "_except_handler3", "_except_handler4", "_local_unwind2", "_local_unwind4", "__CxxFrameHandler3",
-        "__CxxFrameHandler4", "__C_specific_handler", "__std_terminate", "_CxxThrowException") {
-        $symbol = if ($Arch -eq "x86" -and $name -eq "_CxxThrowException") { "__CxxThrowException@8" } else { "$prefix$name" }
-        $file = Join-Path $exp "include$name.c"
-        Set-Content -Path $file -Value "#pragma comment(linker, `"/INCLUDE:$symbol`")"
-        & cl.exe @cflags /EHs-c- $file "/Fo$exp\include$name.obj" | Out-Null
-        Test-Link "original-including-$name" ($original + $objects + "$exp\include$name.obj")
     }
 }
 & $decomp -C $project relink --all-split
