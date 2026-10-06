@@ -731,12 +731,17 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     request.flags = relink::image_link_flags(image, entry, x86 ? std::optional<bool>(safe_seh_table) : std::nullopt);
     request.flags.insert(request.flags.end(), command_line_directives.begin(), command_line_directives.end());
     // A compiled unit's function the image has folded into another (identical COMDAT folding): the
-    // original link folded, so this one must (unless decomp.json says how to optimize).
+    // original link folded, so this one must (unless decomp.json says how to optimize). A copy of a
+    // function the image has under the same name (an inline function several units define) is no fold.
     const auto& configured = project.config().link.flags;
-    const bool folds = std::ranges::any_of(result.units, [](const UnitLink& u) {
-        return u.mode == LinkMode::source && u.check && u.check->check &&
-               std::ranges::any_of(u.check->check->sections,
-                                   [](const matching::PlacedSection& s) { return s.code && s.state == matching::PlacementState::discarded; });
+    auto folded = [&](const matching::PlacedSection& s) {
+        if (!s.code || s.state != matching::PlacementState::discarded) return false;
+        if (!s.folded_into.empty() || !s.rva) return true;
+        const auto* there = program.symbols().at(base + *s.rva);
+        return !there || there->name != s.symbol;
+    };
+    const bool folds = std::ranges::any_of(result.units, [&](const UnitLink& u) {
+        return u.mode == LinkMode::source && u.check && u.check->check && std::ranges::any_of(u.check->check->sections, folded);
     });
     if (folds && std::ranges::none_of(configured, [](const std::string& f) { return to_lower(f).starts_with("/opt:") || to_lower(f).starts_with("-opt:"); })) {
         request.flags.push_back("/opt:icf");

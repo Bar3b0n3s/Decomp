@@ -467,7 +467,9 @@ A unit's exception-handling and unwind data (C++ EH tables, SEH scope tables, x8
 registrations, x64 `.xdata` and `.pdata`) comes from its source like its code: the compiler makes it
 again, and the unit check compares it. Functions the target's linker folded (`/OPT:ICF`, several names
 at one address) are compiled as separate COMDATs and folded again: when a unit built from source has a
-function the check finds folded, the relink adds `/opt:icf` (unless `link.flags` has an `/opt:`). A
+function the check finds folded, the relink adds `/opt:icf` (unless `link.flags` has an `/opt:`). A copy
+of a function the image has under the same name, an inline function several units define, is no fold:
+the linker keeps one copy without folding anything. A
 unit whose function is folded into a split unit's function of another name stays split too, since the
 split object cannot carry both names; build both from source.
 

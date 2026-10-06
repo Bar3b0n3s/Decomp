@@ -498,6 +498,47 @@ TEST_CASE("relink: exception handling and unwind tables from source") {
     }
 }
 
+TEST_CASE("relink: an inline function several units define is no fold") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    // Both units define helper(), an inline function: a COMDAT the linker keeps one copy of. twice() and
+    // twice_again() are alike, and the target was linked without folding them. With both units from their
+    // sources the second unit's helper() is discarded, which is no reason to fold them.
+    auto tmp = fs::TempDir::create("decomp-relink-inline").value();
+    const std::string helper = "#define NOINLINE __declspec(noinline)\ninline NOINLINE int helper(int x) { return x + 7; }\n";
+    const std::string a_source = helper +
+                                 "extern \"C\" __declspec(dllimport) void __stdcall ExitProcess(unsigned int code);\nint use_b(int x);\n"
+                                 "NOINLINE int twice(int x) { return x * 2; }\n"
+                                 "NOINLINE int twice_again(int x) { return x * 2; }\n"
+                                 "extern \"C\" void entry() { ExitProcess(static_cast<unsigned>(helper(1) + twice(2) + twice_again(3) + use_b(4))); }\n";
+    const std::string b_source = helper + "int use_b(int x) { return helper(x) * 3; }\n";
+    REQUIRE(fs::write_text(tmp.path() / "inline_a.cpp", a_source));
+    REQUIRE(fs::write_text(tmp.path() / "inline_b.cpp", b_source));
+    const auto exe = test::build_program(Arch::x64, *tools, tmp.path() / "target", {tmp.path() / "inline_a.cpp", tmp.path() / "inline_b.cpp"}, "inline");
+    REQUIRE(exe);
+    auto p = project::Project::init(tmp.path() / "p", *exe, std::nullopt, "clang-cl-x64").value();
+    p.config().flags = test::fixture_flags();
+    REQUIRE(p.save_config());
+    auto program = p.open_program().value();
+    REQUIRE(program.resolve("?twice@@YAHH@Z").value() != program.resolve("?twice_again@@YAHH@Z").value());
+    const auto setup = test::clang_setup(Arch::x64, tools->clang_cl, tmp.path() / "work", tmp.path() / "cache");
+    const auto units = project::load_units(p).value();
+    for (const auto& [unit, text] : {std::pair{std::string("inline_a.obj"), a_source}, std::pair{std::string("inline_b.obj"), b_source}}) {
+        CAPTURE(unit);
+        auto composed = project::compose_unit_source(p, program, setup, unit, text);
+        REQUIRE(composed);
+        CHECK_MESSAGE(composed->check.complete(), composed->check.summary());
+        REQUIRE(fs::write_text(p.root() / std::ranges::find(units, unit, &Unit::name)->source, composed->content));
+    }
+    const auto r = relink_and_compare(p, program, setup);
+    CHECK(r.result.count(project::LinkMode::source) == 2);
+    CHECK_MESSAGE(r.result.identical(), r.summary);
+    CHECK(std::ranges::none_of(r.result.notes, [](const std::string& n) { return n.find("/opt:icf") != std::string::npos; }));
+}
+
 TEST_CASE("relink: functions folded by identical COMDAT folding") {
     auto tools = test::find_llvm();
     if (!tools) {
