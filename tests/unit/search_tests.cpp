@@ -285,7 +285,10 @@ TEST_CASE("search runs end to end: probes, the search of its kind, the run kept 
         return;
     }
     auto tmp = fs::TempDir::create("decomp-search-runner").value();
-    auto project = project::Project::init(tmp.path() / "project", test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86").value();
+    // The target built with the installed LLVM, which compiles the candidates too.
+    const auto exe = test::build_fixture_program(Arch::x86, *tools, tmp.path() / "target");
+    REQUIRE(exe);
+    auto project = project::Project::init(tmp.path() / "project", *exe, std::nullopt, "clang-cl-x86").value();
     auto program = project.open_program().value();
     auto setup = test::clang_setup(Arch::x86, tools->clang_cl, tmp.path() / "work", tmp.path() / "cache");
     setup.flags = {"/Od", "/Gy", "/GR-", "/EHs-c-"};

@@ -11,6 +11,7 @@
 #include "gui/views/treemap_widget.hpp"
 #include "gui/workspace.hpp"
 #include "harness.hpp"
+#include "llvm_fixture.hpp"
 #include "project/relink.hpp"
 #include "project/units.hpp"
 #include "relink/compare.hpp"
@@ -81,8 +82,9 @@ struct ProjectFixture {
     HeldSessions sessions;
     std::unique_ptr<Workspace> workspace;
 
-    ProjectFixture() {
-        REQUIRE(project::Project::init(root, decomp::test::fixture("x86/basic.exe"), std::nullopt, "clang-cl-x86"));
+    // The committed x86 fixture, or `binary` (built here with the installed LLVM, when its compiles must match).
+    explicit ProjectFixture(const std::filesystem::path& binary = decomp::test::fixture("x86/basic.exe")) {
+        REQUIRE(project::Project::init(root, binary, std::nullopt, "clang-cl-x86"));
         Workspace::Options options;
         options.stagger = 0ms;
         options.session_override = sessions.fn();
@@ -471,11 +473,16 @@ TEST_CASE("the palette finds the project's functions, symbols and strings") {
 }
 
 TEST_CASE("the Search view runs a flag search, shows it as it goes and after, and keeps its flags") {
-    if (!matching::find_clang_cl()) {
-        MESSAGE("clang-cl not found; skipping");
+    auto tools = decomp::test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
         return;
     }
-    ProjectFixture fx;
+    // The target built with the installed LLVM, which compiles the candidates too.
+    auto built = fs::TempDir::create("decomp-gui-search-target").value();
+    const auto exe = decomp::test::build_fixture_program(Arch::x86, *tools, built.path());
+    REQUIRE(exe);
+    ProjectFixture fx(*exe);
     auto* project = fx.workspace->project();
     HeadlessContext gui;
     Settings settings;

@@ -127,7 +127,7 @@ project "decomp-gui"
 project "decomp_gui_tests"
     kind "ConsoleApp"
     gui_settings()
-    files { "tests/gui/**.hpp", "tests/gui/**.cpp" }
+    files { "tests/gui/**.hpp", "tests/gui/**.cpp", "tests/llvm_fixture.hpp", "tests/llvm_fixture.cpp" }
     includedirs { "tests" }
     defines { "DECOMP_SOURCE_DIR=\"" .. path.getabsolute(".") .. "\"" }
     link_gui()
