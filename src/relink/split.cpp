@@ -36,6 +36,7 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
     const auto& relocs = image.base_relocations();
     const u64 base = image.image_base();
     const std::string image_base = image_base_symbol(image);
+    std::vector<std::string> keep;  // COMDAT names to keep
 
     for (const auto* c : spec.contributions) {
         const u32 characteristics = (c->characteristics & kKeptCharacteristics) | alignment_flags_for(*c);
@@ -61,14 +62,15 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
             }
         }
         // What was a COMDAT stays one, named or not: linkers order an object's COMDATs and its other
-        // sections differently (lld-link takes the others first).
+        // sections differently (lld-link takes the others first). Each is kept by an /INCLUDE of its name:
+        // nothing refers to it by name, and /OPT:REF would drop it.
         if (c->characteristics & pe::scn::lnk_comdat) {
-            if (at_start) {
-                w.set_comdat(section, coff::comdat_select::any, at_start);
-            } else {
-                const u32 local_name = w.add_symbol(std::format("$decomp_{:x}", c->rva), 0, static_cast<i32>(section), coff::storage::static_);
-                w.set_comdat(section, coff::comdat_select::noduplicates, local_name);
+            if (!at_start) {
+                at_start = w.add_symbol(std::format("__decomp_{:x}", c->rva), 0, static_cast<i32>(section), coff::storage::external, code ? 0x20 : 0);
+                ++local.symbols;
             }
+            w.set_comdat(section, coff::comdat_select::any, at_start);
+            keep.push_back(w.symbol_name(*at_start));
         }
         if (c->uninitialized()) continue;
 
@@ -99,6 +101,7 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
         }
     }
     for (const auto& d : spec.directives) w.add_directive(d);
+    for (const auto& name : keep) w.add_directive("/INCLUDE:" + name);
     for (const auto& name : spec.safe_seh_handlers) {
         auto handle = w.find_defined(name);
         w.add_safe_seh_handler(handle ? *handle : w.undefined(name));

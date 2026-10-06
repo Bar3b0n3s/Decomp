@@ -4,6 +4,7 @@
 #include "core/process.hpp"
 #include "core/strings.hpp"
 
+#include <array>
 #include <format>
 
 namespace decomp::relink {
@@ -33,6 +34,100 @@ Linker linker_for(const matching::Toolchain& toolchain, const std::string& confi
     const std::string file = to_lower(fs::to_utf8(fs::from_utf8(l.path).filename()));
     l.kind = file.find("lld") != std::string::npos ? LinkerKind::lld : LinkerKind::msvc;
     return l;
+}
+
+std::string detect_linker_version(const Linker& linker) {
+    ProcessSpec spec;
+    spec.argv = linker.wrapper;
+    spec.argv.push_back(linker.path);
+    // link.exe prints its banner when run without arguments.
+    if (linker.kind == LinkerKind::lld) spec.argv.push_back("--version");
+    spec.timeout = std::chrono::seconds(15);
+    for (const auto& [k, v] : linker.env) spec.env.emplace_back(k, v);
+    for (const auto& [k, v] : linker.env_prepend) {
+        auto current = get_env(k);
+        spec.env.emplace_back(k, current && !current->empty() ? v + path_list_separator() + *current : v);
+    }
+    auto r = run_process(spec);
+    if (!r || r->timed_out) return {};
+    const std::string_view marker = linker.kind == LinkerKind::lld ? "LLD " : "Version ";
+    const std::string text = r->out + "\n" + r->err;
+    for (auto line : split(text, '\n')) {
+        const std::string_view l = trim(line);
+        if (l.find(marker) != std::string_view::npos) return std::string(l);
+    }
+    return {};
+}
+
+namespace {
+
+// The first "<major>.<minor>.<build>" after `marker` in `text`.
+std::optional<std::array<u16, 3>> version_after(std::string_view text, std::string_view marker) {
+    for (usize at = text.find(marker); at != std::string_view::npos; at = text.find(marker, at + 1)) {
+        std::array<u16, 3> v{};
+        usize i = at + marker.size(), part = 0;
+        for (; part < 3; ++part) {
+            const usize start = i;
+            u32 n = 0;
+            while (i < text.size() && text[i] >= '0' && text[i] <= '9' && n <= 0xFFFF) n = n * 10 + static_cast<u32>(text[i++] - '0');
+            if (i == start || n > 0xFFFF) break;
+            v[part] = static_cast<u16>(n);
+            if (part < 2) {
+                if (i >= text.size() || text[i] != '.') break;
+                ++i;
+            }
+        }
+        if (part == 3) return v;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+std::string OriginalLinker::text() const {
+    return kind == LinkerKind::lld ? std::format("lld-link of LLVM {}.{}.{}", major, minor, build)
+                                   : std::format("link.exe {}.{:02}.{}", major, minor, build);
+}
+
+std::optional<OriginalLinker> original_linker(const pe::Image& image, const std::vector<std::string>& compilers) {
+    if (const auto build = image.build_info()) {
+        if (!build->linker) return std::nullopt;
+        return OriginalLinker{LinkerKind::msvc, image.linker_major(), image.linker_minor(), build->linker->entry.build};
+    }
+    // No Rich header: link.exe did not make it. lld-link writes linker version 14.0.
+    if (image.linker_major() != 14 || image.linker_minor() != 0) return std::nullopt;
+    for (const auto& c : compilers)
+        if (auto v = version_after(c, "clang version ")) return OriginalLinker{LinkerKind::lld, (*v)[0], (*v)[1], (*v)[2]};
+    return std::nullopt;
+}
+
+LinkerFit linker_fit(const std::optional<OriginalLinker>& original, LinkerKind kind, std::string_view version) {
+    LinkerFit fit;
+    fit.original = original;
+    fit.kind = kind;
+    fit.version = std::string(version);
+    const auto v = version_after(version, kind == LinkerKind::lld ? "LLD " : "Version ");
+    const std::string mine = !v ? std::string(kind == LinkerKind::lld ? "lld-link" : "link.exe") + " (version unknown)"
+                             : kind == LinkerKind::lld ? std::format("lld-link of LLVM {}.{}.{}", (*v)[0], (*v)[1], (*v)[2])
+                                                       : std::format("link.exe {}.{:02}.{}", (*v)[0], (*v)[1], (*v)[2]);
+    if (!original) {
+        fit.text = std::format("linked by {}; which linker made the image is not known", mine);
+        return fit;
+    }
+    if (original->kind != kind) {
+        fit.same = false;
+        fit.text = std::format("the image was made by {}, the relink by {}: another linker lays the image out differently", original->text(), mine);
+        return fit;
+    }
+    if (!v) {
+        fit.text = std::format("the image was made by {}; the relink's linker did not say its version", original->text());
+        return fit;
+    }
+    fit.same = original->major == (*v)[0] && original->minor == (*v)[1] && original->build == (*v)[2];
+    fit.text = *fit.same ? std::format("linked by {}, as the image was", mine)
+                         : std::format("the image was made by {}, the relink by {}: another version can lay the image out differently",
+                                       original->text(), mine);
+    return fit;
 }
 
 namespace {
@@ -65,9 +160,12 @@ std::vector<std::string> image_link_flags(const pe::Image& image, std::string_vi
     f.push_back("/nologo");
     f.push_back(x64 ? "/machine:x64" : "/machine:x86");
     if (image.is_dll()) f.push_back("/dll");
-    if (const char* name = subsystem_name(image.subsystem()))
-        f.push_back(std::format("/subsystem:{},{}", name, version(oh.subsystem_major, oh.subsystem_minor)));
-    f.push_back("/osversion:" + version(oh.os_major, oh.os_minor));
+    const char* subsystem = subsystem_name(image.subsystem());
+    if (subsystem) f.push_back(std::format("/subsystem:{},{}", subsystem, version(oh.subsystem_major, oh.subsystem_minor)));
+    // Both linkers take the OS version from the subsystem's (6.0 without one); link.exe documents no
+    // /OSVERSION, so it is only passed for an image whose OS version is another.
+    const bool os_follows = subsystem ? oh.os_major == oh.subsystem_major && oh.os_minor == oh.subsystem_minor : oh.os_major == 6 && oh.os_minor == 0;
+    if (!os_follows) f.push_back("/osversion:" + version(oh.os_major, oh.os_minor));
     f.push_back("/version:" + version(oh.image_major, oh.image_minor));
     f.push_back(std::format("/base:{:#x}", image.image_base()));
     // Both linkers default to 4 KB sections in 512-byte file blocks (and lld-link warns about /align).

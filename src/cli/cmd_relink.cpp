@@ -36,7 +36,9 @@ void print_check(const Program& program, const project::UnitSourceCheck& c) {
     for (const auto& s : c.check->sections) {
         if (s.state == matching::PlacementState::equal) continue;
         std::string where = s.rva ? std::format(" at {:#x}", *s.rva) : std::string();
-        std::string detail = s.state == matching::PlacementState::discarded ? std::format("the image has {}'s copy", s.unit) : s.note;
+        std::string detail = s.state != matching::PlacementState::discarded ? s.note
+                             : !s.folded_into.empty()                          ? "folded into " + s.folded_into
+                                                                               : std::format("the image has {}'s copy", s.unit);
         std::println("  {} {}{}: {}{}", s.name, s.symbol, where, to_string(s.state), detail.empty() ? "" : " (" + detail + ")");
     }
     for (const auto& m : c.check->missing) std::println("  missing: {} at {:#x} ({} bytes)", m.name, m.rva, m.size);
@@ -75,6 +77,7 @@ void register_relink_commands(CLI::App& app, GlobalOptions& g) {
                 std::println("  {:<28} {:<7} {}", u.unit.name.empty() ? "(no unit)" : u.unit.name, to_string(u.mode), u.reason);
             }
             for (const auto& n : result.notes) std::println("note: {}", n);
+            std::println("linker: {}", result.linker.text);
             if (!result.link.ok) {
                 std::println("{}:\n{}", result.error, result.link.output);
                 return 2;
@@ -139,7 +142,10 @@ void register_relink_commands(CLI::App& app, GlobalOptions& g) {
                 print_json({{"unit", composed.unit.name}, {"source", composed.unit.source}, {"written", !*compose_dry_run},
                             {"rejected", std::move(rejected)}, {"check", project::to_json(composed.check)}});
             } else {
-                for (const auto& [va, why] : composed.rejected) std::println("  {:#010x}: {}", va, why);
+                // Compiler-made functions (SEH filters, funclets) have no definition but come out of the source anyway.
+                for (const auto& [va, why] : composed.rejected)
+                    if (std::ranges::find(composed.check.missing_functions, va) != composed.check.missing_functions.end())
+                        std::println("  {:#010x}: {}", va, why);
                 std::println("{} {}: {}", *compose_dry_run ? "would write" : "wrote", composed.unit.source, composed.check.summary());
             }
             return composed.check.complete() ? 0 : 2;

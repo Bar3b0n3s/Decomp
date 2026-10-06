@@ -100,7 +100,7 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
         dbi.GetHeader().sourceInfoSize >= 4 ? dbi.CreateSourceFileStream(raw) : PDB::SourceFileStream();
     u32 module_index = 0;
     for (const auto& module : modules) {
-        Module m{array_to_string(module.GetName()), array_to_string(module.GetObjectName()), {}, -1};
+        Module m{array_to_string(module.GetName()), array_to_string(module.GetObjectName()), {}, -1, 0, {}};
         if (module_index < source_files.GetModuleCount())
             for (const u32 offset : source_files.GetModuleFilenameOffsets(module_index)) m.source_files.emplace_back(source_files.GetFilename(offset));
         reader.modules_.push_back(std::move(m));
@@ -116,6 +116,7 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
                     reader.modules_.back().language =
                         static_cast<int>(PDB_AS_UNDERLYING(record->data.S_COMPILE3.flags) & 0xFFu);
                     reader.modules_.back().backend_build = record->data.S_COMPILE3.versionBackendBuild;
+                    reader.modules_.back().compiler = record->data.S_COMPILE3.version;
                 } else if (kind == Kind::S_GPROC32 || kind == Kind::S_LPROC32 || kind == Kind::S_GPROC32_ID ||
                     kind == Kind::S_LPROC32_ID) {
                     // All four records share the same layout.

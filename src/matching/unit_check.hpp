@@ -22,7 +22,7 @@ enum class PlacementState : u8 {
     equal,      // placed, and the image holds the same bytes there
     differs,    // placed, and some bytes differ
     unplaced,   // nothing tells where the linker puts it
-    discarded,  // a COMDAT whose copy another unit gives the image (a pooled string or constant)
+    discarded,  // a COMDAT whose copy another unit gives the image (a pooled string or constant), or folded into another
 };
 std::string_view to_string(PlacementState state);
 
@@ -33,10 +33,13 @@ struct PlacedSection {
     u32 size = 0;
     u32 alignment = 1;
     bool uninitialized = false;
+    bool code = false;
     bool comdat = false;
+    u8 selection = 0;         // a COMDAT's IMAGE_COMDAT_SELECT_*
     std::optional<u32> rva;   // where it goes in the image
     PlacementState state = PlacementState::unplaced;
     std::string unit;                     // a discarded COMDAT: the unit whose copy the image has
+    std::string folded_into;              // a discarded COMDAT this object's own section stands for (/OPT:ICF)
     std::optional<u32> first_difference;  // offset of the first differing byte in the section
     usize differing_bytes = 0;
     std::string note;  // how it differs, or why it could not be placed

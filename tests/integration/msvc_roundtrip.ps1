@@ -16,7 +16,8 @@ foreach ($name in "basic", "other") {
     & cl.exe @cflags "$src\$name.cpp" "/Fo$out\$name.obj"
     if ($LASTEXITCODE -ne 0) { throw "cl.exe failed on $name.cpp" }
 }
-& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug "/out:$out\basic.exe" "/pdb:$out\basic.pdb" `
+# /incremental:no: /debug implies an incremental link, whose jump thunks and padding no relink makes.
+& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug /incremental:no "/out:$out\basic.exe" "/pdb:$out\basic.pdb" `
     "$out\basic.obj" "$out\other.obj" kernel32.lib
 if ($LASTEXITCODE -ne 0) { throw "link.exe failed" }
 

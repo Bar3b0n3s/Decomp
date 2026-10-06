@@ -32,7 +32,7 @@ Result<ImageLayout> project_image_layout(const Program& program, const std::vect
 struct UnitSourceCheck {
     Unit unit;
     std::vector<u64> functions;          // the unit's functions (their obj=)
-    std::vector<u64> missing_functions;  // those its source does not hold
+    std::vector<u64> missing_functions;  // those the compiled source does not put in place (all of them without an object)
     matching::CompileResult compile;
     std::string error;                   // why there is no check: no source file, the compile failed
     std::optional<matching::UnitCheckResult> check;
@@ -90,6 +90,7 @@ struct RelinkResult {
     std::vector<UnitLink> units;           // link order
     std::vector<std::string> libraries;    // the import libraries made, relative to the relink directory
     std::vector<std::string> notes;        // what the relink had to work around or could not do
+    relink::LinkerFit linker;              // whether the linker is the one that made the image
     relink::LinkResult link;
     std::string image;                     // the relinked image, relative to the project
     std::optional<relink::ImageComparison> comparison;

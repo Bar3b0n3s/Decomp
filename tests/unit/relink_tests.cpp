@@ -4,6 +4,7 @@
 #include "analysis/layout.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "formats/pdb.hpp"
 #include "formats/pe.hpp"
 #include "llvm_fixture.hpp"
 #include "matching/unit_source.hpp"
@@ -48,6 +49,7 @@ Relinked relink_and_compare(const project::Project& p, const Program& program, c
     std::string summary;
     for (const auto& u : r->units) summary += std::format("{}: {} ({})\n", u.unit.name, to_string(u.mode), u.reason);
     for (const auto& n : r->notes) summary += "note: " + n + "\n";
+    summary += "linker: " + r->linker.text + "\n";
     if (!r->link.ok) summary += r->link.output;
     if (r->comparison && r->comparison->first)
         summary += std::format("first difference: {} in {} {}\n", r->comparison->first->where, r->comparison->first->unit, r->comparison->first->symbol);
@@ -73,6 +75,47 @@ TEST_CASE("relink: link flags reproduce the fixture's headers") {
     auto fixed = pe::Image::load(test::fixture("x86/basic_fixed.exe")).value();
     const auto fixed_flags = relink::image_link_flags(fixed, "entry");
     CHECK(std::ranges::find(fixed_flags, "/fixed") != fixed_flags.end());
+}
+
+TEST_CASE("relink: the linker that made an image, and whether the relink's is the same") {
+    // The fixtures: no Rich header, linker version 14.0 and objects compiled by LLVM 18's clang-cl.
+    auto image = pe::Image::load(test::fixture("x86/basic.exe")).value();
+    std::vector<std::string> compilers;
+    const auto reader = pdb::Reader::load(test::fixture("x86/basic.pdb")).value();
+    for (const auto& m : reader.modules()) compilers.push_back(m.compiler);
+    const auto original = relink::original_linker(image, compilers);
+    REQUIRE(original);
+    CHECK(original->kind == relink::LinkerKind::lld);
+    CHECK(original->major == 18);
+    CHECK(original->text().starts_with("lld-link of LLVM 18."));
+    CHECK_FALSE(relink::original_linker(image, {}));  // without the PDB's compile records: not known
+
+    const relink::OriginalLinker lld18{relink::LinkerKind::lld, 18, 1, 3};
+    CHECK(relink::linker_fit(lld18, relink::LinkerKind::lld, "Ubuntu LLD 18.1.3").same == true);
+    const auto newer = relink::linker_fit(lld18, relink::LinkerKind::lld, "LLD 20.1.8 (https://github.com/llvm/llvm-project 87f0227cb601)");
+    CHECK(newer.same == false);
+    CHECK(newer.text.find("lld-link of LLVM 18.1.3") != std::string::npos);
+    CHECK(newer.text.find("lld-link of LLVM 20.1.8") != std::string::npos);
+    CHECK(relink::linker_fit(lld18, relink::LinkerKind::msvc, "Microsoft (R) Incremental Linker Version 14.29.30133.0").same == false);
+
+    const relink::OriginalLinker vs2019{relink::LinkerKind::msvc, 14, 29, 30133};
+    CHECK(vs2019.text() == "link.exe 14.29.30133");
+    CHECK(relink::linker_fit(vs2019, relink::LinkerKind::msvc, "Microsoft (R) Incremental Linker Version 14.29.30133.0").same == true);
+    CHECK(relink::linker_fit(vs2019, relink::LinkerKind::msvc, "Microsoft (R) Incremental Linker Version 14.40.33811.0").same == false);
+    const relink::OriginalLinker vc6{relink::LinkerKind::msvc, 6, 0, 8447};
+    CHECK(relink::linker_fit(vc6, relink::LinkerKind::msvc, "Microsoft (R) Incremental Linker Version 6.00.8447").same == true);
+    // Unknown either way: nothing to compare.
+    CHECK_FALSE(relink::linker_fit(std::nullopt, relink::LinkerKind::lld, "LLD 18.1.3").same.has_value());
+    CHECK_FALSE(relink::linker_fit(vs2019, relink::LinkerKind::msvc, "").same.has_value());
+
+    if (auto tools = test::find_llvm()) {
+        relink::Linker lld;
+        lld.path = tools->lld_link;
+        lld.kind = relink::LinkerKind::lld;
+        const auto version = relink::detect_linker_version(lld);
+        CHECK(version.find("LLD ") != std::string::npos);
+        CHECK(relink::linker_fit(original, lld.kind, version).same.has_value());
+    }
 }
 
 TEST_CASE("relink: comparing images takes the build's identity over and finds the first difference") {
@@ -110,6 +153,19 @@ TEST_CASE("relink: the fixtures relink byte-identically from split objects") {
         return;
     }
     auto tmp = fs::TempDir::create("decomp-relink-split").value();
+    // Identical only with the linker that made the fixtures, LLVM 18's lld-link: another version can lay
+    // them out differently (where the import directory after the export names starts, for one), which the
+    // relink says.
+    relink::Linker lld;
+    lld.path = tools->lld_link;
+    lld.kind = relink::LinkerKind::lld;
+    std::vector<std::string> compilers;
+    const auto reader = pdb::Reader::load(test::fixture("x86/basic.pdb")).value();
+    for (const auto& m : reader.modules()) compilers.push_back(m.compiler);
+    const auto fit = relink::linker_fit(relink::original_linker(pe::Image::load(test::fixture("x86/basic.exe")).value(), compilers),
+                                        lld.kind, relink::detect_linker_version(lld));
+    REQUIRE(fit.same.has_value());
+    if (!*fit.same) MESSAGE(fit.text << ": the relinks are only checked to link");
     // With PDBs: plain code and data, C++ and structured exception handling (x86 /SAFESEH tables, x64
     // unwind data and funclets), RTTI, a static library's members. Without: basic_fixed (no base
     // relocations either) and the hand-written idioms, with and without their link maps.
@@ -136,7 +192,9 @@ TEST_CASE("relink: the fixtures relink byte-identically from split objects") {
         options.all_split = true;
         auto r = relink_and_compare(p, program, setup, options);
         CHECK_MESSAGE(r.result.link.ok, r.summary);
-        CHECK_MESSAGE(r.result.identical(), r.summary);
+        if (*fit.same) CHECK_MESSAGE(r.result.identical(), r.summary);
+        // The images with PDBs say which linker made them.
+        if (program.pdb_path()) CHECK(r.result.linker.same == fit.same);
         CHECK(r.result.count(project::LinkMode::source) == 0);
         const auto saved = project::last_relink(p);
         REQUIRE(saved);
@@ -210,5 +268,114 @@ TEST_CASE("relink: units built from their sources, the rest from split objects")
         CHECK(r.result.comparison->first->unit == "basic.obj");
         CHECK(r.result.comparison->first->where.starts_with(".data"));
         CHECK(r.result.comparison->first->symbol.find("g_counter") != std::string::npos);
+    }
+}
+
+TEST_CASE("relink: exception handling and unwind tables from source") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    // The corpus's C++ exceptions and structured exception handling (x86 handler tables and SAFESEH, x64
+    // unwind data, catch funclets, SEH filters), with the runtime they need: every unit from its source.
+    auto tmp = fs::TempDir::create("decomp-relink-eh").value();
+    const auto corpus = test::source_dir() / "tests" / "corpus";
+    const std::vector<std::filesystem::path> sources = {corpus / "eh.cpp", corpus / "seh.c", corpus / "eh_rt.c", test::fixture("src/eh_main.c")};
+    for (Arch arch : {Arch::x86, Arch::x64}) {
+        CAPTURE(to_string(arch));
+        const std::string a(to_string(arch));
+        const std::string type_info = arch == Arch::x86 ? "_corpus_type_info_vftable" : "corpus_type_info_vftable";
+        const auto exe = test::build_program(arch, *tools, tmp.path() / a / "target", sources, "eh",
+                                             {"/alternatename:??_7type_info@@6B@=" + type_info}, {"/EHsc"});
+        REQUIRE(exe);
+        auto p = project::Project::init(tmp.path() / a / "p", *exe, std::nullopt, "clang-cl-" + a).value();
+        p.config().flags = test::fixture_flags();
+        p.config().flags.push_back("/EHsc");
+        REQUIRE(p.save_config());
+        auto program = p.open_program().value();
+        auto setup = test::clang_setup(arch, tools->clang_cl, tmp.path() / a / "work", tmp.path() / a / "cache");
+        setup.flags = p.config().flags;
+        const auto units = project::load_units(p).value();
+        for (const auto& source : sources) {
+            const std::string unit = fs::to_utf8(source.stem()) + ".obj";
+            CAPTURE(unit);
+            auto composed = project::compose_unit_source(p, program, setup, unit, fs::read_text(source).value());
+            REQUIRE(composed);
+            CHECK_MESSAGE(composed->check.complete(), composed->check.summary());
+            REQUIRE(fs::write_text(p.root() / std::ranges::find(units, unit, &Unit::name)->source, composed->content));
+        }
+        auto r = relink_and_compare(p, program, setup);
+        CHECK_MESSAGE(r.result.identical(), r.summary);
+        CHECK(r.result.count(project::LinkMode::source) == 4);
+    }
+}
+
+TEST_CASE("relink: functions folded by identical COMDAT folding") {
+    auto tools = test::find_llvm();
+    if (!tools) {
+        MESSAGE("clang-cl or lld-link not found; skipping");
+        return;
+    }
+    // twice_b (same unit) and twice_c (the other unit) fold into twice_a, value_c into value_a.
+    auto tmp = fs::TempDir::create("decomp-relink-icf").value();
+    const std::string a_source = "#define NOINLINE __declspec(noinline)\n"
+                                 "extern \"C\" __declspec(dllimport) void __stdcall ExitProcess(unsigned int code);\n"
+                                 "int g_value = 5;\nint twice_c(int x);\nint value_c();\n"
+                                 "NOINLINE int twice_a(int x) { return x * 2; }\n"
+                                 "NOINLINE int twice_b(int x) { return x * 2; }\n"
+                                 "NOINLINE int value_a() { return g_value + 1; }\n"
+                                 "extern \"C\" void entry() {\n"
+                                 "    ExitProcess(static_cast<unsigned>(twice_a(1) + twice_b(2) + twice_c(3) + value_a() + value_c()));\n}\n";
+    const std::string b_source = "#define NOINLINE __declspec(noinline)\nextern int g_value;\n"
+                                 "NOINLINE int twice_c(int x) { return x * 2; }\n"
+                                 "NOINLINE int value_c() { return g_value + 1; }\n";
+    REQUIRE(fs::write_text(tmp.path() / "icf_a.cpp", a_source));
+    REQUIRE(fs::write_text(tmp.path() / "icf_b.cpp", b_source));
+    for (Arch arch : {Arch::x86, Arch::x64}) {
+        CAPTURE(to_string(arch));
+        const std::string a(to_string(arch));
+        const auto exe = test::build_program(arch, *tools, tmp.path() / a / "target", {tmp.path() / "icf_a.cpp", tmp.path() / "icf_b.cpp"}, "icf",
+                                             {"/opt:icf"});
+        REQUIRE(exe);
+        auto p = project::Project::init(tmp.path() / a / "p", *exe, std::nullopt, "clang-cl-" + a).value();
+        p.config().flags = test::fixture_flags();
+        REQUIRE(p.save_config());
+        auto program = p.open_program().value();
+        // The folded names are aliases of the functions they share an address with.
+        const Symbol* twice = program.symbols().find("?twice_c@@YAHH@Z");
+        REQUIRE(twice);
+        CHECK(twice->va == program.symbols().find("?twice_a@@YAHH@Z")->va);
+        const auto setup = test::clang_setup(arch, tools->clang_cl, tmp.path() / a / "work", tmp.path() / a / "cache");
+        project::RelinkOptions split;
+        split.all_split = true;
+        auto r = relink_and_compare(p, program, setup, split);
+        CHECK_MESSAGE(r.result.identical(), r.summary);
+        // icf_b.obj from its source: its functions are the other unit's copies, which the split unit keeps.
+        const auto units = project::load_units(p).value();
+        auto write = [&](const std::string& unit, const std::string& text) {
+            auto composed = project::compose_unit_source(p, program, setup, unit, text);
+            REQUIRE(composed);
+            CHECK_MESSAGE(composed->check.complete(), composed->check.summary());
+            REQUIRE(fs::write_text(p.root() / std::ranges::find(units, unit, &Unit::name)->source, composed->content));
+            return *composed;
+        };
+        const auto b = write("icf_b.obj", b_source);
+        CHECK(std::ranges::count(b.check.check->sections, matching::PlacementState::discarded, &matching::PlacedSection::state) == 2);
+        // ...which the split unit cannot stand for under their names: icf_b.obj stays split until icf_a.obj is
+        // built from source too.
+        r = relink_and_compare(p, program, setup);
+        CHECK_MESSAGE(r.result.identical(), r.summary);
+        const auto b_link = std::ranges::find_if(r.result.units, [](const project::UnitLink& u) { return u.unit.name == "icf_b.obj"; });
+        REQUIRE(b_link != r.result.units.end());
+        CHECK(b_link->mode == project::LinkMode::split);
+        CHECK(b_link->reason.find("folded into icf_a.obj") != std::string::npos);
+        // Both from source: the relink folds them again.
+        const auto composed_a = write("icf_a.obj", a_source);
+        CHECK(std::ranges::any_of(composed_a.check.check->sections, [](const matching::PlacedSection& s) { return !s.folded_into.empty(); }));
+        r = relink_and_compare(p, program, setup);
+        CHECK_MESSAGE(r.result.identical(), r.summary);
+        CHECK(r.result.count(project::LinkMode::source) == 2);
+        CHECK(std::ranges::any_of(r.result.notes, [](const std::string& n) { return n.find("/opt:icf") != std::string::npos; }));
     }
 }

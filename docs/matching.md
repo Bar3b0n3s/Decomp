@@ -351,10 +351,12 @@ original's code and data there. It works from the image layout (what each unit c
    values its placed targets give. The linker puts an object's sections of one name together in
    object order, so one placed section places the others of its name; a gap or an overlap in such a
    row (a function missing from the source, a section of another size) is a problem the check reports.
-2. **Pooled duplicates.** A COMDAT that references put in another unit's contribution is a copy the
-   linker discards in favor of that unit's: a string literal or a floating-point constant pooled across
-   units, a function folded by `/OPT:ICF`. It is reported as discarded, with the unit whose copy the
-   image has.
+2. **Pooled duplicates and folded functions.** A COMDAT that references put in another unit's
+   contribution is a copy the linker discards in favor of that unit's: a string literal or a
+   floating-point constant pooled across units, a function folded by `/OPT:ICF` into another unit's
+   identical one. It is reported as discarded, with the unit whose copy the image has. A function folded
+   into an identical one of the same object (references to it land on that function's body) is
+   discarded too, and reported as folded into it.
 3. **Comparison.** Each placed section is compared with the image byte for byte; a relocation's field
    with the value the linker would write for where its target is (in a placed section, at a pooled
    copy, or for an external symbol where the program's symbols or the image's bytes put it, the same
@@ -430,8 +432,10 @@ data), so several names can share one address. Consequences:
 
 - The PDB may list several procedures at one address. The function is matched once; the other names
   are aliases. The `SymbolDb` keeps one primary name per address and records the other names as
-  aliases, which name lookups find; `symbols.txt` stores only the primary name. Phase 5 needs the
-  aliases, because relinking has to produce every alias.
+  aliases, which name lookups find; `symbols.txt` stores only the primary name.
+- A relink produces the aliases from the sources: each folded function compiles to a COMDAT of its
+  own, the unit check finds it folded ([Units](#units)), and the relink links with `/OPT:ICF` so the
+  linker folds it again ([project-format.md](project-format.md#relinking)).
 - A call in the target may land on a body whose primary name differs from the callee the source used.
   Today a reference compares against the primary name and the PDB name only; accepting any alias is
   planned.

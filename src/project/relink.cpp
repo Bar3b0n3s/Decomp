@@ -77,6 +77,18 @@ Result<UnitSourceCheck> check_unit_text(const Program& program, const matching::
         return out;
     }
     out.check = matching::check_unit(program, layout, *object, unit.name, std::vector<u64>(held.begin(), held.end()));
+    // A function is there when the object puts code at its address: compiler-made ones (SEH filters,
+    // x64 catch funclets) too, which no source defines.
+    const u64 base = program.image().image_base();
+    std::vector<std::pair<u32, u32>> placed;
+    for (const auto& s : out.check->sections)
+        if (s.rva && s.state != matching::PlacementState::discarded && s.state != matching::PlacementState::unplaced)
+            placed.emplace_back(*s.rva, *s.rva + s.size);
+    out.missing_functions.clear();
+    for (u64 va : out.functions) {
+        const u32 rva = static_cast<u32>(va - base);
+        if (std::ranges::none_of(placed, [&](const auto& r) { return rva >= r.first && rva < r.second; })) out.missing_functions.push_back(va);
+    }
     return out;
 }
 
@@ -107,7 +119,10 @@ Result<ComposedUnit> compose_unit_source(const Project& project, const Program& 
         return make_error(ErrorCode::invalid_argument, "{} is not a code unit with a source file (units.txt source=)", unit_name);
     ComposedUnit out;
     out.unit = *unit;
-    matching::UnitSource composed;
+    // The whole translation unit starts as the prelude; each function's definition then becomes its entry.
+    // (A unit whose functions are all folded into others' keeps its source as the prelude.)
+    matching::UnitSource composed = matching::UnitSource::parse(source);
+    composed.functions.clear();
     for (u64 va : unit_functions(program, *unit)) {
         const auto* f = program.symbols().at(va);
         if (auto r = matching::compose_function(composed, va, matching::definition_names(*f), source); !r)
@@ -294,6 +309,35 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
         auto it = link_index.find(unit);
         return it == link_index.end() ? LinkMode::split : result.units[it->second].mode;
     };
+    // A compiled COMDAT the image has in a split unit under another name (a function identical COMDAT
+    // folding put into another's) keeps its unit split: the split object cannot stand for both names,
+    // and the linker would keep both copies. (One of the same name is that unit's COMDAT, which the
+    // linker keeps instead: a pooled string or constant.)
+    auto leader_name = [&](u32 rva) -> std::string {
+        const auto* s = program.symbols().at(base + rva);
+        return s && !s->is_static && s->source >= SymbolSource::pdb_public ? s->name : std::string();
+    };
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto& link : result.units) {
+            if (link.mode != LinkMode::source || !link.check || !link.check->check) continue;
+            if (std::ranges::find(options.source, link.unit.name) != options.source.end()) continue;
+            for (const auto& s : link.check->check->sections) {
+                if (s.state != matching::PlacementState::discarded || !s.rva || !s.folded_into.empty()) continue;
+                const auto* c = layout.at(*s.rva);
+                if (!c || c->linker || mode_of(c->unit) != LinkMode::split) continue;
+                // Only a COMDAT any copy may stand for (inline functions, strings, constants) yields to one of its name.
+                if (s.selection == coff::comdat_select::any && (c->characteristics & pe::scn::lnk_comdat) && c->rva == *s.rva &&
+                    leader_name(*s.rva) == s.symbol)
+                    continue;
+                link.mode = LinkMode::split;
+                link.reason = std::format("{} is folded into {}'s {}, which is split: link {} from its source too", s.symbol, c->unit,
+                                          leader_name(*s.rva).empty() ? std::format("code at {:#x}", *s.rva) : leader_name(*s.rva), c->unit);
+                changed = true;
+                break;
+            }
+        }
+    }
     auto source_check = [&](const std::string& unit) -> const matching::UnitCheckResult* {
         auto it = link_index.find(unit);
         if (it == link_index.end()) return nullptr;
@@ -373,16 +417,12 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
             if (same != theirs->definitions.end()) directives.push_back(std::format("/ALTERNATENAME:{}={}", name, same->first));
             else result.notes.push_back(std::format("{} references {} at {:#x}, which {}'s object does not define", link.unit.name, name, rva, c->unit));
         }
-        for (const auto& s : check->sections)
-            if (s.state == matching::PlacementState::discarded && s.rva && !s.symbol.empty())
-                if (const auto* c = owner(*s.rva); c && !c->linker && mode_of(c->unit) == LinkMode::split) define(c->unit, *s.rva, s.symbol);
     }
+    // A split COMDAT is named as the PDB names it, so that a compiled unit's copy of it is dropped.
     if (layout.source == LayoutSource::pdb) {
         for (const auto& c : layout.contributions) {
             if (c.linker || !(c.characteristics & pe::scn::lnk_comdat) || mode_of(c.unit) != LinkMode::split) continue;
-            const auto* s = program.symbols().at(base + c.rva);
-            if (!s || s->is_static || s->name.empty() || s->source < SymbolSource::pdb_public) continue;
-            define(c.unit, c.rva, s->name);
+            if (const auto name = leader_name(c.rva); !name.empty()) define(c.unit, c.rva, name);
         }
     }
     // The entry point.
@@ -586,12 +626,28 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
         inputs.push_back(fs::to_utf8(dir / fs::from_utf8(file)));
     }
 
-    // Link.
+    // Link, with the image's own linker if it can be told.
     const auto linker = relink::linker_for(setup.toolchain, project.config().link.linker);
+    std::vector<std::string> compilers;
+    for (const auto& [unit, origin] : layout.origins)
+        if (!origin.compiler.empty()) compilers.push_back(origin.compiler);
+    result.linker = relink::linker_fit(relink::original_linker(image, compilers), linker.kind, relink::detect_linker_version(linker));
     relink::LinkRequest request;
     request.inputs = inputs;
     request.flags = relink::image_link_flags(image, entry);
-    request.flags.insert(request.flags.end(), project.config().link.flags.begin(), project.config().link.flags.end());
+    // A compiled unit's function the image has folded into another (identical COMDAT folding): the
+    // original link folded, so this one must (unless decomp.json says how to optimize).
+    const auto& configured = project.config().link.flags;
+    const bool folds = std::ranges::any_of(result.units, [](const UnitLink& u) {
+        return u.mode == LinkMode::source && u.check && u.check->check &&
+               std::ranges::any_of(u.check->check->sections,
+                                   [](const matching::PlacedSection& s) { return s.code && s.state == matching::PlacementState::discarded; });
+    });
+    if (folds && std::ranges::none_of(configured, [](const std::string& f) { return to_lower(f).starts_with("/opt:") || to_lower(f).starts_with("-opt:"); })) {
+        request.flags.push_back("/opt:icf");
+        result.notes.push_back("compiled functions the target folds into others: linked with /opt:icf");
+    }
+    request.flags.insert(request.flags.end(), configured.begin(), configured.end());
     const auto name = program.path().filename();
     request.output = dir / "out" / name;
     if (const auto& cv = image.codeview(); cv && !cv->pdb_path.empty()) {
@@ -624,11 +680,17 @@ Json to_json(const RelinkResult& r) {
     }
     Json link{{"ok", r.link.ok}, {"exit_code", r.link.exit_code}, {"output", r.link.output}, {"command", r.link.command},
               {"duration_ms", r.link.duration.count()}};
+    Json linker{{"kind", std::string(relink::to_string(r.linker.kind))},
+                {"version", r.linker.version},
+                {"original", r.linker.original ? Json(r.linker.original->text()) : Json(nullptr)},
+                {"same", r.linker.same ? Json(*r.linker.same) : Json(nullptr)},
+                {"text", r.linker.text}};
     Json out{{"time", r.time},
              {"identical", r.identical()},
              {"units", std::move(units)},
              {"libraries", r.libraries},
              {"notes", r.notes},
+             {"linker", std::move(linker)},
              {"link", std::move(link)},
              {"image", r.image}};
     if (r.comparison) out["comparison"] = relink::to_json(*r.comparison);

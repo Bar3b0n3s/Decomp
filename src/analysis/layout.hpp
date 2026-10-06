@@ -38,8 +38,9 @@ std::string_view to_string(LayoutSource source);
 
 // What compiled a unit's object, as the PDB's compile record says.
 struct ObjectOrigin {
-    int language = -1;  // CV_CFL_*: 0 C, 1 C++, 3 MASM
-    u16 build = 0;      // the compiler's build number
+    int language = -1;     // CV_CFL_*: 0 C, 1 C++, 3 MASM
+    u16 build = 0;         // the compiler's build number
+    std::string compiler;  // its version string: "clang version 18.1.3 (...)"
 };
 
 struct ImageLayout {
@@ -64,7 +65,7 @@ std::vector<PogoEntry> pogo_entries(const pe::Image& image);
 
 // The PDB's section contributions, in address order, with each module's unit name (pdb_unit_names())
 // and the input section names its COFF group records give. Contributions of the linker's own module and
-// of import libraries are marked `linker`. Empty contributions are left out.
+// of import libraries are marked `linker`. Empty contributions are kept: their alignment moves what follows.
 ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image);
 
 // Without a PDB: each section of the image cut where the unit of the symbols in it changes (functions and

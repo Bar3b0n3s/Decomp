@@ -64,6 +64,7 @@ public:
     u32 section_symbol(u32 section) const { return sections_.at(section - 1).symbol; }
     // A defined external symbol by name.
     std::optional<u32> find_defined(std::string_view name) const;
+    const std::string& symbol_name(u32 symbol) const { return symbols_.at(symbol).name; }
 
     void add_relocation(u32 section, u32 offset, u32 symbol, u16 type);
     // Linker directives (.drectve), added to one section, each after a space.

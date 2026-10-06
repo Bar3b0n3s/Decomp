@@ -26,7 +26,12 @@ ImageLayout pdb_layout(const Program& program) {
     return layout_from_pdb(*reader, program.image());
 }
 
-std::vector<const Contribution*> of(const ImageLayout& layout, std::string_view unit) { return layout.of_unit(unit); }
+// A unit's contributions that hold something (the empty ones only align what follows).
+std::vector<const Contribution*> of(const ImageLayout& layout, std::string_view unit) {
+    auto all = layout.of_unit(unit);
+    std::erase_if(all, [](const Contribution* c) { return c->size == 0; });
+    return all;
+}
 
 std::optional<coff::Object> compile(const MatchSetup& setup, const std::string& source, std::string_view file_name) {
     Compiler compiler(setup.toolchain, setup.work_dir, setup.cache_dir);
@@ -101,7 +106,7 @@ TEST_CASE("layout: without a PDB, cut by the units of the symbols and the linker
     CHECK(guessed.source == LayoutSource::symbols);
     // Every byte the PDB gives a unit's object, the guess gives the same unit (padding may go either way).
     for (const auto& c : truth.contributions) {
-        if (c.linker) continue;
+        if (c.linker || c.size == 0) continue;
         CAPTURE(c.unit);
         CAPTURE(c.rva);
         const auto* g = guessed.at(c.rva);
@@ -111,7 +116,7 @@ TEST_CASE("layout: without a PDB, cut by the units of the symbols and the linker
     }
     // The import thunk, the debug directory and the import tables are the linker's.
     for (const auto& c : truth.contributions) {
-        if (!c.linker || c.section == ".reloc") continue;
+        if (!c.linker || c.section == ".reloc" || c.size == 0) continue;
         CAPTURE(c.rva);
         const auto* g = guessed.at(c.rva);
         REQUIRE(g);
@@ -128,7 +133,11 @@ TEST_CASE("unit check: the fixture's units compiled from their sources match the
     auto tmp = fs::TempDir::create("decomp-unit-check").value();
     for (Arch arch : {Arch::x86, Arch::x64}) {
         CAPTURE(to_string(arch));
-        auto program = Program::open(test::fixture(std::string(to_string(arch)) + "/basic.exe"));
+        // Built with the installed LLVM, which compiles the sources too: another version than the committed
+        // fixture's can compile a function differently.
+        const auto exe = test::build_fixture_program(arch, *tools, tmp.path() / std::string(to_string(arch)));
+        REQUIRE(exe);
+        auto program = Program::open(*exe);
         REQUIRE(program);
         const auto layout = pdb_layout(*program);
         auto setup = test::clang_setup(arch, tools->clang_cl, tmp.path() / "work", tmp.path() / "cache");

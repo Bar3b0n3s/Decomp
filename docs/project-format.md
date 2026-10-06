@@ -401,6 +401,7 @@ the target's headers ([architecture.md](architecture.md#key-flow-decomp-relink))
 $ decomp relink
   basic.obj                    split   7 of 12 functions in its source
   other.obj                    source  complete
+linker: linked by lld-link of LLVM 18.1.3, as the image was
 identical to the target: SHA-1 3b10acac... (1 units from source, 1 split); taken over from the
 original: COFF header TimeDateStamp, debug directory entry 0 TimeDateStamp, ..., CodeView GUID
 ```
@@ -412,6 +413,15 @@ compared (the checksum is then computed again), and the result lists them. Every
 same byte for byte. When it is not, `relink` names the first differing bytes in the target's sections,
 with the unit whose contribution holds them and the symbol there, the header fields that differ and the
 differing bytes per section. The exit code is 0 when the relink is identical and 2 otherwise.
+
+Only the linker that made the target, of the same version, lays the same objects out the same way:
+`relink` says which linker it ran and whether that is the target's (`linker:` line). link.exe is
+recognized by the Rich header's linker entry and the optional header's linker version; lld-link, which
+writes no Rich header, by the LLVM release of the clang-cl that compiled the objects, as the PDB's
+compile records say. Configure the matching linker with `link.linker` when the toolchain's is another.
+An incrementally linked target (link.exe's `/INCREMENTAL`, which `/DEBUG` implies) holds the incremental
+linker's jump thunks and padding, which no relink makes: relinks are complete links (`/INCREMENTAL:NO`),
+as release builds are.
 
 | Option | Meaning |
 |---|---|
@@ -431,6 +441,7 @@ and its PDB) and `result.json`:
 | `units[]` | Per unit in link order: `unit`, `kind`, `mode` (`source`, `split`, `linker`), `reason`, `bytes` (the size of its contributions), `object`, and for units with a source the `check` (`decomp units check --json`'s record) |
 | `libraries` | The import libraries written |
 | `notes` | What the relink could not provide (a name a compiled object needs that nothing defines, an export or entry point without a symbol) |
+| `linker` | `kind` (`msvc`, `lld`), `version` (its banner or `--version` line), `original` (the linker that made the target: "link.exe 14.29.30133", "lld-link of LLVM 18.1.3"; null when the target does not say), `same` (null when either is unknown), `text` |
 | `link` | `ok`, `exit_code`, `output`, `command`, `duration_ms` |
 | `image` | The relinked image, relative to the project |
 | `comparison` | `identical`, `original_sha1`, `relinked_sha1` (stamped), `relinked_unstamped_sha1`, `original_size`, `relinked_size`, `stamped[]` (`name`, `offset`, `original`, `relinked`), `differing_bytes`, `differences[]` (`offset`, `size`, `where`, `rva`, `unit`, `symbol`, `original`, `relinked` bytes), `sections[]` (`name`, `differing_bytes`, `first_rva`, `first_unit`, `size_differs`) and `first`, the first difference in section contents |
@@ -442,6 +453,14 @@ units of the symbols, which is enough while every unit is split, and as good as 
 are built from source. link.exe writes a Rich header counting the objects of each compiler: split
 objects carry the `@comp.id` of the compiler the PDB says made their originals, and import libraries
 the import library tool's.
+
+A unit's exception-handling and unwind data (C++ EH tables, SEH scope tables, x86 SAFESEH handler
+registrations, x64 `.xdata` and `.pdata`) comes from its source like its code: the compiler makes it
+again, and the unit check compares it. Functions the target's linker folded (`/OPT:ICF`, several names
+at one address) are compiled as separate COMDATs and folded again: when a unit built from source has a
+function the check finds folded, the relink adds `/opt:icf` (unless `link.flags` has an `/opt:`). A
+unit whose function is folded into a split unit's function of another name stays split too, since the
+split object cannot carry both names; build both from source.
 
 ## `src/functions/`
 

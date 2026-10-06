@@ -12,9 +12,12 @@ std::string_view to_string(LayoutSource source) { return source == LayoutSource:
 
 const Contribution* ImageLayout::at(u32 rva) const {
     auto it = std::ranges::upper_bound(contributions, rva, {}, &Contribution::rva);
-    if (it == contributions.begin()) return nullptr;
-    --it;
-    return it->contains(rva) ? &*it : nullptr;
+    // Empty contributions hold nothing: step over them.
+    while (it != contributions.begin()) {
+        --it;
+        if (it->size) return it->contains(rva) ? &*it : nullptr;
+    }
+    return nullptr;
 }
 
 std::vector<const Contribution*> ImageLayout::of_unit(std::string_view unit) const {
@@ -61,9 +64,11 @@ ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image) {
     layout.source = LayoutSource::pdb;
     const auto names = pdb_unit_names(pdb);
     for (usize i = 0; i < pdb.modules().size() && i < names.size(); ++i)
-        if (pdb.modules()[i].language >= 0) layout.origins[names[i]] = {pdb.modules()[i].language, pdb.modules()[i].backend_build};
+        if (pdb.modules()[i].language >= 0)
+            layout.origins[names[i]] = {pdb.modules()[i].language, pdb.modules()[i].backend_build, pdb.modules()[i].compiler};
+    // Empty contributions stay: an empty section still aligns what the linker puts after it.
     for (const auto& c : pdb.contributions()) {
-        if (c.size == 0 || c.module >= names.size()) continue;
+        if (c.module >= names.size()) continue;
         Contribution out;
         out.rva = c.rva;
         out.size = c.size;

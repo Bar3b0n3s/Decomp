@@ -40,7 +40,8 @@ matching::MatchSetup clang_setup(Arch arch, const std::string& clang_cl, const s
 
 std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& tools, const std::filesystem::path& dir,
                                                    const std::vector<std::filesystem::path>& sources, const std::string& name,
-                                                   const std::vector<std::string>& extra_link_flags) {
+                                                   const std::vector<std::string>& extra_link_flags,
+                                                   const std::vector<std::string>& extra_compile_flags) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     std::string a = arch == Arch::x86 ? "x86" : "x64";
@@ -50,6 +51,7 @@ std::optional<std::filesystem::path> build_program(Arch arch, const LlvmTools& t
         ProcessSpec cc;
         cc.argv = {tools.clang_cl, target_triple(arch), "/nologo", "/c", "/Zl", "/Z7", "/Brepro"};
         cc.argv.insert(cc.argv.end(), fixture_flags().begin(), fixture_flags().end());
+        cc.argv.insert(cc.argv.end(), extra_compile_flags.begin(), extra_compile_flags.end());
         cc.argv.push_back("/Fo" + obj);
         cc.argv.push_back(fs::to_utf8(source));
         auto r = run_process(cc);

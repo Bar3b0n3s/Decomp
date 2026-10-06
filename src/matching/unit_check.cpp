@@ -176,7 +176,9 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
         p.size = s.size;
         p.alignment = coff::alignment_of(s.characteristics);
         p.uninitialized = s.is_bss();
+        p.code = s.is_code();
         p.comdat = s.comdat.has_value();
+        p.selection = s.comdat ? s.comdat->selection : 0;
         if (const auto* sym = naming_symbol(object, s)) p.symbol = sym->name;
         out.sections.push_back(std::move(p));
     }
@@ -213,6 +215,7 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
     std::map<usize, u32> placed;  // section index -> rva
     std::set<usize> discarded;
     std::map<usize, std::string> discarded_unit;
+    std::map<usize, std::string> folded;  // section index -> the section it is folded into
     auto other_unit_at = [&](u32 rva) -> std::optional<std::string> {
         const auto* c = layout.at(rva);
         if (!c || c->unit == unit || c->linker || c->unit.empty()) return std::nullopt;
@@ -240,6 +243,23 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
             if (other) {
                 discarded.insert(i);
                 discarded_unit[i] = *other;
+            }
+        }
+        // A COMDAT anchored where a section of this object with the same bytes is pinned is folded into it
+        // (/OPT:ICF): two functions the compiler made alike, one address.
+        for (usize i = 0; i < kept.size(); ++i) {
+            if (!out.sections[i].comdat || discarded.contains(i)) continue;
+            const auto& here = anchors[i];
+            if (here.empty() || std::ranges::any_of(here, [](const auto& a) { return a.second.function; })) continue;
+            for (usize j = 0; j < kept.size(); ++j) {
+                if (j == i || discarded.contains(j) || kept[j]->size != kept[i]->size || kept[j]->data != kept[i]->data) continue;
+                const auto& theirs = anchors[j];
+                const bool pinned_there = std::ranges::any_of(theirs, [&](const auto& a) { return a.second.function && here.contains(a.first); });
+                if (!pinned_there) continue;
+                discarded.insert(i);
+                discarded_unit[i] = std::string(unit);
+                folded[i] = out.sections[j].symbol;
+                break;
             }
         }
         for (auto& [name, members] : blocks) {
@@ -388,6 +408,10 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
         if (discarded.contains(i)) {
             p.state = PlacementState::discarded;
             p.unit = discarded_unit[i];
+            if (auto f = folded.find(i); f != folded.end()) {
+                p.folded_into = f->second;
+                p.note = std::format("folded into {} (identical COMDAT folding)", f->second);
+            }
             if (auto a = anchors.find(i); a != anchors.end() && !a->second.empty()) p.rva = a->second.begin()->first;
             continue;
         }
@@ -479,7 +503,7 @@ UnitCheckResult check_unit(const Program& program, const ImageLayout& layout, co
         for (const auto& p : out.sections)
             if (p.rva && p.state != PlacementState::discarded && p.state != PlacementState::unplaced) by_rva[*p.rva] = &p;
         for (const auto* c : layout.of_unit(unit)) {
-            if (c->linker) continue;
+            if (c->linker || c->size == 0) continue;  // an empty section: the compiler makes it, nothing to fill
             auto it = by_rva.find(c->rva);
             if (it == by_rva.end()) {
                 out.missing.push_back(*c);
@@ -513,6 +537,7 @@ Json to_json(const UnitCheckResult& result) {
                {"state", std::string(to_string(s.state))}};
         if (s.rva) j["rva"] = *s.rva;
         if (!s.unit.empty()) j["unit"] = s.unit;
+        if (!s.folded_into.empty()) j["folded_into"] = s.folded_into;
         if (s.first_difference) j["first_difference"] = *s.first_difference;
         if (s.differing_bytes) j["differing_bytes"] = s.differing_bytes;
         if (!s.note.empty()) j["note"] = s.note;

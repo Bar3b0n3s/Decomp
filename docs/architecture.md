@@ -510,6 +510,10 @@ Linking the target again ([Key flow: `decomp relink`](#key-flow-decomp-relink)):
   headers (machine, subsystem and versions, base, alignments, stack and heap, DLL characteristics,
   `/debug` with the CodeView record's PDB path, `/Brepro`, `/release`, `/fixed`, `/safeseh:no`), and
   `run_linker()` runs lld-link or link.exe through a response file with the toolchain's environment.
+  `linker_fit()` says whether that linker is the one that made the image, since another version can
+  lay the same objects out differently: link.exe by the Rich header's linker entry and the optional
+  header's linker version against its banner, lld-link (no Rich header, linker version 14.0) by the
+  LLVM release of the clang-cl the PDB's compile records name against `lld-link --version`.
 - `compare_images()` (`relink/compare.hpp`) takes the original's identity fields over into the relinked
   image (and computes its checksum again), compares the SHA-1s, and reports differences by header field
   or by section and RVA with the unit whose contribution holds them and the symbol there.
@@ -767,7 +771,8 @@ contains no matching or agent logic of its own:
 4. Import libraries are written from the image's import table (names, hints, ordinals, and whether
    each import has a jump thunk), unless `decomp.json`'s `link.libraries` cover the DLL.
 5. The original linker (`link.linker`, else lld-link for clang-cl and link.exe for MSVC toolchains)
-   links the objects in link order and the libraries, with `image_link_flags()` and `link.flags`.
+   links the objects in link order and the libraries, with `image_link_flags()` and `link.flags`;
+   `linker_fit()` compares its version with the image's linker.
 6. `compare_images()` stamps the result with the original's identity fields and compares; the result
    (units and why, notes, the linker's command and output, the comparison) is written to
    `.decomp/relink/result.json`.
