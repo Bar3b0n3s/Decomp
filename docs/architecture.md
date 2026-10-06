@@ -770,7 +770,9 @@ contains no matching or agent logic of its own:
    so the linker keeps that copy; the entry point, the exports, the TLS and load configuration
    directories' symbols, and x86 SAFESEH handlers are provided the same way; every import is pulled in
    with `/INCLUDE`. Split objects carry the `@comp.id` of the compiler that made their originals (the
-   PDB's compile record matched against the Rich header), so link.exe counts the same objects.
+   PDB's compile record matched against the Rich header), so link.exe counts the same objects, and the
+   `@feat.00` that compiler build gives a probe compiled with the project's toolchain and flags (with
+   `/GS` and `/sdl` from the compile record), which link.exe's feature-count debug record counts.
 4. Import libraries are written from the image's import table (names, hints, ordinals, and whether
    each import has a jump thunk), unless `decomp.json`'s `link.libraries` cover the DLL.
 5. The original linker (`link.linker`, else lld-link for clang-cl and link.exe for MSVC toolchains)

@@ -107,7 +107,8 @@ ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image) {
     const auto names = pdb_unit_names(pdb);
     for (usize i = 0; i < pdb.modules().size() && i < names.size(); ++i)
         if (pdb.modules()[i].language >= 0)
-            layout.origins[names[i]] = {pdb.modules()[i].language, pdb.modules()[i].backend_build, pdb.modules()[i].compiler};
+            layout.origins[names[i]] = {pdb.modules()[i].language, pdb.modules()[i].backend_build, pdb.modules()[i].compiler,
+                                        pdb.modules()[i].security_checks, pdb.modules()[i].sdl};
     // Empty contributions stay: an empty section still aligns what the linker puts after it.
     for (const auto& c : pdb.contributions()) {
         if (c.module >= names.size()) continue;

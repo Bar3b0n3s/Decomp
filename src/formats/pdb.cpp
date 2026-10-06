@@ -105,7 +105,7 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
     usize next_file = 0;
     u32 module_index = 0;
     for (const auto& module : modules) {
-        Module m{array_to_string(module.GetName()), array_to_string(module.GetObjectName()), {}, -1, 0, {}};
+        Module m{array_to_string(module.GetName()), array_to_string(module.GetObjectName()), {}, -1, 0, {}, false, false};
         if (module_index < source_files.GetModuleCount()) {
             const usize count = source_files.GetModuleFilenameOffsets(module_index).GetLength();
             for (usize f = 0; f < count; ++f) m.source_files.emplace_back(source_files.GetFilename(file_offsets[next_file + f]));
@@ -125,6 +125,9 @@ Result<Reader> Reader::load(const std::filesystem::path& path) {
                         static_cast<int>(PDB_AS_UNDERLYING(record->data.S_COMPILE3.flags) & 0xFFu);
                     reader.modules_.back().backend_build = record->data.S_COMPILE3.versionBackendBuild;
                     reader.modules_.back().compiler = record->data.S_COMPILE3.version;
+                    const u32 flags = PDB_AS_UNDERLYING(record->data.S_COMPILE3.flags);
+                    reader.modules_.back().security_checks = (flags & (1u << 13)) != 0;
+                    reader.modules_.back().sdl = (flags & (1u << 17)) != 0;
                 } else if (kind == Kind::S_GPROC32 || kind == Kind::S_LPROC32 || kind == Kind::S_GPROC32_ID ||
                     kind == Kind::S_LPROC32_ID) {
                     // All four records share the same layout.

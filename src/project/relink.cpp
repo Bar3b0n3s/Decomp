@@ -548,6 +548,47 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     };
     const auto import_library_id = rich_id([](const pe::RichProduct& p) { return p.tool == pe::RichTool::import_library; }, std::nullopt);
 
+    // link.exe's VC_FEATURE debug record counts the objects by the feature bits their compiler leaves in
+    // @feat.00 (its generation, /GS, /sdl), which neither the image nor the PDB keeps. An object the
+    // toolchain's compiler makes with the project's flags shows them: a split object of a unit the same
+    // compiler build made carries them, with /GS and /sdl as the unit's compile record says (without a
+    // PDB, when the Rich header's main compiler is that build).
+    struct Features {
+        u32 value = 0;
+        u16 build = 0;
+    };
+    std::optional<Features> toolchain_features;
+    {
+        matching::Compiler compiler(setup.toolchain, setup.work_dir, setup.cache_dir);
+        matching::CompileRequest req;
+        req.source = "int decomp_feature_probe(int x) { return x * 3 + 1; }\n";
+        req.flags = setup.flags;
+        req.include_dirs = setup.include_dirs;
+        req.cancelled = setup.cancelled;
+        req.file_name = "feature_probe.cpp";
+        if (auto probe = compiler.compile(req); probe && probe->ok)
+            if (auto object = coff::Object::parse(probe->object_data)) {
+                std::optional<u32> feat, comp;
+                for (const auto& s : object->symbols()) {
+                    if (s.name == "@feat.00") feat = s.value;
+                    else if (s.name == "@comp.id") comp = s.value;
+                }
+                if (feat && comp) toolchain_features = Features{*feat, static_cast<u16>(*comp & 0xFFFF)};
+            }
+    }
+    const auto build_info = image.build_info();
+    const auto* main_compiler = build_info ? build_info->main_compiler() : nullptr;
+    auto feat00_for = [&](const std::string& unit) -> std::optional<u32> {
+        if (!toolchain_features) return std::nullopt;
+        auto o = layout.origins.find(unit);
+        if (o == layout.origins.end())
+            return main_compiler && main_compiler->entry.build == toolchain_features->build ? std::optional<u32>(toolchain_features->value)
+                                                                                          : std::nullopt;
+        if (o->second.build != toolchain_features->build) return std::nullopt;
+        constexpr u32 gs = 0x100, sdl = 0x200;
+        return (toolchain_features->value & ~(gs | sdl)) | (o->second.security_checks ? gs : 0) | (o->second.sdl ? sdl : 0);
+    };
+
     // The objects, in link order.
     std::vector<std::string> inputs;
     bool directives_placed = false;
@@ -566,6 +607,7 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
             spec.import_slots = import_slots;
             if (auto h = seh_by_unit.find(link.unit.name); h != seh_by_unit.end()) spec.safe_seh_handlers = h->second;
             spec.comp_id = comp_id_for(link.unit.name);
+            spec.feat00 = feat00_for(link.unit.name);
             if (!directives_placed) {
                 spec.directives = directives;
                 spec.safe_seh_handlers.insert(spec.safe_seh_handlers.end(), seh_elsewhere.begin(), seh_elsewhere.end());

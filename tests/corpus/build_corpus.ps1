@@ -28,7 +28,8 @@ foreach ($src in $sources) {
     $n++
 }
 $prefix = if ($Arch -eq "x86") { "_" } else { "" }
-& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug /opt:noref `
+# /incremental:no: /debug implies an incremental link, whose jump thunks and padding no relink makes.
+& link.exe /nologo /nodefaultlib /entry:entry /subsystem:console /debug /incremental:no /opt:noref `
     "/alternatename:??_7type_info@@6B@=${prefix}corpus_type_info_vftable" "/out:$out\corpus.exe" `
     "/pdb:$out\corpus.pdb" "/map:$out\corpus.map" (Get-ChildItem "$out\obj\*.obj" | ForEach-Object FullName)
 if ($LASTEXITCODE -ne 0) { throw "link.exe failed" }
@@ -54,3 +55,32 @@ foreach ($truth in "corpus.pdb", "corpus.map") {
 }
 if ($failed) { throw "MSVC corpus ($Arch): fewer than $MinExact% of function bounds are exact" }
 Write-Host "MSVC corpus ($Arch): function bounds measured"
+
+# The corpus relinked by link.exe: from split objects alone, and with nine of its units (the decoder and the
+# SEH unit among them) built by cl.exe from their own sources composed into unit sources, the rest split.
+& $decomp toolchain add "msvc-$Arch" --kind msvc --compiler cl.exe
+if ($LASTEXITCODE -ne 0) { throw "decomp toolchain add failed" }
+$project = Join-Path $out "project"
+$flags = @("/O2", "/Gy", "/GS-", "/GR-", "/EHs-c-", "/Zl", "/Gs999999", "/DZYAN_NO_LIBC", "/DZYDIS_STATIC_BUILD",
+    "/DZYCORE_STATIC_BUILD", "/I$zydis\include", "/I$zydis\src", "/I$zydis\dependencies\zycore\include") |
+    ForEach-Object { "--flag"; $_ }
+& $decomp init "$out\corpus.exe" --dir $project --toolchain "msvc-$Arch" @flags
+if ($LASTEXITCODE -ne 0) { throw "decomp init failed" }
+& $decomp -C $project relink --all-split
+if ($LASTEXITCODE -ne 0) { throw "MSVC corpus ($Arch): the relink from split objects differs from the original" }
+$units = & $decomp -C $project --json units | Out-String | ConvertFrom-Json
+$own = [ordered]@{
+    "src/Decoder.c" = "$zydis\src\Decoder.c"; "src/Mnemonic.c" = "$zydis\src\Mnemonic.c"; "src/Register.c" = "$zydis\src\Register.c"
+    "src/Utils.c" = "$zydis\src\Utils.c"; "src/FormatterBuffer.c" = "$zydis\src\FormatterBuffer.c"
+    "src/zycore/src/String.c" = "$zydis\dependencies\zycore\src\String.c"
+    "src/seh.c" = "$PSScriptRoot\seh.c"; "src/rt.c" = "$PSScriptRoot\rt.c"; "src/main.c" = "$PSScriptRoot\main.c"
+}
+foreach ($source in $own.Keys) {
+    $unit = ($units | Where-Object { $_.source -eq $source }).name
+    if (-not $unit) { throw "MSVC corpus ($Arch): no unit has the source $source" }
+    & $decomp -C $project units compose $unit $own[$source]
+    if ($LASTEXITCODE -ne 0) { throw "MSVC corpus ($Arch): $($own[$source]) composed into $unit's source does not match" }
+}
+& $decomp -C $project relink
+if ($LASTEXITCODE -ne 0) { throw "MSVC corpus ($Arch): the relink with units from their sources differs from the original" }
+Write-Host "MSVC corpus ($Arch): relinked identically by link.exe, from split objects and with nine units from source"

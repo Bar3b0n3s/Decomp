@@ -574,7 +574,8 @@ reason, so that it can adapt ([agent.md](agent.md#approvals)).
 - `.decomp/relink/result.json` (`vm::read_relink_report()`), and the relinked image in
   `.decomp/relink/out/` with the fields taken over put back (`vm::load_stamped_relink()`) for the bytes
   around the difference (`vm::hex_compare()`); reread when the project changes or a relink ends.
-- `units.txt` before the first relink; the unit checks of Check units, which replace the relink's own.
+- `units.txt` before the first relink; the unit checks of Check units, which replace the relink's own
+  until the next relink.
 
 ### Cost and usage
 

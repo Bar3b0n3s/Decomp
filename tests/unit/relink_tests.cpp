@@ -4,6 +4,7 @@
 #include "analysis/layout.hpp"
 #include "core/fs.hpp"
 #include "core/strings.hpp"
+#include "formats/coff.hpp"
 #include "formats/pdb.hpp"
 #include "formats/pe.hpp"
 #include "llvm_fixture.hpp"
@@ -13,6 +14,7 @@
 #include "project/units.hpp"
 #include "relink/compare.hpp"
 #include "relink/linker.hpp"
+#include "relink/split.hpp"
 #include "test_util.hpp"
 #include "viewmodel/relink.hpp"
 
@@ -117,6 +119,33 @@ TEST_CASE("relink: the linker that made an image, and whether the relink's is th
         CHECK(version.find("LLD ") != std::string::npos);
         CHECK(relink::linker_fit(original, lld.kind, version).same.has_value());
     }
+}
+
+TEST_CASE("relink: split objects carry their compiler's marks") {
+    auto program = Program::open(test::fixture("x86/basic.exe")).value();
+    const auto reader = pdb::Reader::load(*program.pdb_path()).value();
+    const auto layout = layout_from_pdb(reader, program.image());
+    relink::SplitObjectSpec spec;
+    for (const auto* c : layout.of_unit("other.obj"))
+        if (!c->linker) spec.contributions.push_back(c);
+    REQUIRE_FALSE(spec.contributions.empty());
+    auto value_of = [](const std::vector<std::byte>& bytes, std::string_view name) -> std::optional<u32> {
+        auto object = coff::Object::parse(bytes);
+        if (!object) return std::nullopt;
+        for (const auto& s : object->symbols())
+            if (s.name == name) return s.value;
+        return std::nullopt;
+    };
+    // Without: SAFESEH-compatible on x86, and no compiler for the Rich header.
+    const auto plain = relink::write_split_object(program.image(), spec).value();
+    CHECK(value_of(plain, "@feat.00") == 1u);
+    CHECK_FALSE(value_of(plain, "@comp.id"));
+    // A unit cl.exe made: its compiler's id and feature bits, as link.exe counts them.
+    spec.comp_id = 0x01058d87;
+    spec.feat00 = 0x80010191;
+    const auto marked = relink::write_split_object(program.image(), spec).value();
+    CHECK(value_of(marked, "@comp.id") == 0x01058d87u);
+    CHECK(value_of(marked, "@feat.00") == 0x80010191u);
 }
 
 TEST_CASE("relink: comparing images takes the build's identity over and finds the first difference") {

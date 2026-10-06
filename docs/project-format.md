@@ -452,7 +452,11 @@ sections the linker placed, with their names, alignments and COMDAT-ness: a PDB 
 units of the symbols, which is enough while every unit is split, and as good as the units are once some
 are built from source. link.exe writes a Rich header counting the objects of each compiler: split
 objects carry the `@comp.id` of the compiler the PDB says made their originals, and import libraries
-the import library tool's.
+the import library tool's. It also counts the objects in a debug record by the feature bits their
+compiler leaves in `@feat.00` (the compiler's generation, `/GS`, `/sdl`), which neither the image nor the
+PDB keeps: a split object of a unit the project's compiler build made carries the bits that compiler
+gives an object compiled with the project's flags, with `/GS` and `/sdl` as the unit's compile record
+says.
 
 A unit's exception-handling and unwind data (C++ EH tables, SEH scope tables, x86 SAFESEH handler
 registrations, x64 `.xdata` and `.pdata`) comes from its source like its code: the compiler makes it

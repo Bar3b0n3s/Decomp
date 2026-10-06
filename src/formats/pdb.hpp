@@ -43,6 +43,8 @@ struct Module {
     int language = -1;  // CV_CFL_* of its S_COMPILE3 record: 0 C, 1 C++, 3 MASM, 7 the linker; -1 unknown
     u16 backend_build = 0;  // the compiler's build number (19.29.30133: 30133), as its Rich header entry has it
     std::string compiler;   // its S_COMPILE3 version string: "clang version 18.1.3 (...)", "Microsoft (R) Optimizing Compiler"
+    bool security_checks = false;  // compiled with /GS
+    bool sdl = false;              // compiled with /sdl
 };
 
 struct Contribution {

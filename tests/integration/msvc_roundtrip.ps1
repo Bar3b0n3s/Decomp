@@ -57,14 +57,22 @@ Write-Host "MSVC agent replay ($Arch): matched"
 # The program linked again by link.exe, from split objects of its original bytes, then from its units'
 # sources (composed from the fixture's own translation units and compiled by cl.exe): identical to the
 # original once its build timestamps and PDB GUID are taken over.
+# What link.exe recorded about the objects (the debug directory's feature counts) and what cl.exe marks
+# them with, for a relink that differs.
+function Show-LinkRecords {
+    foreach ($image in "$out\basic.exe", "$project\.decomp\relink\out\basic.exe") {
+        & dumpbin /nologo /headers $image | Select-String -Pattern "Pre-VC|feat|Debug Directories" | ForEach-Object { "  $image : $_" }
+    }
+    & dumpbin /nologo /symbols "$out\basic.obj" | Select-String -Pattern "@feat|@comp|@vol" | ForEach-Object { "  basic.obj: $_" }
+}
 & $decomp -C $project relink --all-split
-if ($LASTEXITCODE -ne 0) { throw "the relink from split objects differs from the original with link.exe ($Arch)" }
+if ($LASTEXITCODE -ne 0) { Show-LinkRecords; throw "the relink from split objects differs from the original with link.exe ($Arch)" }
 & $decomp -C $project units compose basic.obj "$src\basic.cpp"
 if ($LASTEXITCODE -ne 0) { throw "basic.cpp composed into basic.obj's source does not match with cl.exe ($Arch)" }
 & $decomp -C $project units compose other.obj "$src\other.cpp"
 if ($LASTEXITCODE -ne 0) { throw "other.cpp composed into other.obj's source does not match with cl.exe ($Arch)" }
 & $decomp -C $project relink
-if ($LASTEXITCODE -ne 0) { throw "the relink from the units' sources differs from the original with link.exe ($Arch)" }
+if ($LASTEXITCODE -ne 0) { Show-LinkRecords; throw "the relink from the units' sources differs from the original with link.exe ($Arch)" }
 Write-Host "MSVC relink ($Arch): identical to the original"
 
 # The fixtures' types, declared in project headers (tests/fixtures/include), compile with cl.exe /Z7 to

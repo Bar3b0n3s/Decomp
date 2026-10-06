@@ -121,6 +121,7 @@ private:
         try {
             if (auto r = relink_job_.take()) {
                 ctx.notify(r->compared && r->identical ? Severity::info : Severity::warning, r->text, NavEntry{std::string(id()), {}});
+                checks_.clear();  // the relink checked the units again
                 ++refresh_;
                 tab_request_ = kComparisonTab;
             }
@@ -649,7 +650,7 @@ private:
     JobHandle<RelinkOutcome> relink_job_;
     std::shared_ptr<ProgressLine> progress_;
     JobHandle<CheckOutcome> check_job_;
-    std::map<std::string, vm::RelinkUnitCheck> checks_;  // the latest Check units
+    std::map<std::string, vm::RelinkUnitCheck> checks_;  // Check units' since the last relink
     std::map<std::string, Override> overrides_;
     bool all_split_ = false;
     std::optional<std::string> selected_;

@@ -25,6 +25,9 @@ struct SplitObjectSpec {
     std::vector<std::string> directives;                      // .drectve: /EXPORT:..., /INCLUDE:...
     std::vector<std::string> safe_seh_handlers;               // x86: names registered in .sxdata (defined here or not)
     std::optional<u32> comp_id;                               // @comp.id: the compiler link.exe counts in the Rich header
+    // @feat.00: the compiler's feature bits, which link.exe counts in its VC_FEATURE debug record (the
+    // compiler's generation, /GS, /sdl). Without: 1 on x86 (SAFESEH-compatible), none on x64.
+    std::optional<u32> feat00;
 };
 
 struct SplitStats {

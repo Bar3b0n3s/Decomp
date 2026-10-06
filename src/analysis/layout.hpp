@@ -41,6 +41,7 @@ struct ObjectOrigin {
     int language = -1;     // CV_CFL_*: 0 C, 1 C++, 3 MASM
     u16 build = 0;         // the compiler's build number
     std::string compiler;  // its version string: "clang version 18.1.3 (...)"
+    bool security_checks = false, sdl = false;  // compiled with /GS, /sdl
 };
 
 struct ImageLayout {

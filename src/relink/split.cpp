@@ -108,7 +108,8 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
     }
     if (spec.comp_id) w.add_absolute("@comp.id", *spec.comp_id);
     // x86: the objects of a /SAFESEH image declare their exception handlers (.sxdata).
-    if (!x64) w.add_absolute("@feat.00", 1);
+    if (spec.feat00) w.add_absolute("@feat.00", *spec.feat00);
+    else if (!x64) w.add_absolute("@feat.00", 1);
     if (stats) *stats = local;
     return w.write();
 }
