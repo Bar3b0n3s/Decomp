@@ -50,6 +50,7 @@ struct Import {
     std::string name;  // empty for ordinal imports
     std::optional<u16> ordinal;
     u64 iat_va = 0;    // address of the IAT slot the code calls through
+    u16 hint = 0;      // the hint beside the name
 };
 
 struct BaseRelocation {
@@ -66,6 +67,42 @@ struct CodeViewInfo {
 
     std::string guid_string() const;  // {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
 };
+
+// IMAGE_DEBUG_TYPE_*.
+namespace debug_type {
+inline constexpr u32 codeview = 2, vc_feature = 12, pogo = 13, iltcg = 14, repro = 16;
+} // namespace debug_type
+
+// An entry of the debug directory.
+struct DebugEntry {
+    u32 type = 0;
+    u32 timestamp = 0;
+    u32 size = 0;          // of its data
+    u32 rva = 0;           // of its data (0 when it is not mapped)
+    u32 file_offset = 0;   // of its data
+    u32 entry_offset = 0;  // file offset of the directory entry itself
+};
+
+// Optional header fields a relink reproduces.
+struct OptionalHeader {
+    u32 section_alignment = 0, file_alignment = 0;
+    u16 os_major = 0, os_minor = 0, image_major = 0, image_minor = 0, subsystem_major = 0, subsystem_minor = 0;
+    u64 stack_reserve = 0, stack_commit = 0, heap_reserve = 0, heap_commit = 0;
+    u32 checksum = 0;
+    u32 checksum_offset = 0;  // file offset of the CheckSum field
+    u32 size_of_headers = 0;
+};
+
+// A field that records when or how a build was made rather than what the image holds: timestamps, the
+// PDB's GUID and age, the checksum. A relink can only take these over from the original.
+struct IdentityField {
+    std::string name;  // "COFF header TimeDateStamp", "debug directory entry 0 TimeDateStamp", "CodeView GUID"
+    u32 offset = 0;    // in the file
+    u32 size = 0;
+};
+
+// The standard PE checksum of a file, with the CheckSum field at `checksum_offset` counted as zero.
+u32 compute_checksum(ByteSpan file, u32 checksum_offset);
 
 struct RuntimeFunction {
     u32 begin_rva = 0;
@@ -124,6 +161,20 @@ public:
     const std::vector<RuntimeFunction>& runtime_functions() const { return runtime_functions_; }
     ByteSpan data() const { return data_; }
 
+    const OptionalHeader& optional_header() const { return optional_; }
+    // Data directory `index` (IMAGE_DIRECTORY_ENTRY_*): RVA and size, zero when absent.
+    std::pair<u32, u32> data_directory(u32 index) const { return index < 16 ? directories_[index] : std::pair<u32, u32>{}; }
+    const std::vector<DebugEntry>& debug_entries() const { return debug_entries_; }
+    // The DLL name the export directory records ("basic.exe"); empty without exports.
+    const std::string& export_name() const { return export_name_; }
+    // The fields relinking takes over from the original, in file order (identity_fields above).
+    std::vector<IdentityField> identity_fields() const;
+    // What the header byte at `offset` belongs to: "COFF header TimeDateStamp", "section header .text
+    // VirtualSize"; empty past the headers.
+    std::string describe_header_offset(u32 offset) const;
+    u32 header_size() const { return size_of_headers_; }
+    u32 pe_offset() const { return pe_offset_; }
+
 private:
     Result<void> parse_headers();
     Result<void> parse_exports(u32 rva, u32 size);
@@ -153,6 +204,13 @@ private:
     std::optional<CodeViewInfo> codeview_;
     std::optional<RichHeader> rich_;
     std::vector<RuntimeFunction> runtime_functions_;
+    OptionalHeader optional_;
+    std::array<std::pair<u32, u32>, 16> directories_{};
+    std::vector<DebugEntry> debug_entries_;
+    std::string export_name_;
+    u32 pe_offset_ = 0;
+    u32 optional_offset_ = 0;
+    u16 optional_size_ = 0;
 };
 
 } // namespace decomp::pe

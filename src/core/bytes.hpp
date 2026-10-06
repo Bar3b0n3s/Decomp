@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace decomp {
 
@@ -26,6 +27,28 @@ std::optional<T> read_le(ByteSpan data, usize offset) {
     if constexpr (std::endian::native == std::endian::big && std::is_integral_v<T> && sizeof(T) > 1)
         value = std::byteswap(value);
     return value;
+}
+
+// Little-endian write of an integer at `offset`; false when it does not fit.
+template <class T>
+bool write_le(std::span<std::byte> data, usize offset, T value) {
+    static_assert(std::is_integral_v<T>);
+    if (offset > data.size() || data.size() - offset < sizeof(T)) return false;
+    if constexpr (std::endian::native == std::endian::big && sizeof(T) > 1) value = std::byteswap(value);
+    std::memcpy(data.data() + offset, &value, sizeof(T));
+    return true;
+}
+
+// Appends an integer in little-endian order.
+template <class T>
+void append_le(std::vector<std::byte>& out, T value) {
+    out.resize(out.size() + sizeof(T));
+    write_le<T>(out, out.size() - sizeof(T), value);
+}
+
+inline void append_bytes(std::vector<std::byte>& out, ByteSpan data) { out.insert(out.end(), data.begin(), data.end()); }
+inline void append_string(std::vector<std::byte>& out, std::string_view text) {
+    append_bytes(out, as_bytes(text.data(), text.size()));
 }
 
 // Sequential bounds-checked reader used by the binary format parsers.

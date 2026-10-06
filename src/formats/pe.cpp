@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <format>
 
 namespace decomp::pe {
@@ -52,6 +53,7 @@ Result<void> Image::parse_headers() {
         return make_error(ErrorCode::parse, "not a PE image (missing PE signature)");
     rich_ = parse_rich_header(data_, *pe_offset);
 
+    pe_offset_ = *pe_offset;
     ByteReader r(d, *pe_offset + 4);
     TRY_ASSIGN(machine_, r.read<u16>());
     TRY_ASSIGN(u16 section_count, r.read<u16>());
@@ -64,6 +66,8 @@ Result<void> Image::parse_headers() {
     if (section_count > kMaxSections) return make_error(ErrorCode::parse, "implausible section count {}", section_count);
 
     usize opt = r.tell();
+    optional_offset_ = static_cast<u32>(opt);
+    optional_size_ = optional_size;
     auto magic = read_le<u16>(d, opt);
     if (magic == 0x10B) pe32_plus_ = false;
     else if (magic == 0x20B) pe32_plus_ = true;
@@ -76,9 +80,31 @@ Result<void> Image::parse_headers() {
     size_of_headers_ = read_le<u32>(d, opt + 60).value_or(0);
     subsystem_ = read_le<u16>(d, opt + 68).value_or(0);
     dll_characteristics_ = read_le<u16>(d, opt + 70).value_or(0);
+    optional_.section_alignment = read_le<u32>(d, opt + 32).value_or(0);
+    optional_.file_alignment = read_le<u32>(d, opt + 36).value_or(0);
+    optional_.os_major = read_le<u16>(d, opt + 40).value_or(0);
+    optional_.os_minor = read_le<u16>(d, opt + 42).value_or(0);
+    optional_.image_major = read_le<u16>(d, opt + 44).value_or(0);
+    optional_.image_minor = read_le<u16>(d, opt + 46).value_or(0);
+    optional_.subsystem_major = read_le<u16>(d, opt + 48).value_or(0);
+    optional_.subsystem_minor = read_le<u16>(d, opt + 50).value_or(0);
+    optional_.checksum = read_le<u32>(d, opt + 64).value_or(0);
+    optional_.checksum_offset = static_cast<u32>(opt + 64);
+    optional_.size_of_headers = size_of_headers_;
+    if (pe32_plus_) {
+        optional_.stack_reserve = read_le<u64>(d, opt + 72).value_or(0);
+        optional_.stack_commit = read_le<u64>(d, opt + 80).value_or(0);
+        optional_.heap_reserve = read_le<u64>(d, opt + 88).value_or(0);
+        optional_.heap_commit = read_le<u64>(d, opt + 96).value_or(0);
+    } else {
+        optional_.stack_reserve = read_le<u32>(d, opt + 72).value_or(0);
+        optional_.stack_commit = read_le<u32>(d, opt + 76).value_or(0);
+        optional_.heap_reserve = read_le<u32>(d, opt + 80).value_or(0);
+        optional_.heap_commit = read_le<u32>(d, opt + 84).value_or(0);
+    }
     usize dir_count_offset = opt + (pe32_plus_ ? 108 : 92);
     u32 dir_count = std::min<u32>(read_le<u32>(d, dir_count_offset).value_or(0), 16);
-    std::array<std::pair<u32, u32>, 16> dirs{};
+    auto& dirs = directories_;
     for (u32 i = 0; i < dir_count; ++i) {
         usize off = dir_count_offset + 4 + i * 8;
         dirs[i] = {read_le<u32>(d, off).value_or(0), read_le<u32>(d, off + 4).value_or(0)};
@@ -195,6 +221,7 @@ Result<void> Image::parse_exports(u32 rva, u32 size) {
     u32 names_rva = read_le<u32>(d, *off + 32).value_or(0);
     u32 ordinals_rva = read_le<u32>(d, *off + 36).value_or(0);
     if (function_count > 65536 || name_count > 65536) return make_error(ErrorCode::parse, "implausible export counts");
+    export_name_ = read_cstring_rva(read_le<u32>(d, *off + 12).value_or(0)).value_or("");
 
     std::vector<std::string> names(function_count);
     for (u32 i = 0; i < name_count; ++i) {
@@ -242,8 +269,13 @@ Result<void> Image::parse_imports(u32 rva) {
             imp.dll = dll;
             imp.iat_va = image_base_ + iat + u64(i) * ptr;
             bool by_ordinal = pe32_plus_ ? (entry >> 63) != 0 : (entry >> 31) != 0;
-            if (by_ordinal) imp.ordinal = static_cast<u16>(entry & 0xFFFF);
-            else imp.name = read_cstring_rva(static_cast<u32>(entry & 0x7FFFFFFF) + 2).value_or("");
+            if (by_ordinal) {
+                imp.ordinal = static_cast<u16>(entry & 0xFFFF);
+            } else {
+                const u32 hint_name = static_cast<u32>(entry & 0x7FFFFFFF);
+                if (auto hint_off = rva_to_offset(hint_name)) imp.hint = read_le<u16>(d, *hint_off).value_or(0);
+                imp.name = read_cstring_rva(hint_name + 2).value_or("");
+            }
             imports_.push_back(std::move(imp));
         }
     }
@@ -276,10 +308,18 @@ Result<void> Image::parse_debug_directory(u32 rva, u32 size) {
     for (u32 pos = 0; pos + 28 <= size; pos += 28) {
         auto off = rva_to_offset(rva + pos);
         if (!off) break;
-        u32 type = read_le<u32>(d, *off + 12).value_or(0);
-        u32 data_size = read_le<u32>(d, *off + 16).value_or(0);
-        u32 data_off = read_le<u32>(d, *off + 24).value_or(0);
-        if (type != 2 || data_size < 16 || u64(data_off) + data_size > data_.size()) continue;  // 2 = CODEVIEW
+        DebugEntry entry;
+        entry.type = read_le<u32>(d, *off + 12).value_or(0);
+        entry.timestamp = read_le<u32>(d, *off + 4).value_or(0);
+        entry.size = read_le<u32>(d, *off + 16).value_or(0);
+        entry.rva = read_le<u32>(d, *off + 20).value_or(0);
+        entry.file_offset = read_le<u32>(d, *off + 24).value_or(0);
+        entry.entry_offset = *off;
+        debug_entries_.push_back(entry);
+    }
+    for (const auto& entry : debug_entries_) {
+        const u32 type = entry.type, data_size = entry.size, data_off = entry.file_offset;
+        if (codeview_ || type != debug_type::codeview || data_size < 16 || u64(data_off) + data_size > data_.size()) continue;
         CodeViewInfo cv;
         u32 sig = read_le<u32>(d, data_off).value_or(0);
         if (sig == 0x53445352) {  // "RSDS"
@@ -296,7 +336,6 @@ Result<void> Image::parse_debug_directory(u32 rva, u32 size) {
             continue;
         }
         codeview_ = std::move(cv);
-        break;
     }
     return {};
 }
@@ -354,6 +393,148 @@ Result<void> Image::parse_pdata(u32 rva, u32 size) {
         if (root != f.begin_rva) f.chained_to = root;
     }
     return {};
+}
+
+u32 compute_checksum(ByteSpan file, u32 checksum_offset) {
+    u64 sum = 0;
+    const usize words = file.size() / 2;
+    for (usize i = 0; i < words; ++i) {
+        const usize at = i * 2;
+        if (at == checksum_offset || at == usize(checksum_offset) + 2) continue;
+        sum += static_cast<u16>(static_cast<u16>(file[at]) | (static_cast<u16>(file[at + 1]) << 8));
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    if (file.size() % 2) {
+        sum += static_cast<u8>(file.back());
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    return static_cast<u32>(sum + file.size());
+}
+
+std::vector<IdentityField> Image::identity_fields() const {
+    std::vector<IdentityField> out;
+    ByteSpan d = data_;
+    out.push_back({"COFF header TimeDateStamp", pe_offset_ + 8, 4});
+    out.push_back({"optional header CheckSum", optional_.checksum_offset, 4});
+    for (usize i = 0; i < debug_entries_.size(); ++i) {
+        const auto& e = debug_entries_[i];
+        out.push_back({std::format("debug directory entry {} TimeDateStamp", i), e.entry_offset + 4, 4});
+        if (e.type == debug_type::codeview && e.size >= 24 && u64(e.file_offset) + e.size <= data_.size()) {
+            const u32 sig = read_le<u32>(d, e.file_offset).value_or(0);
+            if (sig == 0x53445352) {  // RSDS
+                out.push_back({"CodeView GUID", e.file_offset + 4, 16});
+                out.push_back({"CodeView age", e.file_offset + 20, 4});
+            } else if (sig == 0x3031424E) {  // NB10
+                out.push_back({"CodeView signature", e.file_offset + 8, 4});
+                out.push_back({"CodeView age", e.file_offset + 12, 4});
+            }
+        } else if (e.type == debug_type::repro && e.size > 0 && u64(e.file_offset) + e.size <= data_.size()) {
+            out.push_back({"repro hash", e.file_offset, e.size});
+        }
+    }
+    if (directories_[0].first) {
+        if (auto off = rva_to_offset(directories_[0].first)) out.push_back({"export directory TimeDateStamp", *off + 4, 4});
+    }
+    if (directories_[2].first) {
+        // Every directory table of the resource tree has a TimeDateStamp.
+        const u32 root = directories_[2].first;
+        std::vector<u32> pending{0};
+        std::set<u32> seen;
+        while (!pending.empty() && seen.size() < 4096) {
+            const u32 rel = pending.back();
+            pending.pop_back();
+            if (!seen.insert(rel).second) continue;
+            auto off = rva_to_offset(root + rel);
+            if (!off) continue;
+            out.push_back({std::format("resource directory {:#x} TimeDateStamp", rel), *off + 4, 4});
+            const u32 count = u32(read_le<u16>(d, *off + 12).value_or(0)) + read_le<u16>(d, *off + 14).value_or(0);
+            for (u32 i = 0; i < count && i < 4096; ++i) {
+                const u32 target = read_le<u32>(d, *off + 16 + 8 * i + 4).value_or(0);
+                if (target & 0x80000000u) pending.push_back(target & 0x7FFFFFFFu);
+            }
+        }
+    }
+    if (directories_[10].first) {
+        if (auto off = rva_to_offset(directories_[10].first)) out.push_back({"load config TimeDateStamp", *off + 4, 4});
+    }
+    std::ranges::sort(out, {}, &IdentityField::offset);
+    return out;
+}
+
+std::string Image::describe_header_offset(u32 offset) const {
+    if (offset >= size_of_headers_) return {};
+    if (offset < 0x40) return offset >= 0x3C ? "DOS header e_lfanew" : "DOS header";
+    if (offset < pe_offset_) {
+        if (rich_ && offset >= rich_->offset) return "Rich header";
+        return "DOS stub";
+    }
+    if (offset < pe_offset_ + 4) return "PE signature";
+    const u32 coff = pe_offset_ + 4;
+    if (offset < coff + 20) {
+        static constexpr std::pair<u32, const char*> fields[] = {{0, "Machine"}, {2, "NumberOfSections"}, {4, "TimeDateStamp"},
+                                                                 {8, "PointerToSymbolTable"}, {12, "NumberOfSymbols"},
+                                                                 {16, "SizeOfOptionalHeader"}, {18, "Characteristics"}};
+        const char* name = "";
+        for (auto [at, n] : fields)
+            if (offset - coff >= at) name = n;
+        return std::format("COFF header {}", name);
+    }
+    const u32 opt = optional_offset_;
+    const u32 dirs = opt + (pe32_plus_ ? 112 : 96);
+    if (offset < dirs) {
+        std::vector<std::pair<u32, const char*>> fields = {
+            {0, "Magic"}, {2, "MajorLinkerVersion"}, {3, "MinorLinkerVersion"}, {4, "SizeOfCode"}, {8, "SizeOfInitializedData"},
+            {12, "SizeOfUninitializedData"}, {16, "AddressOfEntryPoint"}, {20, "BaseOfCode"}};
+        if (pe32_plus_) {
+            fields.push_back({24, "ImageBase"});
+        } else {
+            fields.push_back({24, "BaseOfData"});
+            fields.push_back({28, "ImageBase"});
+        }
+        for (auto f : std::initializer_list<std::pair<u32, const char*>>{
+                 {32, "SectionAlignment"}, {36, "FileAlignment"}, {40, "MajorOperatingSystemVersion"},
+                 {42, "MinorOperatingSystemVersion"}, {44, "MajorImageVersion"}, {46, "MinorImageVersion"},
+                 {48, "MajorSubsystemVersion"}, {50, "MinorSubsystemVersion"}, {52, "Win32VersionValue"}, {56, "SizeOfImage"},
+                 {60, "SizeOfHeaders"}, {64, "CheckSum"}, {68, "Subsystem"}, {70, "DllCharacteristics"}, {72, "SizeOfStackReserve"}})
+            fields.push_back(f);
+        if (pe32_plus_) {
+            for (auto f : std::initializer_list<std::pair<u32, const char*>>{
+                     {80, "SizeOfStackCommit"}, {88, "SizeOfHeapReserve"}, {96, "SizeOfHeapCommit"}, {104, "LoaderFlags"},
+                     {108, "NumberOfRvaAndSizes"}})
+                fields.push_back(f);
+        } else {
+            for (auto f : std::initializer_list<std::pair<u32, const char*>>{
+                     {76, "SizeOfStackCommit"}, {80, "SizeOfHeapReserve"}, {84, "SizeOfHeapCommit"}, {88, "LoaderFlags"},
+                     {92, "NumberOfRvaAndSizes"}})
+                fields.push_back(f);
+        }
+        const char* name = "";
+        for (auto [at, n] : fields)
+            if (offset - opt >= at) name = n;
+        return std::format("optional header {}", name);
+    }
+    static constexpr const char* dir_names[16] = {"export", "import", "resource", "exception", "security", "base relocation",
+                                                  "debug", "architecture", "global pointer", "TLS", "load config",
+                                                  "bound import", "IAT", "delay import", "CLR runtime", "reserved"};
+    if (offset < opt + optional_size_) {
+        const u32 index = (offset - dirs) / 8;
+        if (index < 16) return std::format("data directory {} ({}) {}", index, dir_names[index], (offset - dirs) % 8 < 4 ? "RVA" : "Size");
+        return "optional header";
+    }
+    const u32 table = opt + optional_size_;
+    const u32 index = (offset - table) / 40;
+    if (index < sections_.size()) {
+        static constexpr std::pair<u32, const char*> fields[] = {
+            {0, "Name"}, {8, "VirtualSize"}, {12, "VirtualAddress"}, {16, "SizeOfRawData"}, {20, "PointerToRawData"},
+            {24, "PointerToRelocations"}, {28, "PointerToLinenumbers"}, {32, "NumberOfRelocations"}, {34, "NumberOfLinenumbers"},
+            {36, "Characteristics"}};
+        const char* name = "";
+        for (auto [at, n] : fields)
+            if ((offset - table) % 40 >= at) name = n;
+        return std::format("section header {} {}", sections_[index].name, name);
+    }
+    return "header padding";
 }
 
 const std::vector<RichEntry>& Image::rich_entries() const {
