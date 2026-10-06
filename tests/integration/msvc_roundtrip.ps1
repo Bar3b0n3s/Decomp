@@ -75,6 +75,19 @@ if ($LASTEXITCODE -ne 0) { throw "other.cpp composed into other.obj's source doe
 if ($LASTEXITCODE -ne 0) { Show-LinkRecords; throw "the relink from the units' sources differs from the original with link.exe ($Arch)" }
 Write-Host "MSVC relink ($Arch): identical to the original"
 
+# Flag search with cl.exe: from /Od, a search over the common groups finds flags that make every verified
+# function byte-exact again, the fixture's own among the equally good ones in every group.
+& python "$root\tests\integration\flag_search.py" set-flags (Join-Path $project "decomp.json") /Od /Gy /GR- /EHs-c-
+if ($LASTEXITCODE -ne 0) { throw "could not set the project's flags" }
+& $decomp -C $project --json search flags --verified | Set-Content (Join-Path $out "flags.json")
+if ($LASTEXITCODE -ne 0) { Get-Content (Join-Path $out "flags.json"); throw "flag search did not make every function byte-exact with cl.exe ($Arch)" }
+& python "$root\tests\integration\flag_search.py" check (Join-Path $out "flags.json") /O2 /Gy /GS- /GR- /EHs-c-
+if ($LASTEXITCODE -ne 0) { throw "flag search did not find the fixture's flags with cl.exe ($Arch)" }
+& $decomp -C $project search flags --verified --apply
+& $decomp -C $project units verify
+if ($LASTEXITCODE -ne 0) { throw "the units do not verify with the flags the search applied ($Arch)" }
+Write-Host "MSVC flag search ($Arch): the fixture's flags recovered"
+
 # The fixtures' types, declared in project headers (tests/fixtures/include), compile with cl.exe /Z7 to
 # the layouts in the PDBs link.exe wrote: a struct, and classes with virtual functions, multiple and
 # virtual inheritance.

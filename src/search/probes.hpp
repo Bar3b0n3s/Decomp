@@ -26,6 +26,9 @@ std::vector<u64> defined_functions(const Program& program, std::string_view sour
 // A function's verified source, with the function its target (or, with `whole`, every function the
 // file holds: the unit source's functions).
 Result<Probe> verified_probe(const project::Project& project, const Program& program, const Symbol& fn, bool whole = false);
+// Every verified source of the project (unit sources and functions' own files), with the matched
+// functions each holds.
+std::vector<Probe> verified_probes(const project::Project& project, const Program& program);
 // A unit's source, with all its functions.
 Result<Probe> unit_probe(const project::Project& project, const Unit& unit);
 // A function's best attempt: the source its sessions came closest with.

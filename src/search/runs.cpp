@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <format>
 #include <random>
+#include <tuple>
 
 namespace decomp::search {
 
@@ -111,11 +112,11 @@ std::filesystem::path search_dir(const project::Project& project) { return proje
 Result<std::unique_ptr<RunWriter>> RunWriter::create(const std::filesystem::path& dir, SearchKind kind, std::string target,
                                                      std::vector<u64> functions, Json settings) {
     std::unique_ptr<RunWriter> w(new RunWriter());
-    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    const auto now = std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
     std::random_device rd;
-    w->record_.id = std::format("{:%Y-%m-%dT%H-%M-%S}-{}-{:04x}", now, to_string(kind), rd() & 0xFFFF);
+    w->record_.id = std::format("{:%Y-%m-%dT%H-%M-%S}-{}-{:04x}", std::chrono::floor<std::chrono::seconds>(now), to_string(kind), rd() & 0xFFFF);
     w->record_.kind = kind;
-    w->record_.started = std::format("{:%FT%TZ}", now);
+    w->record_.started = std::format("{:%FT%TZ}", now);  // to the millisecond
     w->record_.target = std::move(target);
     w->record_.functions = std::move(functions);
     w->record_.settings = std::move(settings);
@@ -153,6 +154,33 @@ Result<void> RunWriter::finish(RunStatus status, Json result, std::string error)
 
 Result<void> RunWriter::save() const { return fs::write_text(dir_ / "run.json", to_json(record_).dump(2) + "\n"); }
 
+CandidateLog::CandidateLog(RunWriter* run, std::function<void(const LogEntry&)> on_entry)
+    : run_(run), on_entry_(std::move(on_entry)), start_(std::chrono::steady_clock::now()) {}
+
+LogEntry CandidateLog::add(std::string label, const Score& score) {
+    std::lock_guard lock(mutex_);
+    LogEntry e;
+    e.index = count_++;
+    e.ms = run_ ? run_->elapsed_ms() : std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_).count();
+    e.label = std::move(label);
+    e.score = score;
+    e.best = !best_ || score.better_than(*best_);
+    if (e.best) best_ = score;
+    if (run_) run_->log(e);
+    if (on_entry_) on_entry_(e);
+    return e;
+}
+
+usize CandidateLog::count() const {
+    std::lock_guard lock(mutex_);
+    return count_;
+}
+
+std::optional<Score> CandidateLog::best() const {
+    std::lock_guard lock(mutex_);
+    return best_;
+}
+
 std::vector<RunRecord> list_runs(const std::filesystem::path& dir) {
     std::vector<RunRecord> out;
     std::error_code ec;
@@ -161,7 +189,7 @@ std::vector<RunRecord> list_runs(const std::filesystem::path& dir) {
         if (!entry.is_directory(ec)) continue;
         if (auto r = load_run(entry.path())) out.push_back(std::move(*r));
     }
-    std::ranges::sort(out, [](const RunRecord& a, const RunRecord& b) { return a.id > b.id; });
+    std::ranges::sort(out, [](const RunRecord& a, const RunRecord& b) { return std::tie(a.started, a.id) > std::tie(b.started, b.id); });
     return out;
 }
 

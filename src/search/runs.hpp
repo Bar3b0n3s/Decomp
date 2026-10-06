@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -44,7 +45,7 @@ std::string_view to_string(RunStatus status);
 struct RunRecord {
     std::string id;
     SearchKind kind = SearchKind::flags;
-    std::string started;  // UTC, ISO 8601
+    std::string started;  // UTC, ISO 8601, to the millisecond
     std::string target;   // what was searched: functions, a unit
     std::vector<u64> functions;
     Json settings = Json::object();  // the kind's parameters
@@ -88,6 +89,25 @@ private:
     RunRecord record_;
     std::chrono::steady_clock::time_point start_;
     mutable std::mutex mutex_;
+};
+
+// Numbers, times and logs the candidates of a search, to its run when there is one, and keeps the
+// best; from any thread. `on_entry` sees every entry in order (keep it quick: it runs under the lock).
+class CandidateLog {
+public:
+    explicit CandidateLog(RunWriter* run = nullptr, std::function<void(const LogEntry&)> on_entry = {});
+    // Logs a candidate, and returns its entry (`best` when it is better than every one before it).
+    LogEntry add(std::string label, const Score& score);
+    usize count() const;
+    std::optional<Score> best() const;
+
+private:
+    RunWriter* run_;
+    std::function<void(const LogEntry&)> on_entry_;
+    std::chrono::steady_clock::time_point start_;
+    mutable std::mutex mutex_;
+    usize count_ = 0;
+    std::optional<Score> best_;
 };
 
 // The runs of a project, newest first.

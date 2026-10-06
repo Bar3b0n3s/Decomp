@@ -155,6 +155,25 @@ jobs:
             ./bin/Release/decomp -C "$p" --json relink | python3 -c "import json,sys; r=json.load(sys.stdin); assert r['identical'] and all(u['mode'] != 'split' for u in r['units']), r['units']"
           done
 
+      - name: Search smoke test
+        run: |
+          # Flag search: the fixture's units, composed from its sources, verify with its flags. From /Od, a search over
+          # the common groups finds flags that make every function byte-exact again, the fixture's among the equally
+          # good ones in every group; applied, the units verify with them.
+          for arch in x86 x64; do
+            p="$(mktemp -d)/project"
+            ./bin/Release/decomp init tests/fixtures/$arch/basic.exe --dir "$p" --toolchain clang-cl-$arch \
+              --flag /O2 --flag /Gy --flag /GS- --flag /GR- --flag /EHs-c-
+            ./bin/Release/decomp -C "$p" units compose basic.obj tests/fixtures/src/basic.cpp
+            ./bin/Release/decomp -C "$p" units compose other.obj tests/fixtures/src/other.cpp
+            python3 tests/integration/flag_search.py set-flags "$p/decomp.json" /Od /Gy /GR- /EHs-c-
+            ./bin/Release/decomp -C "$p" --json search flags --verified > "$p/flags.json"
+            python3 tests/integration/flag_search.py check "$p/flags.json" /O2 /Gy /GS- /GR- /EHs-c-
+            ./bin/Release/decomp -C "$p" search flags Player::Hit --whole --apply
+            ./bin/Release/decomp -C "$p" units verify
+            ./bin/Release/decomp -C "$p" search list
+          done
+
       - name: Function bounds corpus (clang-cl)
         run: |
           # Zydis built without a C library; functions (and units) found without the PDB against the PDB and the map.

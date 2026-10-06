@@ -7,6 +7,7 @@
 #include "project/units.hpp"
 
 #include <algorithm>
+#include <map>
 #include <set>
 
 namespace decomp::search {
@@ -49,6 +50,35 @@ Result<Probe> verified_probe(const project::Project& project, const Program& pro
     if (p.functions.empty()) p.functions = {fn.va};
     p.source = std::move(text);
     return p;
+}
+
+std::vector<Probe> verified_probes(const project::Project& project, const Program& program) {
+    const auto units = units_of(project);
+    const auto infos = project.function_infos();
+    // In address order of the first function of each file.
+    std::vector<std::filesystem::path> order;
+    std::map<std::filesystem::path, std::vector<u64>> files;
+    for (const auto& [va, info] : *infos) {
+        if (info.status != project::FunctionStatus::matched) continue;
+        const Symbol* fn = program.symbols().at(va);
+        if (!fn) continue;
+        const auto path = project::matched_source_location(project, *fn, units);
+        if (!path) continue;
+        auto [it, added] = files.try_emplace(*path);
+        if (added) order.push_back(*path);
+        it->second.push_back(va);
+    }
+    std::vector<Probe> out;
+    for (const auto& path : order) {
+        auto text = fs::read_text(path);
+        if (!text) continue;
+        Probe p;
+        p.file_name = fs::to_utf8(path.filename());
+        p.functions = files[path];
+        p.source = std::move(*text);
+        out.push_back(std::move(p));
+    }
+    return out;
 }
 
 Result<Probe> unit_probe(const project::Project& project, const Unit& unit) {
