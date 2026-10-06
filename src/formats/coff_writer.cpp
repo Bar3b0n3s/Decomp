@@ -76,6 +76,13 @@ u32 ObjectWriter::undefined(std::string_view name) {
     return handle;
 }
 
+u32 ObjectWriter::add_common(std::string name, u32 size) {
+    if (auto it = defined_.find(name); it != defined_.end()) return it->second;
+    const u32 handle = undefined(name);
+    symbols_[handle].value = std::max(symbols_[handle].value, size);
+    return handle;
+}
+
 u32 ObjectWriter::add_absolute(std::string name, u32 value) {
     symbols_.push_back({std::move(name), value, -1, 0, storage::static_, 0});
     return static_cast<u32>(symbols_.size() - 1);

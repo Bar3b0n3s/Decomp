@@ -61,8 +61,9 @@ LinkerFit linker_fit(const std::optional<OriginalLinker>& original, LinkerKind k
 // versions, base address, section and file alignment, stack and heap sizes, DLL and file
 // characteristics, debug information (with the CodeView record's PDB path) and /Brepro when it has a
 // repro entry, /release when it has a checksum. `entry` is the entry point's symbol as the linker's
-// /ENTRY takes it (empty: none, /NOENTRY for a DLL).
-std::vector<std::string> image_link_flags(const pe::Image& image, std::string_view entry);
+// /ENTRY takes it (empty: none, /NOENTRY for a DLL). `safe_seh_table`: whether an x86 image has a table of
+// SAFESEH handlers (by default, whether its load configuration lists any); without one, /safeseh:no.
+std::vector<std::string> image_link_flags(const pe::Image& image, std::string_view entry, std::optional<bool> safe_seh_table = std::nullopt);
 
 struct LinkRequest {
     std::vector<std::string> inputs;  // objects and libraries, in link order

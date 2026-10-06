@@ -34,7 +34,8 @@ std::vector<PogoEntry> pogo_entries(const pe::Image& image) {
     for (const auto& e : image.debug_entries()) {
         if (e.type != pe::debug_type::pogo || e.size < 4 || u64(e.file_offset) + e.size > d.size()) continue;
         const u32 signature = read_le<u32>(d, e.file_offset).value_or(0);
-        if (signature != 0x00554750u && signature != 0x00494750u && signature != 0x4C544347u) continue;  // PGU, PGI, LTCG
+        // PGU, PGI, LTCG, or none (link.exe of Visual Studio 2026 without profile-guided optimization).
+        if (signature != 0x00554750u && signature != 0x00494750u && signature != 0x4C544347u && signature != 0) continue;
         u32 at = e.file_offset + 4;
         const u32 end = e.file_offset + e.size;
         while (at + 8 < end) {

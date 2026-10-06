@@ -28,6 +28,8 @@ struct SplitObjectSpec {
     // @feat.00: the compiler's feature bits, which link.exe counts in its VC_FEATURE debug record (the
     // compiler's generation, /GS, /sdl). Without: 1 on x86 (SAFESEH-compatible), none on x64.
     std::optional<u32> feat00;
+    // C common symbols the linker allocated in .bss (name, size): declared, so it allocates them again.
+    std::vector<std::pair<std::string, u32>> commons;
 };
 
 struct SplitStats {

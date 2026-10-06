@@ -151,7 +151,7 @@ const char* subsystem_name(u16 subsystem) {
 
 } // namespace
 
-std::vector<std::string> image_link_flags(const pe::Image& image, std::string_view entry) {
+std::vector<std::string> image_link_flags(const pe::Image& image, std::string_view entry, std::optional<bool> safe_seh_table) {
     std::vector<std::string> f;
     const auto& oh = image.optional_header();
     const bool x64 = image.machine() == pe::machine::amd64;
@@ -180,7 +180,7 @@ std::vector<std::string> image_link_flags(const pe::Image& image, std::string_vi
     f.push_back((file & 0x0020) ? "/largeaddressaware" : "/largeaddressaware:no");
     if (!image.is_dll()) f.push_back((dll & 0x8000) ? "/tsaware" : "/tsaware:no");
     // x86 /SAFESEH: without a handler table the linker marks the image NO_SEH unless told /SAFESEH:NO.
-    if (!x64 && !(dll & 0x0400) && image.safe_seh_handlers().empty()) f.push_back("/safeseh:no");
+    if (!x64 && !(dll & 0x0400) && !safe_seh_table.value_or(!image.safe_seh_handlers().empty())) f.push_back("/safeseh:no");
     if (dll & 0x0200) f.push_back("/allowisolation:no");
     if (dll & 0x0800) f.push_back("/allowbind:no");
     if (dll & 0x1000) f.push_back("/appcontainer");

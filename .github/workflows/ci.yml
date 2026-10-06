@@ -258,7 +258,7 @@ jobs:
         shell: pwsh
         run: tests\corpus\build_corpus.ps1 -Arch x64 -MinExact 98
 
-      # The cl.exe-built corpus, to look into what the analysis gets wrong on it.
+      # The cl.exe-built corpus and its relink, to look into what the analysis or the relink gets wrong on it.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -266,6 +266,8 @@ jobs:
           path: |
             build/corpus-msvc-x86/corpus.*
             build/corpus-msvc-x64/corpus.*
-            build/corpus-msvc-x86/obj/eh_*.obj
-            build/corpus-msvc-x64/obj/eh_*.obj
+            build/corpus-msvc-x86/obj/*.obj
+            build/corpus-msvc-x64/obj/*.obj
+            build/corpus-msvc-x86/project/.decomp/relink/out/corpus.exe
+            build/corpus-msvc-x64/project/.decomp/relink/out/corpus.exe
           if-no-files-found: ignore

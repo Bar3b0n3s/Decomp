@@ -66,8 +66,20 @@ $flags = @("/O2", "/Gy", "/GS-", "/GR-", "/EHs-c-", "/Zl", "/Gs999999", "/DZYAN_
     ForEach-Object { "--flag"; $_ }
 & $decomp init "$out\corpus.exe" --dir $project --toolchain "msvc-$Arch" @flags
 if ($LASTEXITCODE -ne 0) { throw "decomp init failed" }
+# What link.exe made itself (the debug directory, the SAFESEH table, volatile metadata) in the original and the
+# relink, and what of it the objects ask for, for a relink that differs.
+function Show-LinkRecords {
+    foreach ($image in "$out\corpus.exe", "$project\.decomp\relink\out\corpus.exe") {
+        & dumpbin /nologo /headers /loadconfig $image | Select-String -Pattern "Pre-VC|Safe Exception|Volatile|sxdata|voltmd" |
+            ForEach-Object { "  $(Split-Path -Leaf (Split-Path -Parent $image)): $_" }
+    }
+    foreach ($object in Get-ChildItem "$out\obj\*.obj") {
+        & dumpbin /nologo /headers /symbols $object.FullName | Select-String -Pattern "\.voltbl|\.sxdata|@vol|@feat" |
+            ForEach-Object { "  $($object.Name): $_" }
+    }
+}
 & $decomp -C $project relink --all-split
-if ($LASTEXITCODE -ne 0) { throw "MSVC corpus ($Arch): the relink from split objects differs from the original" }
+if ($LASTEXITCODE -ne 0) { Show-LinkRecords; throw "MSVC corpus ($Arch): the relink from split objects differs from the original" }
 $units = & $decomp -C $project --json units | Out-String | ConvertFrom-Json
 $own = [ordered]@{
     "src/Decoder.c" = "$zydis\src\Decoder.c"; "src/Mnemonic.c" = "$zydis\src\Mnemonic.c"; "src/Register.c" = "$zydis\src\Register.c"
@@ -82,5 +94,5 @@ foreach ($source in $own.Keys) {
     if ($LASTEXITCODE -ne 0) { throw "MSVC corpus ($Arch): $($own[$source]) composed into $unit's source does not match" }
 }
 & $decomp -C $project relink
-if ($LASTEXITCODE -ne 0) { throw "MSVC corpus ($Arch): the relink with units from their sources differs from the original" }
+if ($LASTEXITCODE -ne 0) { Show-LinkRecords; throw "MSVC corpus ($Arch): the relink with units from their sources differs from the original" }
 Write-Host "MSVC corpus ($Arch): relinked identically by link.exe, from split objects and with nine units from source"

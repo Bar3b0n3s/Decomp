@@ -100,6 +100,10 @@ Result<std::vector<std::byte>> write_split_object(const pe::Image& image, const 
             ++local.relocations;
         }
     }
+    for (const auto& [name, size] : spec.commons) {
+        w.add_common(name, size);
+        ++local.symbols;
+    }
     for (const auto& d : spec.directives) w.add_directive(d);
     for (const auto& name : keep) w.add_directive("/INCLUDE:" + name);
     for (const auto& name : spec.safe_seh_handlers) {

@@ -768,8 +768,10 @@ contains no matching or agent logic of its own:
    split objects that hold their addresses (or tied to a compiled object's own name with
    `/ALTERNATENAME`); a pooled COMDAT a compiled unit repeats is defined by the split unit that has it,
    so the linker keeps that copy; the entry point, the exports, the TLS and load configuration
-   directories' symbols, and x86 SAFESEH handlers are provided the same way; every import is pulled in
-   with `/INCLUDE`. Split objects carry the `@comp.id` of the compiler that made their originals (the
+   directories' symbols, and x86 SAFESEH handlers (from the load configuration's table, or the table
+   the linker wrote without one) are provided the same way; C common symbols the linker allocated in
+   `.bss` are declared again; every import is pulled in with `/INCLUDE` (on the command line when no
+   split object carries it). Split objects carry the `@comp.id` of the compiler that made their originals (the
    PDB's compile record matched against the Rich header), so link.exe counts the same objects, and the
    `@feat.00` that compiler build gives a probe compiled with the project's toolchain and flags (with
    `/GS` and `/sdl` from the compile record), which link.exe's feature-count debug record counts.

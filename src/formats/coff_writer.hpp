@@ -58,6 +58,8 @@ public:
     u32 add_symbol(std::string name, u32 value, i32 section, u8 storage_class = storage::external, u16 type = 0);
     // The handle of the undefined external `name` (added on first use).
     u32 undefined(std::string_view name);
+    // A common symbol: an uninitialized C global the linker allocates (`int g;`), undefined with its size.
+    u32 add_common(std::string name, u32 size);
     // An absolute symbol (@feat.00, @comp.id); static.
     u32 add_absolute(std::string name, u32 value);
     // The handle of a section's own symbol.

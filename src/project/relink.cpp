@@ -486,6 +486,7 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     // so split objects register the handlers they hold (and those of compiled units, which is harmless).
     std::map<std::string, std::vector<std::string>> seh_by_unit;
     std::vector<std::string> seh_elsewhere;
+    bool safe_seh_table = false;
     if (x86) {
         std::vector<u32> handlers = image.safe_seh_handlers();
         // Without a load configuration lld-link still writes the table; the PDB names it.
@@ -501,6 +502,16 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
                 }
             }
         }
+        // link.exe writes it as .rdata$sxdata, load configuration or not.
+        if (handlers.empty())
+            for (const auto& c : layout.contributions) {
+                if (!c.linker || c.name != ".rdata$sxdata") continue;
+                for (u32 at = c.rva; at + 4 <= c.end(); at += 4) {
+                    auto v = image.read_rva(at, 4);
+                    if (v) handlers.push_back(read_le<u32>(*v, 0).value_or(0));
+                }
+            }
+        safe_seh_table = !handlers.empty();
         for (u32 rva : handlers) {
             const auto* c = owner(rva);
             if (c && !c->linker && mode_of(c->unit) == LinkMode::split) {
@@ -513,6 +524,20 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
             }
         }
     }
+    // C common symbols (`int g;` in C): the linker allocated them in .bss itself, and split code reaches them
+    // only through bytes it does not read, so a split object declares them for it to allocate again. A
+    // common has a C name; another name there is an alias (an /ALTERNATENAME).
+    std::vector<std::pair<std::string, u32>> commons;
+    for (const auto& c : layout.contributions) {
+        if (!c.linker || !c.uninitialized() || c.size == 0 || unit_kind_of(c.unit) != UnitKind::linker) continue;
+        const Symbol* s = program.symbols().at(base + c.rva);
+        if (!s || s->is_static || s->source < SymbolSource::pdb_public) continue;
+        std::vector<std::string> names{s->name};
+        names.insert(names.end(), s->aliases.begin(), s->aliases.end());
+        auto it = std::ranges::find_if(names, [](const std::string& n) { return !n.empty() && n[0] != '?'; });
+        if (it != names.end()) commons.emplace_back(*it, c.size);
+    }
+
     // Every import is pulled in: split code reaches some only through bytes the linker does not read.
     std::map<u32, std::string> import_slots;
     for (const auto& imp : imports) {
@@ -610,6 +635,7 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
             spec.feat00 = feat00_for(link.unit.name);
             if (!directives_placed) {
                 spec.directives = directives;
+                spec.commons = commons;
                 spec.safe_seh_handlers.insert(spec.safe_seh_handlers.end(), seh_elsewhere.begin(), seh_elsewhere.end());
                 directives_placed = true;
             }
@@ -679,7 +705,7 @@ Result<RelinkResult> relink_project(const Project& project, const Program& progr
     result.linker = relink::linker_fit(relink::original_linker(image, compilers), linker.kind, relink::detect_linker_version(linker));
     relink::LinkRequest request;
     request.inputs = inputs;
-    request.flags = relink::image_link_flags(image, entry);
+    request.flags = relink::image_link_flags(image, entry, x86 ? std::optional<bool>(safe_seh_table) : std::nullopt);
     request.flags.insert(request.flags.end(), command_line_directives.begin(), command_line_directives.end());
     // A compiled unit's function the image has folded into another (identical COMDAT folding): the
     // original link folded, so this one must (unless decomp.json says how to optimize).
