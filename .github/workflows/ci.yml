@@ -258,11 +258,12 @@ jobs:
         shell: pwsh
         run: tests\corpus\build_corpus.ps1 -Arch x64 -MinExact 98
 
-      # The cl.exe-built corpus and its relink, to look into what the analysis or the relink gets wrong on it.
+      # The cl.exe-built corpus and round trip with their relinks, to look into what the analysis or the
+      # relink gets wrong on them.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: msvc-corpus
+          name: msvc-builds
           path: |
             build/corpus-msvc-x86/corpus.*
             build/corpus-msvc-x64/corpus.*
@@ -270,4 +271,12 @@ jobs:
             build/corpus-msvc-x64/obj/*.obj
             build/corpus-msvc-x86/project/.decomp/relink/out/corpus.exe
             build/corpus-msvc-x64/project/.decomp/relink/out/corpus.exe
+            build/msvc-roundtrip-x86/basic.*
+            build/msvc-roundtrip-x64/basic.*
+            build/msvc-roundtrip-x86/other.obj
+            build/msvc-roundtrip-x64/other.obj
+            build/msvc-roundtrip-x86/project/.decomp/relink/out/basic.exe
+            build/msvc-roundtrip-x64/project/.decomp/relink/out/basic.exe
+            build/msvc-roundtrip-x86/project/.decomp/relink/objects/*.obj
+            build/msvc-roundtrip-x64/project/.decomp/relink/objects/*.obj
           if-no-files-found: ignore

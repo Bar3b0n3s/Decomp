@@ -121,15 +121,44 @@ function Test-Links {
         "original-without-debug-t" = $original + (Copy-Objects "no-debug-t" @(".debug`$T"))
         "original-without-debug" = $original + (Copy-Objects "no-debug" @(".debug`$S", ".debug`$T", ".debug`$F", ".chks64"))
     }
+    # An object cl.exe made of an empty file, beside the split objects: whether any of its objects spares them.
+    Set-Content -Path "$exp\empty.c" -Value "/* nothing */"
+    & cl.exe @cflags /EHs-c- "$exp\empty.c" "/Fo$exp\empty.obj" | Out-Null
+    $runs["split-objects-and-an-empty-object"] = $relinkFlags + $split + "$exp\empty.obj" + $libraries
+    # Split objects reach everything through __ImageBase, which no original object names.
+    Set-Content -Path "$exp\image_base.c" -Value "extern char __ImageBase; char* decomp_image_base(void) { return &__ImageBase; }"
+    & cl.exe @cflags /EHs-c- "$exp\image_base.c" "/Fo$exp\image_base.obj" | Out-Null
+    $runs["original-and-an-image-base-user"] = $original + $objects + "$exp\image_base.obj"
+    $runs["split-objects-forced"] = $relinkFlags + "/force:unresolved" + $split + $libraries
+    $runs["split-objects-no-volatile-metadata"] = $relinkFlags + "/volatilemetadata:no" + $split + $libraries
     foreach ($name in $runs.Keys) {
         $output = & link.exe @($runs[$name]) "/out:$exp\$name.exe" "/pdb:$exp\$name.pdb" "/map:$exp\$name.map" 2>&1 | Out-String
         Write-Host "  experiment $name : exit $LASTEXITCODE"
         $output -split "`n" | Where-Object { $_ -match "error|warning|SAFESEH|safe|load_config|volatile" } | Select-Object -First 15 |
             ForEach-Object { Write-Host "    $_" }
         if (Test-Path "$exp\$name.map") {
-            Select-String -Path "$exp\$name.map" -Pattern "sxdata|voltmd|load_config|volatile_metadata|safe_se" |
+            Select-String -Path "$exp\$name.map" -Pattern "sxdata|voltmd|volt|load_config|volatile_metadata|safe_se" |
                 ForEach-Object { Write-Host "    map: $($_.Line.Trim())" }
         }
+    }
+    # One object swapped at a time: which split objects make a link of the original ones ask for a load
+    # configuration, and which original objects spare a link of the split ones from it.
+    function Test-Link([string[]]$arguments) {
+        $output = & link.exe @arguments "/out:$exp\swap.exe" "/pdb:$exp\swap.pdb" 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0) { return "links" }
+        if ($output -match "__load_config_used") { return "asks for a load configuration" }
+        $first = $output -split "`n" | Where-Object { $_ -match "error" } | Select-Object -First 1
+        return "fails: $("$first".Trim())"
+    }
+    $originalByName = @{}
+    foreach ($object in $objects) { $originalByName[(Split-Path -Leaf $object)] = $object }
+    foreach ($s in $split) {
+        $name = (Split-Path -Leaf $s) -replace '^\d{3}_', ''
+        $o = $originalByName[$name]
+        if (-not $o) { Write-Host "  swap $name : no original object"; continue }
+        $amongOriginals = Test-Link ($original + @($objects | ForEach-Object { if ($_ -eq $o) { $s } else { $_ } }) + $libraries)
+        $amongSplit = Test-Link ($relinkFlags + @($split | ForEach-Object { if ($_ -eq $s) { $o } else { $_ } }) + $libraries)
+        Write-Host "  swap $name : split among the originals $amongOriginals; original among the split $amongSplit"
     }
 }
 & $decomp -C $project relink --all-split

@@ -5,6 +5,7 @@
 #include "core/fs.hpp"
 #include "core/strings.hpp"
 #include "formats/coff.hpp"
+#include "formats/coff_writer.hpp"
 #include "formats/pdb.hpp"
 #include "formats/pe.hpp"
 #include "llvm_fixture.hpp"
@@ -146,6 +147,47 @@ TEST_CASE("relink: split objects carry their compiler's marks") {
     const auto marked = relink::write_split_object(program.image(), spec).value();
     CHECK(value_of(marked, "@comp.id") == 0x01058d87u);
     CHECK(value_of(marked, "@feat.00") == 0x80010191u);
+}
+
+TEST_CASE("relink: split x64 .pdata says which function and unwind data each entry is for") {
+    // As compilers write it: relocations against the sections holding the function and its unwind data,
+    // and a function's COMDAT taking its .pdata along. link.exe builds the exception table from these.
+    auto program = Program::open(test::fixture("x64/basic.exe")).value();
+    const auto reader = pdb::Reader::load(*program.pdb_path()).value();
+    const auto layout = layout_from_pdb(reader, program.image());
+    relink::SplitObjectSpec spec;
+    for (const auto* c : layout.of_unit("basic.obj"))
+        if (!c->linker && c->size) spec.contributions.push_back(c);
+    const auto object = coff::Object::parse(relink::write_split_object(program.image(), spec).value()).value();
+    int entries = 0;
+    for (const auto& s : object.sections()) {
+        if (s.name != ".pdata") continue;
+        CAPTURE(s.number);
+        REQUIRE(s.size == 12);
+        ++entries;
+        REQUIRE(s.relocations.size() == 3);
+        std::vector<std::string> targets;
+        for (const auto& r : s.relocations) {
+            CHECK(r.type == coff::reloc_amd64::addr32nb);
+            const auto* symbol = object.symbol_at_index(r.symbol_index);
+            REQUIRE(symbol);
+            REQUIRE(symbol->is_defined());
+            targets.push_back(object.section(symbol->section_number)->name);
+        }
+        // The function, its end, and its unwind information.
+        CHECK(targets[0].starts_with(".text"));
+        CHECK(targets[1] == targets[0]);
+        CHECK(targets[2] == ".xdata");
+        const auto* function = object.section(object.symbol_at_index(s.relocations[0].symbol_index)->section_number);
+        if (function->comdat) {
+            REQUIRE(s.comdat);
+            CHECK(s.comdat->selection == coff::comdat_select::associative);
+            CHECK(s.comdat->associated_section == function->number);
+        }
+        // The addresses are offsets in their sections now: the function's entry starts its section.
+        CHECK(read_le<u32>(s.data, 0) == 0u);
+    }
+    CHECK(entries == 3);
 }
 
 TEST_CASE("relink: comparing images takes the build's identity over and finds the first difference") {

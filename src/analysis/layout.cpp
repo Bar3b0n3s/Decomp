@@ -102,6 +102,54 @@ std::vector<std::string> link_order(const ImageLayout& layout, const std::vector
     return out;
 }
 
+void attribute_exception_table(ImageLayout& layout, const pe::Image& image) {
+    if (image.machine() != pe::machine::amd64) return;
+    const auto [table, size] = image.data_directory(3);
+    if (!table || size < 12) return;
+    const u32 end = table + size;
+    bool held = true;
+    for (u32 at = table; at + 12 <= end && held; at += 12) {
+        const Contribution* c = layout.at(at);
+        held = c && !c->linker;
+    }
+    if (held) return;
+    // The linker's part of the table goes; what it holds past the table stays.
+    std::vector<Contribution> entries;
+    std::erase_if(layout.contributions, [&](const Contribution& c) {
+        if (!c.linker || !c.size || c.end() <= table || c.rva >= end) return false;
+        if (c.rva < table) {
+            Contribution before = c;
+            before.size = table - c.rva;
+            entries.push_back(std::move(before));
+        }
+        if (c.end() > end) {
+            Contribution after = c;
+            after.rva = end;
+            after.size = c.end() - end;
+            entries.push_back(std::move(after));
+        }
+        return true;
+    });
+    for (u32 at = table; at + 12 <= end; at += 12) {
+        if (layout.at(at)) continue;  // still a unit's
+        const auto bytes = image.read_rva(at, 4);
+        const u32 begin = bytes ? read_le<u32>(*bytes, 0).value_or(0) : 0;
+        const Contribution* function = begin ? layout.at(begin) : nullptr;
+        if (!function || function->linker) continue;
+        Contribution c;
+        c.rva = at;
+        c.size = 12;
+        c.section = section_name_at(image, at);
+        c.name = ".pdata";
+        // Read-only data aligned to 4, a COMDAT with its function's code when that is one.
+        c.characteristics = 0x40300040u | (function->characteristics & pe::scn::lnk_comdat);
+        c.unit = function->unit;
+        entries.push_back(std::move(c));
+    }
+    layout.contributions.insert(layout.contributions.end(), entries.begin(), entries.end());
+    std::ranges::stable_sort(layout.contributions, {}, &Contribution::rva);
+}
+
 ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image) {
     ImageLayout layout;
     layout.source = LayoutSource::pdb;
@@ -129,6 +177,7 @@ ImageLayout layout_from_pdb(const pdb::Reader& pdb, const pe::Image& image) {
         for (auto& c : layout.contributions)
             if (c.name.empty() && c.rva >= g.rva && c.rva < g.rva + std::max<u32>(g.size, 1)) c.name = g.name;
     name_contributions(layout, image);
+    attribute_exception_table(layout, image);
     return layout;
 }
 

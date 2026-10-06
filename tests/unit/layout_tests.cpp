@@ -96,6 +96,66 @@ TEST_CASE("layout: the PDB's section contributions, named after their input sect
     }
 }
 
+TEST_CASE("layout: x64 .pdata the linker holds goes back to the units of its functions") {
+    // lld-link's PDBs give each function's .pdata to its unit, as the fixture's does; link.exe's give the
+    // sorted table to the linker, or to no module. Both made from the fixture's, and taken back.
+    auto program = Program::open(test::fixture("x64/basic.exe")).value();
+    const auto& image = program.image();
+    const auto original = pdb_layout(program);
+    const auto [table, size] = image.data_directory(3);
+    REQUIRE(size >= 12);
+    auto in_table = [&](const ImageLayout& layout) {
+        std::vector<Contribution> out;
+        for (const auto& c : layout.contributions)
+            if (c.size && c.end() > table && c.rva < table + size) out.push_back(c);
+        return out;
+    };
+    const auto entries = in_table(original);
+    REQUIRE(entries.size() == size / 12);
+    const auto* pdata = image.section_for_rva(table);
+    REQUIRE(pdata);
+    for (const bool linker_held : {true, false}) {
+        CAPTURE(linker_held);
+        auto layout = original;
+        std::erase_if(layout.contributions, [](const Contribution& c) { return c.section == ".pdata"; });
+        if (linker_held) {
+            Contribution linker;
+            linker.rva = pdata->virtual_address;
+            linker.size = pdata->virtual_size + 16;  // and something of the linker's past the table
+            linker.section = ".pdata";
+            linker.unit = "* Linker *";
+            linker.linker = true;
+            layout.contributions.push_back(linker);
+            std::ranges::stable_sort(layout.contributions, {}, &Contribution::rva);
+        }
+        attribute_exception_table(layout, image);
+        const auto back = in_table(layout);
+        REQUIRE(back.size() == entries.size());
+        for (usize i = 0; i < back.size(); ++i) {
+            CAPTURE(i);
+            CHECK(back[i].rva == entries[i].rva);
+            CHECK(back[i].size == 12);
+            CHECK(back[i].unit == entries[i].unit);
+            CHECK(back[i].name == ".pdata");
+            CHECK(back[i].section == ".pdata");
+            CHECK_FALSE(back[i].linker);
+            CHECK((back[i].characteristics & ~pe::scn::lnk_comdat) == 0x40300040u);
+            CHECK((back[i].characteristics & pe::scn::lnk_comdat) == (entries[i].characteristics & pe::scn::lnk_comdat));
+        }
+        if (linker_held) {
+            // What the linker held past the table stays its own.
+            const auto* past = layout.at(pdata->virtual_address + pdata->virtual_size + 15);
+            REQUIRE(past);
+            CHECK(past->linker);
+        }
+    }
+    // A table the units hold stays as it is.
+    auto same = original;
+    attribute_exception_table(same, image);
+    CHECK(in_table(same).size() == entries.size());
+    CHECK(same.contributions.size() == original.contributions.size());
+}
+
 TEST_CASE("layout: without a PDB, cut by the units of the symbols and the linker's own tables") {
     auto program = Program::open(test::fixture("x86/basic.exe"));
     REQUIRE(program);

@@ -456,7 +456,9 @@ the import library tool's. It also counts the objects in a debug record by the f
 compiler leaves in `@feat.00` (the compiler's generation, `/GS`, `/sdl`), which neither the image nor the
 PDB keeps: a split object of a unit the project's compiler build made carries the bits that compiler
 gives an object compiled with the project's flags, with `/GS` and `/sdl` as the unit's compile record
-says.
+says. An x64 split object's `.pdata` entries are relocated against the sections holding their function
+and its unwind data, and follow a COMDAT function as associative COMDATs, as a compiler writes them:
+link.exe builds the exception directory from the `.pdata` of the functions it keeps.
 
 A unit's exception-handling and unwind data (C++ EH tables, SEH scope tables, x86 SAFESEH handler
 registrations, x64 `.xdata` and `.pdata`) comes from its source like its code: the compiler makes it
